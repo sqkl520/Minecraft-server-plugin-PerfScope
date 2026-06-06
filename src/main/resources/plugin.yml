@@ -1,0 +1,36 @@
+name: PerfScope
+version: 1.0.0
+main: cn.perfscope.PerfScope
+api-version: "1.20"
+description: 高性能服务器性能监测插件 - 兼容 Paper/Spigot/Bukkit
+author: PerfScope Team
+website: https://github.com/PerfScope
+
+# 兼容 Paper / Spigot / Bukkit 全系列
+# Paper 上可获得完整 MSPT/红石/网络/ActionBar 功能
+# Spigot/Bukkit 上 MSPT 通过 TPS 反推估算，部分功能降级
+
+commands:
+  perfscope:
+    description: PerfScope 主指令 - 查看实时性能数据
+    usage: |
+      /perfscope <子命令>
+    aliases: [pscope, perf]
+    permission: perfscope.use
+    permission-message: 你没有权限使用此指令喵
+
+permissions:
+  perfscope.use:
+    description: 允许使用 PerfScope 基本指令
+    default: op
+  perfscope.admin:
+    description: 允许使用 PerfScope 管理指令
+    default: op
+    children:
+      perfscope.use: true
+  perfscope.reload:
+    description: 允许重载 PerfScope 配置
+    default: op
+  perfscope.export:
+    description: 允许导出性能报告
+    default: op

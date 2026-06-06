@@ -1,0 +1,112 @@
+# ==========================================
+# PerfScope - 服务器性能监测插件 配置文件
+# ==========================================
+
+# 常规设置
+general:
+  # 数据采集间隔 (tick), 20 = 1秒
+  update_interval: 20
+  # 语言 (暂支持 zh_cn)
+  language: zh_cn
+  # 是否在插件启动时显示详细信息
+  verbose_startup: true
+  # 是否启用调试日志
+  debug: false
+
+# TPS 监测
+tps:
+  enabled: true
+  # TPS 告警阈值
+  warning_threshold: 18.0
+  critical_threshold: 15.0
+
+# MSPT 监测
+mspt:
+  enabled: true
+  # MSPT 告警阈值 (毫秒)
+  warning_threshold: 45.0
+  critical_threshold: 50.0
+
+# 玩家监测
+players:
+  enabled: true
+  # 玩家数告警阈值 (百分比 of max_players)
+  warning_threshold: 80
+  critical_threshold: 95
+
+# 实体监测
+entities:
+  enabled: true
+  # 总实体数告警阈值
+  total_warning_threshold: 2000
+  total_critical_threshold: 3000
+  # 按实体类型单独监测 (不在此列表中的类型也会被统计)
+  tracked_types:
+    - ZOMBIE
+    - SKELETON
+    - CREEPER
+    - ITEM
+    - ITEM_FRAME
+    - ARMOR_STAND
+    - VILLAGER
+    - MINECART
+
+# 区块监测
+chunks:
+  enabled: true
+  # 加载区块数告警阈值 (每世界)
+  loaded_warning_threshold: 1500
+  loaded_critical_threshold: 2500
+
+# 内存监测
+memory:
+  enabled: true
+  # 堆内存使用率告警阈值 (百分比)
+  heap_warning_threshold: 80
+  heap_critical_threshold: 90
+
+# CPU 监测
+cpu:
+  enabled: true
+  # 进程 CPU 使用率告警阈值 (百分比)
+  process_warning_threshold: 80.0
+  system_warning_threshold: 90.0
+
+# 红石监测
+redstone:
+  enabled: true
+
+# Tile Entity 监测
+tile_entities:
+  enabled: true
+
+# 网络监测
+network:
+  enabled: true
+  # 网络流量告警阈值 (bytes/sec)
+  warning_threshold: 10485760  # 10 MB/s
+
+# 报告生成
+report:
+  # 是否启用定时自动导出
+  auto_export: false
+  # 自动导出间隔 (分钟)
+  auto_export_interval: 30
+  # 报告格式: html, txt, json
+  format: html
+  # 报告保留天数 (0 = 永久保留)
+  retention_days: 7
+  # 是否在报告中包含详细信息
+  verbose_report: true
+
+# 各世界单独设置 (可覆盖全局设置)
+worlds:
+  world:
+    entities:
+      total_warning_threshold: 2500
+  world_nether:
+    entities:
+      total_warning_threshold: 2000
+  world_the_end:
+    entities:
+      total_warning_threshold: 1500

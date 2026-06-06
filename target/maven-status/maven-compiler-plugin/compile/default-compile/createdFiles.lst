@@ -1,0 +1,10 @@
+cn\perfscope\config\ConfigManager$WorldSettings.class
+cn\perfscope\compat\ServerCompat$ServerType.class
+cn\perfscope\metrics\MetricsSnapshot.class
+cn\perfscope\PerfScope.class
+cn\perfscope\config\ConfigManager$ConfigData.class
+cn\perfscope\compat\ServerCompat.class
+cn\perfscope\config\ConfigManager.class
+cn\perfscope\metrics\MetricsCollector.class
+cn\perfscope\command\PerfScopeCommand.class
+cn\perfscope\report\ReportGenerator.class

@@ -1,0 +1,7 @@
+D:\Server\MCServers\Server plugin\PerfScope\src\main\java\cn\perfscope\PerfScope.java
+D:\Server\MCServers\Server plugin\PerfScope\src\main\java\cn\perfscope\command\PerfScopeCommand.java
+D:\Server\MCServers\Server plugin\PerfScope\src\main\java\cn\perfscope\config\ConfigManager.java
+D:\Server\MCServers\Server plugin\PerfScope\src\main\java\cn\perfscope\compat\ServerCompat.java
+D:\Server\MCServers\Server plugin\PerfScope\src\main\java\cn\perfscope\metrics\MetricsSnapshot.java
+D:\Server\MCServers\Server plugin\PerfScope\src\main\java\cn\perfscope\metrics\MetricsCollector.java
+D:\Server\MCServers\Server plugin\PerfScope\src\main\java\cn\perfscope\report\ReportGenerator.java
