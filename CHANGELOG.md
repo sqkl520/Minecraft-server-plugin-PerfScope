@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased] - v1.1 Wave 1 止血修复
+
+### Fixed
+- P0-5：采集模块异常隔离——每模块独立 try-catch + unavailable 标记，单模块异常不再拖垮整轮快照
+- P0-6：TE 计数 Bukkit 降级路径值传递 bug——总数恒为 0，改为返回值承载；Paper 路径反射缓存
+- P0-7：网络/红石假功能下线——删除空实现采集与启发式检测，未采集统一显示"不可用"
+- P0-9：服务端识别改特征检测——废弃类名子串判断（Paper 曾被误判为 BUKKIT），改为标志类+API方法+Bukkit.getName 三层
+- P0-10：权限树断裂——admin 补齐 use/reload/export/alert children，新增 perfscope.alert，Tab 补全按权限过滤
+- P0-11：报告手拼 JSON/HTML 零转义——JSON 改 Gson，HTML 最小转义，UTF-8 写盘，文件名毫秒+计数防覆盖
+- P0-12：monitor 遍历 remove 抛 CME——改 Iterator.remove + 并发 Set + 退出监听 + shutdown 接线
+- P0-13：边界值——CPU -1 显示"未知"、maxPlayers=0 除零、MSPT 0 值误读为"未知"
+- P0-14：假 reload——改为 stop→重读→start 重建采集与自动报告任务，getCommand 加 null 保护
+
 ## [Unreleased] - 2026-06-07
 
 ### Added

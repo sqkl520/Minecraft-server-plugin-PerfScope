@@ -19,9 +19,11 @@ package cn.perfscope.compat;
 
 import org.bukkit.Bukkit;
 
+import java.util.Locale;
+
 /**
  * 服务端兼容层 - 检测当前运行的服务端类型并标记可用功能
- * 支持 Paper / Spigot / Bukkit 及其衍生服务端
+ * 支持 Paper / Spigot / Bukkit / Folia 及 Paper 分支；类型仅展示，功能走能力 flag
  */
 public final class ServerCompat {
 
@@ -37,26 +39,14 @@ public final class ServerCompat {
     public static final boolean PAPER_TILE_ENTITY_COUNT_AVAILABLE;
     /** Paper ActionBar API 是否可用 */
     public static final boolean PAPER_ACTION_BAR_AVAILABLE;
-    /** Paper 红石追踪 API 是否可用 */
-    public static final boolean PAPER_REDSTONE_AVAILABLE;
-    /** 网络统计 API 是否可用 */
-    public static final boolean PAPER_NETWORK_AVAILABLE;
     /** Adventure API 是否可用 */
     public static final boolean ADVENTURE_AVAILABLE;
 
     static {
-        String serverClassName = Bukkit.getServer().getClass().getName();
-        String bukkitVersion = Bukkit.getBukkitVersion();
-        SERVER_VERSION = bukkitVersion;
+        SERVER_VERSION = Bukkit.getBukkitVersion();
 
-        // 检测服务端类型
-        if (serverClassName.contains("paper") || serverClassName.contains("Paper")) {
-            TYPE = ServerType.PAPER;
-        } else if (serverClassName.contains("spigot") || serverClassName.contains("Spigot")) {
-            TYPE = ServerType.SPIGOT;
-        } else {
-            TYPE = ServerType.BUKKIT;
-        }
+        // P0-9：三级特征检测确定服务端类型（仅用于展示；功能判断走能力 flag）
+        TYPE = detectServerType();
 
         // 提取服务端名称
         String implName = Bukkit.getServer().getName();
@@ -71,14 +61,77 @@ public final class ServerCompat {
         PAPER_AVG_TICK_AVAILABLE = checkPaperAvgTick();
         PAPER_TILE_ENTITY_COUNT_AVAILABLE = checkPaperTileEntityCount();
         PAPER_ACTION_BAR_AVAILABLE = checkPaperActionBar();
-        PAPER_REDSTONE_AVAILABLE = checkPaperRedstone();
-        PAPER_NETWORK_AVAILABLE = checkPaperNetwork();
         ADVENTURE_AVAILABLE = checkAdventure();
     }
 
     private ServerCompat() {}
 
     // ==================== 检测方法 ====================
+
+    /**
+     * P0-9：三级特征检测（仅用于展示；功能判断一律走能力 flag）。
+     * 优先级：① 标志类存在性（Folia → Paper 系 → Spigot）→ ② API 方法存在性
+     * → ③ Bukkit.getName() 兜底。恒返回非空，异常下沉到下一级。
+     */
+    private static ServerType detectServerType() {
+        try {
+            // ① Folia 标志类
+            if (hasClass("io.papermc.paper.threadedregions.RegionizedServer")) {
+                return ServerType.FOLIA;
+            }
+            // ② Paper 系标志类（含 Purpur / Pufferfish 等 Paper 分支）
+            if (hasClass("com.destroystokyo.paper.PaperConfig")
+                    || hasClass("io.papermc.paper.configuration.Configuration")
+                    || hasClass("org.purpurmc.purpur.PurpurConfig")
+                    || hasClass("gg.pufferfish.pufferfish.PufferfishConfig")) {
+                return ServerType.PAPER;
+            }
+            // ③ Spigot 标志类
+            if (hasClass("org.spigotmc.SpigotConfig")) {
+                return ServerType.SPIGOT;
+            }
+            // ④ API 方法存在性：CraftBukkit 系服务端实现 getTPS
+            if (hasServerMethod("getTPS")) {
+                return ServerType.SPIGOT;
+            }
+        } catch (Throwable t) {
+            // 特征检测异常则下沉到名称兜底，保证恒有 TYPE 赋值
+        }
+        // ⑤ 兜底：Bukkit.getName()
+        try {
+            String name = String.valueOf(Bukkit.getName()).toLowerCase(Locale.ROOT);
+            if (name.contains("folia")) {
+                return ServerType.FOLIA;
+            }
+            if (name.contains("paper") || name.contains("purpur") || name.contains("pufferfish")) {
+                return ServerType.PAPER;
+            }
+            if (name.contains("spigot") || name.contains("craftbukkit")) {
+                return ServerType.SPIGOT;
+            }
+        } catch (Throwable ignored) {
+            // getName 异常则落到 BUKKIT
+        }
+        return ServerType.BUKKIT;
+    }
+
+    private static boolean hasClass(String className) {
+        try {
+            Class.forName(className);
+            return true;
+        } catch (ClassNotFoundException | LinkageError e) {
+            return false;
+        }
+    }
+
+    private static boolean hasServerMethod(String methodName) {
+        try {
+            Bukkit.getServer().getClass().getMethod(methodName);
+            return true;
+        } catch (NoSuchMethodException | SecurityException e) {
+            return false;
+        }
+    }
 
     private static boolean checkPaperMSPT() {
         try {
@@ -119,40 +172,6 @@ public final class ServerCompat {
         }
     }
 
-    private static boolean checkPaperRedstone() {
-        try {
-            Object server = Bukkit.getServer();
-            java.lang.reflect.Method getServer = server.getClass().getMethod("getServer");
-            Object nms = getServer.invoke(server);
-            for (java.lang.reflect.Method m : nms.getClass().getDeclaredMethods()) {
-                if (m.getName().contains("Redstone") && m.getParameterCount() == 0) {
-                    return true;
-                }
-            }
-            return false;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    private static boolean checkPaperNetwork() {
-        try {
-            Object server = Bukkit.getServer();
-            java.lang.reflect.Method getServer = server.getClass().getMethod("getServer");
-            Object nms = getServer.invoke(server);
-            for (java.lang.reflect.Method m : nms.getClass().getDeclaredMethods()) {
-                if ((m.getName().contains("Network") || m.getName().contains("Traffic"))
-                    && m.getParameterCount() == 0
-                    && m.getReturnType() != void.class) {
-                    return true;
-                }
-            }
-            return false;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
     private static boolean checkAdventure() {
         try {
             Class.forName("net.kyori.adventure.text.Component");
@@ -188,13 +207,18 @@ public final class ServerCompat {
         return TYPE == ServerType.BUKKIT;
     }
 
+    public static boolean isFolia() {
+        return TYPE == ServerType.FOLIA;
+    }
+
     /**
      * 服务端类型枚举
      */
     public enum ServerType {
         PAPER("Paper"),
         SPIGOT("Spigot"),
-        BUKKIT("Bukkit");
+        BUKKIT("Bukkit"),
+        FOLIA("Folia");
 
         private final String displayName;
 

@@ -18,6 +18,7 @@
 package cn.perfscope.metrics;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 性能指标快照 - 包含某一时刻的所有性能数据
@@ -66,18 +67,9 @@ public class MetricsSnapshot {
     public long gcCount;
     public long gcTime;
 
-    // === 红石 ===
-    public int redstoneTicks;
-
     // === Tile Entity ===
     public int tileEntityCount;
     public Map<String, Integer> tileEntitiesByWorld;
-
-    // === 网络 ===
-    public long bytesSent;
-    public long bytesReceived;
-    public long bytesSentPerSec;
-    public long bytesReceivedPerSec;
 
     // === 服务器 ===
     public long uptimeSeconds;
@@ -90,6 +82,21 @@ public class MetricsSnapshot {
     public List<String> activeWarnings = new ArrayList<>();
     public List<String> activeCriticals = new ArrayList<>();
 
+    // === 模块可用性（P0-5）：采集失败或被配置禁用的模块名集合 ===
+    // 展示层约定：命中本集合的模块显示"不可用"（灰色），而非 0/空值
+    public static final String MODULE_TPS = "tps";
+    public static final String MODULE_MSPT = "mspt";
+    public static final String MODULE_PLAYERS = "players";
+    public static final String MODULE_ENTITIES = "entities";
+    public static final String MODULE_CHUNKS = "chunks";
+    public static final String MODULE_MEMORY = "memory";
+    public static final String MODULE_CPU = "cpu";
+    public static final String MODULE_GC = "gc";
+    public static final String MODULE_TILE_ENTITIES = "tile_entities";
+    public static final String MODULE_SERVER = "server";
+
+    public Set<String> unavailable = ConcurrentHashMap.newKeySet();
+
     // === 时间戳 ===
     public long timestamp;
 
@@ -100,5 +107,11 @@ public class MetricsSnapshot {
         this.chunksByWorld = new LinkedHashMap<>();
         this.forceLoadedChunksByWorld = new LinkedHashMap<>();
         this.tileEntitiesByWorld = new LinkedHashMap<>();
+        // 哨兵默认值（P0-13）：MSPT/CPU 未采集时为 -1（未知），而非误导性的 0
+        this.msptAvg = -1;
+        this.msptMin = -1;
+        this.msptMax = -1;
+        this.processCpuLoad = -1;
+        this.systemCpuLoad = -1;
     }
 }

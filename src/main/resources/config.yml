@@ -72,19 +72,21 @@ cpu:
   process_warning_threshold: 80.0
   system_warning_threshold: 90.0
 
-# 红石监测
-redstone:
-  enabled: true
+# 红石监测 —— v1.1 已下线（此前为空实现/启发式检测，未真正采集）
+# 以下配置不再被读取，仅保留注释供老用户参考，可安全删除
+#redstone:
+#  enabled: true
 
 # Tile Entity 监测
 tile_entities:
   enabled: true
 
-# 网络监测
-network:
-  enabled: true
-  # 网络流量告警阈值 (bytes/sec)
-  warning_threshold: 10485760  # 10 MB/s
+# 网络监测 —— v1.1 已下线（此前为硬编码 0 的假数据，未实现）
+# 以下配置不再被读取，仅保留注释供老用户参考，可安全删除
+#network:
+#  enabled: true
+#  # 网络流量告警阈值 (bytes/sec)
+#  warning_threshold: 10485760  # 10 MB/s
 
 # 报告生成
 report:

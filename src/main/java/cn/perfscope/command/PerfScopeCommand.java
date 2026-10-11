@@ -37,11 +37,15 @@ import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
 import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.text.SimpleDateFormat;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -49,15 +53,15 @@ import java.util.stream.Collectors;
  * /perfscope (无参数) 或 /perfscope all  →  全量诊断
  * /perfscope tps|mspt|entities|...        →  专项检测
  */
-public class PerfScopeCommand implements CommandExecutor, TabCompleter {
+public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener {
 
     private final PerfScope plugin;
     private final MetricsCollector collector;
     private final ReportGenerator reportGen;
     private final ConfigManager configManager;
 
-    // 实时监测模式中的玩家
-    private final Set<UUID> monitoringPlayers = new HashSet<>();
+    // 实时监测模式中的玩家（P0-12：并发 Set，遍历清理线程安全）
+    private final Set<UUID> monitoringPlayers = ConcurrentHashMap.newKeySet();
     private int monitorTaskId = -1;
 
     // 颜色常量
@@ -163,39 +167,68 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter {
         sender.sendMessage(Component.text("服务端: " + ServerCompat.getServerName(), GRAY));
         sender.sendMessage(Component.text("采集时间: " + new SimpleDateFormat("HH:mm:ss").format(new Date(snap.timestamp)), GRAY));
 
-        // TPS
-        sender.sendMessage(yellowLabel("TPS (1m/5m/15m): ")
-            .append(formatTpsComponent(snap.tps1m))
-            .append(Component.text(" / ", WHITE))
-            .append(formatTpsComponent(snap.tps5m))
-            .append(Component.text(" / ", WHITE))
-            .append(formatTpsComponent(snap.tps15m)));
+        // TPS（P0-5：模块不可用显示"不可用"）
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_TPS)) {
+            sender.sendMessage(yellowLabel("TPS (1m/5m/15m): ")
+                .append(Component.text("不可用", GRAY)));
+        } else {
+            sender.sendMessage(yellowLabel("TPS (1m/5m/15m): ")
+                .append(formatTpsComponent(snap.tps1m))
+                .append(Component.text(" / ", WHITE))
+                .append(formatTpsComponent(snap.tps5m))
+                .append(Component.text(" / ", WHITE))
+                .append(formatTpsComponent(snap.tps15m)));
+        }
 
-        // MSPT
-        Component msptSource = ServerCompat.PAPER_MSPT_AVAILABLE ? Component.empty()
-            : Component.text(" (估算)", GRAY);
-        sender.sendMessage(yellowLabel("MSPT (avg/min/max): ")
-            .append(formatMSPTComponent(snap.msptAvg))
-            .append(msptSource)
-            .append(Component.text(" / ", WHITE))
-            .append(Component.text(String.format("%.2f", snap.msptMin) + "ms", WHITE))
-            .append(Component.text(" / ", WHITE))
-            .append(Component.text(String.format("%.2f", snap.msptMax) + "ms", WHITE)));
+        // MSPT（P0-5：先判模块级"不可用"；P0-13：再判 -1 哨兵显示"未知"）
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT)) {
+            sender.sendMessage(yellowLabel("MSPT (avg/min/max): ")
+                .append(Component.text("不可用", GRAY)));
+        } else {
+            Component msptSource = ServerCompat.PAPER_MSPT_AVAILABLE ? Component.empty()
+                : Component.text(" (估算)", GRAY);
+            Component msptMinAll = snap.msptMin <= 0 ? Component.text("未知", GRAY)
+                : Component.text(String.format("%.2f", snap.msptMin) + "ms", WHITE);
+            Component msptMaxAll = snap.msptMax <= 0 ? Component.text("未知", GRAY)
+                : Component.text(String.format("%.2f", snap.msptMax) + "ms", WHITE);
+            sender.sendMessage(yellowLabel("MSPT (avg/min/max): ")
+                .append(formatMSPTComponent(snap.msptAvg))
+                .append(msptSource)
+                .append(Component.text(" / ", WHITE))
+                .append(msptMinAll)
+                .append(Component.text(" / ", WHITE))
+                .append(msptMaxAll));
+        }
 
-        // 在线玩家
-        sender.sendMessage(goldLabel("在线玩家: ")
-            .append(Component.text(snap.playerCount + " / " + snap.maxPlayers, WHITE)));
+        // 在线玩家（P0-5：模块不可用显示"不可用"）
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_PLAYERS)) {
+            sender.sendMessage(goldLabel("在线玩家: ")
+                .append(Component.text("不可用", GRAY)));
+        } else {
+            sender.sendMessage(goldLabel("在线玩家: ")
+                .append(Component.text(snap.playerCount + " / " + snap.maxPlayers, WHITE)));
+        }
 
-        // 实体总数
-        TextColor entityColor = snap.totalEntities > configManager.get().entities_totalWarningThreshold ? RED
-            : (snap.totalEntities > 200 ? YELLOW : GREEN);
-        sender.sendMessage(goldLabel("实体总数: ")
-            .append(Component.text(String.valueOf(snap.totalEntities), entityColor)));
+        // 实体总数（P0-5：模块不可用显示"不可用"）
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_ENTITIES)) {
+            sender.sendMessage(goldLabel("实体总数: ")
+                .append(Component.text("不可用", GRAY)));
+        } else {
+            TextColor entityColor = snap.totalEntities > configManager.get().entities_totalWarningThreshold ? RED
+                : (snap.totalEntities > 200 ? YELLOW : GREEN);
+            sender.sendMessage(goldLabel("实体总数: ")
+                .append(Component.text(String.valueOf(snap.totalEntities), entityColor)));
+        }
 
-        // 加载区块
-        sender.sendMessage(goldLabel("加载区块: ")
-            .append(Component.text(String.valueOf(snap.totalLoadedChunks), WHITE))
-            .append(Component.text(" (强加载: " + snap.totalForceLoadedChunks + ")", GRAY)));
+        // 加载区块（P0-5：模块不可用显示"不可用"）
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_CHUNKS)) {
+            sender.sendMessage(goldLabel("加载区块: ")
+                .append(Component.text("不可用", GRAY)));
+        } else {
+            sender.sendMessage(goldLabel("加载区块: ")
+                .append(Component.text(String.valueOf(snap.totalLoadedChunks), WHITE))
+                .append(Component.text(" (强加载: " + snap.totalForceLoadedChunks + ")", GRAY)));
+        }
 
         // === 服务器级诊断 ===
         sender.sendMessage(Component.text("--- 服务器级诊断 ---", GOLD, TextDecoration.BOLD));
@@ -227,47 +260,59 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter {
                 .append(Component.text(String.valueOf(tileEntities), WHITE)));
         }
 
-        // 内存
-        long usedMem = snap.heapUsed / 1024 / 1024;
-        long maxMem = snap.heapMax / 1024 / 1024;
-        TextColor memColor = snap.heapUsagePercent >= 90 ? RED
-            : (snap.heapUsagePercent >= 80 ? YELLOW : GREEN);
-        sender.sendMessage(goldLabel("内存: ")
-            .append(Component.text(usedMem + "MB / " + maxMem + "MB", WHITE))
-            .append(Component.text(" (" + snap.heapUsagePercent + "%)", memColor)));
-
-        // CPU
-        sender.sendMessage(goldLabel("CPU: ")
-            .append(Component.text(String.format("进程 %.1f%%", snap.processCpuLoad), WHITE))
-            .append(Component.text(" / ", GRAY))
-            .append(Component.text(String.format("系统 %.1f%%", snap.systemCpuLoad), WHITE)));
-
-        // 运行时间
-        sender.sendMessage(goldLabel("运行时间: ")
-            .append(Component.text(formatUptime(snap.uptimeSeconds), WHITE))
-            .append(Component.text(" | 线程: " + snap.threadCount, GRAY))
-            .append(Component.text(" | 插件: " + snap.loadedPluginCount, GRAY))
-            .append(Component.text(" | 世界: " + snap.worldCount, GRAY)));
-
-        // GC
-        sender.sendMessage(goldLabel("GC: ")
-            .append(Component.text(snap.gcCount + " 次", WHITE))
-            .append(Component.text(" / ", GRAY))
-            .append(Component.text(String.format("%.2f 秒", snap.gcTime / 1000.0), WHITE)));
-
-        // 红石
-        if (snap.redstoneTicks >= 0) {
-            sender.sendMessage(goldLabel("红石活动: ")
-                .append(Component.text(String.valueOf(snap.redstoneTicks), WHITE)));
+        // 内存（P0-5：模块不可用显示"不可用"）
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_MEMORY)) {
+            sender.sendMessage(goldLabel("内存: ")
+                .append(Component.text("不可用", GRAY)));
+        } else {
+            long usedMem = snap.heapUsed / 1024 / 1024;
+            long maxMem = snap.heapMax / 1024 / 1024;
+            TextColor memColor = snap.heapUsagePercent >= 90 ? RED
+                : (snap.heapUsagePercent >= 80 ? YELLOW : GREEN);
+            sender.sendMessage(goldLabel("内存: ")
+                .append(Component.text(usedMem + "MB / " + maxMem + "MB", WHITE))
+                .append(Component.text(" (" + snap.heapUsagePercent + "%)", memColor)));
         }
 
-        // 网络
-        if (snap.bytesSentPerSec > 0 || snap.bytesReceivedPerSec > 0) {
-            sender.sendMessage(goldLabel("网络: ")
-                .append(Component.text("↑" + formatBytes(snap.bytesSentPerSec) + "/s", WHITE))
-                .append(Component.text(" ↓", GRAY))
-                .append(Component.text(formatBytes(snap.bytesReceivedPerSec) + "/s", WHITE)));
+        // CPU（P0-5：先判模块级"不可用"；P0-13：再判 -1 哨兵显示"未知"）
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_CPU)) {
+            sender.sendMessage(goldLabel("CPU: ")
+                .append(Component.text("不可用", GRAY)));
+        } else {
+            Component showAllProcessCpu = snap.processCpuLoad < 0 ? Component.text("进程 未知", GRAY)
+                : Component.text(String.format("进程 %.1f%%", snap.processCpuLoad), WHITE);
+            Component showAllSystemCpu = snap.systemCpuLoad < 0 ? Component.text("系统 未知", GRAY)
+                : Component.text(String.format("系统 %.1f%%", snap.systemCpuLoad), WHITE);
+            sender.sendMessage(goldLabel("CPU: ")
+                .append(showAllProcessCpu)
+                .append(Component.text(" / ", GRAY))
+                .append(showAllSystemCpu));
         }
+
+        // 运行时间（P0-5：server 模块不可用显示"不可用"）
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_SERVER)) {
+            sender.sendMessage(goldLabel("运行时间: ")
+                .append(Component.text("不可用", GRAY)));
+        } else {
+            sender.sendMessage(goldLabel("运行时间: ")
+                .append(Component.text(formatUptime(snap.uptimeSeconds), WHITE))
+                .append(Component.text(" | 线程: " + snap.threadCount, GRAY))
+                .append(Component.text(" | 插件: " + snap.loadedPluginCount, GRAY))
+                .append(Component.text(" | 世界: " + snap.worldCount, GRAY)));
+        }
+
+        // GC（P0-5：模块不可用显示"不可用"）
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_GC)) {
+            sender.sendMessage(goldLabel("GC: ")
+                .append(Component.text("不可用", GRAY)));
+        } else {
+            sender.sendMessage(goldLabel("GC: ")
+                .append(Component.text(snap.gcCount + " 次", WHITE))
+                .append(Component.text(" / ", GRAY))
+                .append(Component.text(String.format("%.2f 秒", snap.gcTime / 1000.0), WHITE)));
+        }
+
+        // P0-7：红石/网络段已下线删除
 
         // === 告警 ===
         if (!snap.activeCriticals.isEmpty() || !snap.activeWarnings.isEmpty()) {
@@ -295,6 +340,11 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter {
         if (snap == null) { noData(sender); return; }
 
         sender.sendMessage(Component.text("=== TPS 诊断 ===", GOLD, TextDecoration.BOLD));
+        // P0-5：模块被禁用或采集异常时显示"不可用"
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_TPS)) {
+            sender.sendMessage(yellowLabel("TPS: ").append(Component.text("不可用", GRAY)));
+            return;
+        }
         sender.sendMessage(yellowLabel("TPS (1m/5m/15m): ")
             .append(formatTpsComponent(snap.tps1m))
             .append(Component.text(" / ", WHITE))
@@ -333,12 +383,20 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter {
         if (snap == null) { noData(sender); return; }
 
         sender.sendMessage(Component.text("=== MSPT 诊断 ===", GOLD, TextDecoration.BOLD));
+        // P0-5：先判模块级"不可用"（P0-13 的 -1 哨兵"未知"仍由 formatMSPTComponent 处理）
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT)) {
+            sender.sendMessage(yellowLabel("MSPT: ").append(Component.text("不可用", GRAY)));
+            return;
+        }
         sender.sendMessage(yellowLabel("平均 MSPT: ")
             .append(formatMSPTComponent(snap.msptAvg)));
-        sender.sendMessage(yellowLabel("最小 MSPT: ")
-            .append(Component.text(String.format("%.2f ms", snap.msptMin), WHITE)));
-        sender.sendMessage(yellowLabel("最大 MSPT: ")
-            .append(Component.text(String.format("%.2f ms", snap.msptMax), WHITE)));
+        // P0-13：-1 哨兵显示"未知"
+        Component msptMinComp = snap.msptMin <= 0 ? Component.text("未知", GRAY)
+            : Component.text(String.format("%.2f ms", snap.msptMin), WHITE);
+        Component msptMaxComp = snap.msptMax <= 0 ? Component.text("未知", GRAY)
+            : Component.text(String.format("%.2f ms", snap.msptMax), WHITE);
+        sender.sendMessage(yellowLabel("最小 MSPT: ").append(msptMinComp));
+        sender.sendMessage(yellowLabel("最大 MSPT: ").append(msptMaxComp));
 
         if (snap.msptAvg > 0) {
             double maxTPS = 1000.0 / snap.msptAvg;
@@ -361,6 +419,12 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter {
 
         String title = worldName != null ? "=== 实体统计 - " + worldName + " ===" : "=== 实体统计 ===";
         sender.sendMessage(Component.text(title, GOLD, TextDecoration.BOLD));
+
+        // P0-5：模块被禁用或采集异常时显示"不可用"
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_ENTITIES)) {
+            sender.sendMessage(goldLabel("总实体数: ").append(Component.text("不可用", GRAY)));
+            return;
+        }
 
         TextColor entityColor = snap.totalEntities > configManager.get().entities_totalWarningThreshold ? RED
             : (snap.totalEntities > 200 ? YELLOW : GREEN);
@@ -402,6 +466,11 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter {
         if (snap == null) { noData(sender); return; }
 
         sender.sendMessage(Component.text("=== 区块统计 ===", GOLD, TextDecoration.BOLD));
+        // P0-5：模块被禁用或采集异常时显示"不可用"
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_CHUNKS)) {
+            sender.sendMessage(goldLabel("总加载区块: ").append(Component.text("不可用", GRAY)));
+            return;
+        }
         sender.sendMessage(goldLabel("总加载区块: ")
             .append(Component.text(String.valueOf(snap.totalLoadedChunks), WHITE, TextDecoration.BOLD)));
         sender.sendMessage(goldLabel("总强加载区块: ")
@@ -426,6 +495,12 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter {
         if (snap == null) { noData(sender); return; }
 
         sender.sendMessage(Component.text("=== 内存诊断 ===", GOLD, TextDecoration.BOLD));
+
+        // P0-5：模块被禁用或采集异常时显示"不可用"
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_MEMORY)) {
+            sender.sendMessage(yellowLabel("堆内存: ").append(Component.text("不可用", GRAY)));
+            return;
+        }
 
         long usedMemMB = snap.heapUsed / 1024 / 1024;
         long maxMemMB = snap.heapMax / 1024 / 1024;
@@ -467,15 +542,24 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter {
 
         sender.sendMessage(Component.text("=== CPU 诊断 ===", GOLD, TextDecoration.BOLD));
 
+        // P0-5：先判模块级"不可用"（P0-13 的 -1 哨兵"未知"仍在下方处理）
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_CPU)) {
+            sender.sendMessage(yellowLabel("进程 CPU 使用率: ").append(Component.text("不可用", GRAY)));
+            return;
+        }
+
         TextColor processColor = snap.processCpuLoad > 80 ? RED
             : (snap.processCpuLoad > 60 ? YELLOW : GREEN);
         TextColor systemColor = snap.systemCpuLoad > 90 ? RED
             : (snap.systemCpuLoad > 70 ? YELLOW : GREEN);
 
-        sender.sendMessage(yellowLabel("进程 CPU 使用率: ")
-            .append(Component.text(String.format("%.1f%%", snap.processCpuLoad), processColor, TextDecoration.BOLD)));
-        sender.sendMessage(yellowLabel("系统 CPU 负载: ")
-            .append(Component.text(String.format("%.1f%%", snap.systemCpuLoad), systemColor)));
+        // P0-13：-1 哨兵显示"未知"
+        Component processCpuValue = snap.processCpuLoad < 0 ? Component.text("未知", GRAY)
+            : Component.text(String.format("%.1f%%", snap.processCpuLoad), processColor, TextDecoration.BOLD);
+        Component systemCpuValue = snap.systemCpuLoad < 0 ? Component.text("未知", GRAY)
+            : Component.text(String.format("%.1f%%", snap.systemCpuLoad), systemColor);
+        sender.sendMessage(yellowLabel("进程 CPU 使用率: ").append(processCpuValue));
+        sender.sendMessage(yellowLabel("系统 CPU 负载: ").append(systemCpuValue));
         sender.sendMessage(goldLabel("可用处理器: ")
             .append(Component.text(String.valueOf(snap.availableProcessors), WHITE)));
         sender.sendMessage(goldLabel("活跃线程数: ")
@@ -490,6 +574,11 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter {
         if (snap == null) { noData(sender); return; }
 
         sender.sendMessage(Component.text("=== 玩家统计 ===", GOLD, TextDecoration.BOLD));
+        // P0-5：模块被禁用或采集异常时显示"不可用"
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_PLAYERS)) {
+            sender.sendMessage(goldLabel("在线玩家: ").append(Component.text("不可用", GRAY)));
+            return;
+        }
         sender.sendMessage(goldLabel("在线玩家: ")
             .append(Component.text(snap.playerCount + " / " + snap.maxPlayers, WHITE, TextDecoration.BOLD)));
 
@@ -567,17 +656,10 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter {
 
     // ==================== 专项检测: 红石 ====================
 
+    // P0-7：红石追踪已下线，保留子命令入口（老用户脚本不断），固定输出下线提示
     private void showRedstone(CommandSender sender) {
-        MetricsSnapshot snap = collector.getLatest();
-        if (snap == null) { noData(sender); return; }
-
         sender.sendMessage(Component.text("=== 红石活动 ===", GOLD, TextDecoration.BOLD));
-        if (snap.redstoneTicks >= 0) {
-            sender.sendMessage(goldLabel("活跃红石线: ")
-                .append(Component.text(String.valueOf(snap.redstoneTicks), WHITE, TextDecoration.BOLD)));
-        } else {
-            sender.sendMessage(Component.text("红石活动追踪不可用 (需要 Paper 服务端)", GRAY));
-        }
+        sender.sendMessage(Component.text("红石追踪在 v1.1 已下线（此前为空实现）", GRAY));
     }
 
     // ==================== 专项检测: Tile Entity ====================
@@ -587,6 +669,11 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter {
         if (snap == null) { noData(sender); return; }
 
         sender.sendMessage(Component.text("=== Tile Entity 统计 ===", GOLD, TextDecoration.BOLD));
+        // P0-5：模块被禁用或采集异常时显示"不可用"
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_TILE_ENTITIES)) {
+            sender.sendMessage(goldLabel("总 Tile Entity: ").append(Component.text("不可用", GRAY)));
+            return;
+        }
         sender.sendMessage(goldLabel("总 Tile Entity: ")
             .append(Component.text(String.valueOf(snap.tileEntityCount), WHITE, TextDecoration.BOLD)));
 
@@ -606,6 +693,11 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter {
         if (snap == null) { noData(sender); return; }
 
         sender.sendMessage(Component.text("=== 服务器运行信息 ===", GOLD, TextDecoration.BOLD));
+        // P0-5：server 模块被禁用或采集异常时显示"不可用"
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_SERVER)) {
+            sender.sendMessage(goldLabel("运行时间: ").append(Component.text("不可用", GRAY)));
+            return;
+        }
         sender.sendMessage(goldLabel("运行时间: ")
             .append(Component.text(formatUptime(snap.uptimeSeconds), WHITE, TextDecoration.BOLD)));
         sender.sendMessage(goldLabel("加载插件: ")
@@ -627,6 +719,11 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter {
         if (snap == null) { noData(sender); return; }
 
         sender.sendMessage(Component.text("=== GC 统计 ===", GOLD, TextDecoration.BOLD));
+        // P0-5：模块被禁用或采集异常时显示"不可用"
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_GC)) {
+            sender.sendMessage(goldLabel("累计 GC 次数: ").append(Component.text("不可用", GRAY)));
+            return;
+        }
         sender.sendMessage(goldLabel("累计 GC 次数: ")
             .append(Component.text(String.valueOf(snap.gcCount), WHITE, TextDecoration.BOLD)));
         sender.sendMessage(goldLabel("累计 GC 耗时: ")
@@ -646,7 +743,8 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter {
     // ==================== 报告 ====================
 
     private void handleReport(CommandSender sender, String[] args) {
-        if (!sender.hasPermission("perfscope.export")) {
+        // P0-10：admin || 专项（children 兜底 + 显式检查，双保险）
+        if (!sender.hasPermission("perfscope.admin") && !sender.hasPermission("perfscope.export")) {
             sender.sendMessage(Component.text("没有导出报告权限喵", RED));
             return;
         }
@@ -661,7 +759,8 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter {
     // ==================== 重载 ====================
 
     private void handleReload(CommandSender sender) {
-        if (!sender.hasPermission("perfscope.reload")) {
+        // P0-10：admin || 专项
+        if (!sender.hasPermission("perfscope.admin") && !sender.hasPermission("perfscope.reload")) {
             sender.sendMessage(Component.text("没有重载配置权限喵", RED));
             return;
         }
@@ -708,10 +807,12 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter {
             MetricsSnapshot snap = collector.getLatest();
             if (snap == null) return;
 
-            for (UUID uuid : monitoringPlayers) {
+            // P0-12：显式 Iterator 遍历清理离线玩家，避免 CME
+            for (Iterator<UUID> it = monitoringPlayers.iterator(); it.hasNext();) {
+                UUID uuid = it.next();
                 Player player = Bukkit.getPlayer(uuid);
-                if (player == null) {
-                    monitoringPlayers.remove(uuid);
+                if (player == null || !player.isOnline()) {
+                    it.remove();
                     continue;
                 }
                 sendActionBar(player, snap);
@@ -755,7 +856,7 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter {
         sendHelpLine(sender, "/perfscope cpu", "CPU 诊断");
         sendHelpLine(sender, "/perfscope players", "玩家统计");
         sendHelpLine(sender, "/perfscope world [世界]", "世界详情");
-        sendHelpLine(sender, "/perfscope redstone", "红石活动");
+        sendHelpLine(sender, "/perfscope redstone", "红石活动（已下线）");
         sendHelpLine(sender, "/perfscope tileentities", "Tile Entity 统计");
         sendHelpLine(sender, "/perfscope uptime", "运行时间");
         sendHelpLine(sender, "/perfscope gc", "GC 统计");
@@ -774,13 +875,22 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter {
     @Override
     public @Nullable List<String> onTabComplete(@NotNull CommandSender sender, @NotNull Command cmd,
                                                  @NotNull String label, @NotNull String[] args) {
+        // P0-10：无 use 权限者返回空列表
+        if (!sender.hasPermission("perfscope.use")) {
+            return Collections.emptyList();
+        }
         List<String> completions = new ArrayList<>();
 
         if (args.length == 1) {
             String[] subs = {"all", "tps", "mspt", "entities", "chunks", "memory", "cpu",
                 "players", "world", "redstone", "tileentities", "uptime", "gc",
                 "report", "monitor", "reload", "help"};
+            boolean canExport = sender.hasPermission("perfscope.admin") || sender.hasPermission("perfscope.export");
+            boolean canReload = sender.hasPermission("perfscope.admin") || sender.hasPermission("perfscope.reload");
             for (String s : subs) {
+                // P0-10：report/reload 按权限过滤
+                if (s.equals("report") && !canExport) continue;
+                if (s.equals("reload") && !canReload) continue;
                 if (s.startsWith(args[0].toLowerCase())) completions.add(s);
             }
         } else if (args.length == 2) {
@@ -837,6 +947,10 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter {
     }
 
     private Component formatMSPTComponent(double mspt) {
+        // P0-13：<= 0（含 -1 哨兵与旧 0 值）显示"未知"；真实 MSPT 恒 > 0，无误判
+        if (mspt <= 0) {
+            return Component.text("未知", GRAY);
+        }
         NamedTextColor color;
         if (mspt <= 40) color = GREEN;
         else if (mspt <= 50) color = YELLOW;
@@ -874,6 +988,12 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter {
     }
 
     // ==================== 清理 ====================
+
+    /** P0-12：玩家退出时清理监测态（需 PerfScope.onEnable 注册本类为 Listener）。 */
+    @EventHandler
+    public void onQuit(PlayerQuitEvent event) {
+        monitoringPlayers.remove(event.getPlayer().getUniqueId());
+    }
 
     public void shutdown() {
         monitoringPlayers.clear();

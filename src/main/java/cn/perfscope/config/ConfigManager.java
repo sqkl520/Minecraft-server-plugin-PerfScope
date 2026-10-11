@@ -89,15 +89,12 @@ public class ConfigManager {
         config.cpu_processWarningThreshold = yaml.getDouble("cpu.process_warning_threshold", 80.0);
         config.cpu_systemWarningThreshold = yaml.getDouble("cpu.system_warning_threshold", 90.0);
 
-        // === 红石 ===
-        config.redstone_enabled = yaml.getBoolean("redstone.enabled", true);
+        // P0-7：红石采集已下线，不再读取 redstone.*（旧配置残留键天然忽略）
 
         // === Tile Entity ===
         config.tileEntities_enabled = yaml.getBoolean("tile_entities.enabled", true);
 
-        // === 网络 ===
-        config.network_enabled = yaml.getBoolean("network.enabled", true);
-        config.network_warningThreshold = yaml.getLong("network.warning_threshold", 10485760L);
+        // P0-7：网络采集已下线，不再读取 network.*（旧配置残留键天然忽略）
 
         // === 报告 ===
         config.report_autoExport = yaml.getBoolean("report.auto_export", false);
@@ -178,15 +175,12 @@ public class ConfigManager {
         public double cpu_processWarningThreshold;
         public double cpu_systemWarningThreshold;
 
-        // 红石
-        public boolean redstone_enabled;
+        // P0-7：redstone_enabled 已删除（红石采集下线）
 
         // Tile Entity
         public boolean tileEntities_enabled;
 
-        // 网络
-        public boolean network_enabled;
-        public long network_warningThreshold;
+        // P0-7：network_enabled / network_warningThreshold 已删除（网络采集下线）
 
         // 报告
         public boolean report_autoExport;

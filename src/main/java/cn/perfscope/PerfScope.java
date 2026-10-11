@@ -22,7 +22,9 @@ import cn.perfscope.compat.ServerCompat;
 import cn.perfscope.config.ConfigManager;
 import cn.perfscope.metrics.MetricsCollector;
 import cn.perfscope.report.ReportGenerator;
+import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.scheduler.BukkitTask;
 
 public final class PerfScope extends JavaPlugin {
 
@@ -31,6 +33,8 @@ public final class PerfScope extends JavaPlugin {
     private ConfigManager configManager;
     private MetricsCollector metricsCollector;
     private ReportGenerator reportGenerator;
+    private PerfScopeCommand command;
+    private BukkitTask autoReportTask;
 
     @Override
     public void onEnable() {
@@ -47,15 +51,23 @@ public final class PerfScope extends JavaPlugin {
 
         // 初始化性能采集器
         this.metricsCollector = new MetricsCollector(this);
-        metricsCollector.start();
+        startCollectionTasks();
 
         // 初始化报告生成器
         this.reportGenerator = new ReportGenerator(this);
 
-        // 注册指令
-        PerfScopeCommand command = new PerfScopeCommand(this);
-        getCommand("perfscope").setExecutor(command);
-        getCommand("perfscope").setTabCompleter(command);
+        // 注册指令（P0-14：getCommand null 保护）
+        this.command = new PerfScopeCommand(this);
+        PluginCommand pluginCommand = getCommand("perfscope");
+        if (pluginCommand != null) {
+            pluginCommand.setExecutor(command);
+            pluginCommand.setTabCompleter(command);
+        } else {
+            getLogger().severe("指令 perfscope 注册失败：plugin.yml 缺少命令定义！");
+        }
+
+        // 注册监听器（P0-12：monitor 退出清理）
+        getServer().getPluginManager().registerEvents(command, this);
 
         // 自动报告定时任务
         if (configManager.get().report_autoExport) {
@@ -72,8 +84,6 @@ public final class PerfScope extends JavaPlugin {
             // 功能可用性
             getLogger().info("  MSPT精确采集: " + (ServerCompat.PAPER_MSPT_AVAILABLE ? "Paper API" : "TPS估算"));
             getLogger().info("  ActionBar: " + (ServerCompat.PAPER_ACTION_BAR_AVAILABLE ? "可用" : "不可用"));
-            getLogger().info("  红石追踪: " + (ServerCompat.PAPER_REDSTONE_AVAILABLE ? "可用" : "不可用"));
-            getLogger().info("  网络统计: " + (ServerCompat.PAPER_NETWORK_AVAILABLE ? "可用" : "不可用"));
         }
 
         getLogger().info("========================================");
@@ -83,24 +93,59 @@ public final class PerfScope extends JavaPlugin {
 
     @Override
     public void onDisable() {
-        if (metricsCollector != null) {
-            metricsCollector.stop();
+        // P0-12：先停 monitor 任务，再停自动报告与采集（顺序不可换）
+        if (command != null) {
+            command.shutdown();
         }
+        stopAutoReport();
+        stopCollectionTasks();
         getLogger().info("PerfScope 已关闭，再见喵~");
         instance = null;
     }
 
+    // ==================== 任务启停（P0-14 收敛：P0-8 替换为 SchedulerAdapter 时只需改这四个方法内部） ====================
+
+    /** 启动采集任务（当前经由 MetricsCollector 走 Bukkit 调度器）。 */
+    private void startCollectionTasks() {
+        metricsCollector.start();
+    }
+
+    /** 停止采集任务。 */
+    private void stopCollectionTasks() {
+        if (metricsCollector != null) {
+            metricsCollector.stop();
+        }
+    }
+
     private void startAutoReport() {
+        stopAutoReport(); // 防呆：避免重复启动叠任务
         long intervalTicks = configManager.get().report_autoExportInterval * 60L * 20L;
-        getServer().getScheduler().runTaskTimerAsynchronously(this, () -> {
+        autoReportTask = getServer().getScheduler().runTaskTimerAsynchronously(this, () -> {
             reportGenerator.generateAndSave();
         }, intervalTicks, intervalTicks);
         getLogger().info("  [+] 自动报告已启用 (间隔: " +
             configManager.get().report_autoExportInterval + " 分钟)");
     }
 
+    private void stopAutoReport() {
+        if (autoReportTask != null) {
+            autoReportTask.cancel();
+            autoReportTask = null;
+        }
+    }
+
+    /**
+     * 真重载（P0-14）：stop→重读→start，重建采集与自动报告任务。
+     * monitor 任务不受影响（玩家监测态保持，间隔固定 20 tick 无配置项）。
+     */
     public void reload() {
+        stopCollectionTasks();
+        stopAutoReport();
         configManager.load();
+        startCollectionTasks();
+        if (configManager.get().report_autoExport) {
+            startAutoReport();
+        }
         reportGenerator.cleanOldReports();
         getLogger().info("PerfScope 配置已重载喵~");
     }

@@ -22,14 +22,16 @@ import cn.perfscope.config.ConfigManager;
 import cn.perfscope.metrics.MetricsCollector;
 import cn.perfscope.metrics.MetricsSnapshot;
 
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+
 import java.io.File;
-import java.io.FileWriter;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.Path;
-import java.text.SimpleDateFormat;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.stream.Collectors;
 
 /**
  * 性能报告生成器 - 支持 HTML / TXT / JSON 三种格式
@@ -41,7 +43,12 @@ public class ReportGenerator {
     private final MetricsCollector collector;
     private final ConfigManager configManager;
     private final File reportDir;
-    private final SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd_HH-mm-ss");
+
+    // P0-11：线程安全的日期格式化器（SimpleDateFormat 非线程安全，已删除）
+    private static final DateTimeFormatter FILE_TS = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss-SSS");
+    private static final DateTimeFormatter DISPLAY_TS = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    // P0-11：JSON 改用 Gson（服务端 provided）；serializeNulls 让 unavailable 语义明确
+    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().serializeNulls().create();
 
     public ReportGenerator(PerfScope plugin) {
         this.plugin = plugin;
@@ -67,43 +74,46 @@ public class ReportGenerator {
         MetricsSnapshot snap = collector.getLatest();
         if (snap == null) return null;
 
-        // 先采集一次最新数据
-        collector.collect();
-        snap = collector.getLatest();
-        if (snap == null) return null;
-
         List<MetricsSnapshot> history = collector.getHistory();
 
-        String timestamp = dateFormat.format(new Date());
-        String filename = "perfscope-" + timestamp;
         File file;
 
         switch (format.toLowerCase()) {
             case "html":
-                file = new File(reportDir, filename + ".html");
-                try (FileWriter writer = new FileWriter(file)) {
-                    writer.write(generateHtmlReport(snap, history));
+                file = resolveReportFile("html");
+                try {
+                    Files.write(file.toPath(), generateHtmlReport(snap, history).getBytes(StandardCharsets.UTF_8));
                 } catch (IOException e) {
                     plugin.getLogger().warning("生成HTML报告失败: " + e.getMessage());
+                    return null;
+                } catch (Throwable t) {
+                    // P0-11 兜底：极端精简端缺 Gson 等运行时异常同样返回 null
+                    plugin.getLogger().warning("生成HTML报告失败: " + t.getMessage());
                     return null;
                 }
                 break;
             case "json":
-                file = new File(reportDir, filename + ".json");
-                try (FileWriter writer = new FileWriter(file)) {
-                    writer.write(generateJsonReport(snap, history));
+                file = resolveReportFile("json");
+                try {
+                    Files.write(file.toPath(), generateJsonReport(snap, history).getBytes(StandardCharsets.UTF_8));
                 } catch (IOException e) {
                     plugin.getLogger().warning("生成JSON报告失败: " + e.getMessage());
+                    return null;
+                } catch (Throwable t) {
+                    plugin.getLogger().warning("生成JSON报告失败: " + t.getMessage());
                     return null;
                 }
                 break;
             case "txt": case "text":
             default:
-                file = new File(reportDir, filename + ".txt");
-                try (FileWriter writer = new FileWriter(file)) {
-                    writer.write(generateTextReport(snap, history));
+                file = resolveReportFile("txt");
+                try {
+                    Files.write(file.toPath(), generateTextReport(snap, history).getBytes(StandardCharsets.UTF_8));
                 } catch (IOException e) {
                     plugin.getLogger().warning("生成TXT报告失败: " + e.getMessage());
+                    return null;
+                } catch (Throwable t) {
+                    plugin.getLogger().warning("生成TXT报告失败: " + t.getMessage());
                     return null;
                 }
                 break;
@@ -113,6 +123,20 @@ public class ReportGenerator {
         cleanOldReports();
 
         return file.getAbsolutePath();
+    }
+
+    /**
+     * P0-11：解析报告文件路径。基名精确到毫秒；若已存在则追加 -1/-2... 计数（防毫秒碰撞双保险）。
+     */
+    private File resolveReportFile(String extension) {
+        String base = "perfscope-" + LocalDateTime.now().format(FILE_TS);
+        File file = new File(reportDir, base + "." + extension);
+        int counter = 1;
+        while (file.exists()) {
+            file = new File(reportDir, base + "-" + counter + "." + extension);
+            counter++;
+        }
+        return file;
     }
 
     /**
@@ -148,7 +172,7 @@ public class ReportGenerator {
         // 头部
         html.append("<div class=\"header\">\n");
         html.append("  <h1>PerfScope 服务器性能报告</h1>\n");
-        html.append("  <p>生成时间: ").append(new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new Date())).append("</p>\n");
+        html.append("  <p>生成时间: ").append(LocalDateTime.now().format(DISPLAY_TS)).append("</p>\n");
         html.append("  <p>服务器运行时间: ").append(formatUptime(snap.uptimeSeconds)).append("</p>\n");
         html.append("</div>\n");
 
@@ -159,21 +183,55 @@ public class ReportGenerator {
         html.append("<h2>性能概览</h2>\n");
         html.append("<div class=\"card-grid\">\n");
 
-        html.append(htmlCard("TPS (1分钟)", String.format("%.2f", snap.tps1m), getTpsClass(snap.tps1m),
-            "5分钟: " + String.format("%.2f", snap.tps5m) + " | 15分钟: " + String.format("%.2f", snap.tps15m)));
-        html.append(htmlCard("MSPT (平均)", String.format("%.2f ms", snap.msptAvg), getMsptClass(snap.msptAvg),
-            "最小: " + String.format("%.2f", snap.msptMin) + "ms | 最大: " + String.format("%.2f", snap.msptMax) + "ms"));
-        html.append(htmlCard("在线玩家", snap.playerCount + " / " + snap.maxPlayers, "normal",
-            ""));
-        html.append(htmlCard("实体总数", String.valueOf(snap.totalEntities), "normal", ""));
-        html.append(htmlCard("加载区块", String.valueOf(snap.totalLoadedChunks), "normal",
-            "强加载: " + snap.totalForceLoadedChunks));
-        html.append(htmlCard("堆内存", formatBytes(snap.heapUsed) + " / " + formatBytes(snap.heapMax),
-            getMemClass(snap.heapUsagePercent), "使用率: " + snap.heapUsagePercent + "%"));
-        html.append(htmlCard("进程CPU", String.format("%.1f%%", snap.processCpuLoad), "normal",
-            "系统CPU: " + String.format("%.1f%%", snap.systemCpuLoad)));
-        html.append(htmlCard("已加载世界", String.valueOf(snap.worldCount), "normal",
-            "已加载插件: " + snap.loadedPluginCount));
+        // P0-5：unavailable 模块显示"不可用"；P0-13：MSPT/CPU -1 哨兵显示"未知"
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_TPS)) {
+            html.append(htmlCard("TPS (1分钟)", "不可用", "unknown", ""));
+        } else {
+            html.append(htmlCard("TPS (1分钟)", String.format("%.2f", snap.tps1m), getTpsClass(snap.tps1m),
+                "5分钟: " + String.format("%.2f", snap.tps5m) + " | 15分钟: " + String.format("%.2f", snap.tps15m)));
+        }
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT)) {
+            html.append(htmlCard("MSPT (平均)", "不可用", "unknown", ""));
+        } else if (snap.msptAvg < 0) {
+            html.append(htmlCard("MSPT (平均)", "未知", "unknown", "健康服 TPS=20 时估算无意义"));
+        } else {
+            html.append(htmlCard("MSPT (平均)", String.format("%.2f ms", snap.msptAvg), getMsptClass(snap.msptAvg),
+                "最小: " + String.format("%.2f", snap.msptMin) + "ms | 最大: " + String.format("%.2f", snap.msptMax) + "ms"));
+        }
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_PLAYERS)) {
+            html.append(htmlCard("在线玩家", "不可用", "unknown", ""));
+        } else {
+            html.append(htmlCard("在线玩家", snap.playerCount + " / " + snap.maxPlayers, "normal", ""));
+        }
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_ENTITIES)) {
+            html.append(htmlCard("实体总数", "不可用", "unknown", ""));
+        } else {
+            html.append(htmlCard("实体总数", String.valueOf(snap.totalEntities), "normal", ""));
+        }
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_CHUNKS)) {
+            html.append(htmlCard("加载区块", "不可用", "unknown", ""));
+        } else {
+            html.append(htmlCard("加载区块", String.valueOf(snap.totalLoadedChunks), "normal",
+                "强加载: " + snap.totalForceLoadedChunks));
+        }
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_MEMORY)) {
+            html.append(htmlCard("堆内存", "不可用", "unknown", ""));
+        } else {
+            html.append(htmlCard("堆内存", formatBytes(snap.heapUsed) + " / " + formatBytes(snap.heapMax),
+                getMemClass(snap.heapUsagePercent), "使用率: " + snap.heapUsagePercent + "%"));
+        }
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_CPU)) {
+            html.append(htmlCard("进程CPU", "不可用", "unknown", ""));
+        } else {
+            html.append(htmlCard("进程CPU", formatCpuPct(snap.processCpuLoad), "normal",
+                "系统CPU: " + formatCpuPct(snap.systemCpuLoad)));
+        }
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_SERVER)) {
+            html.append(htmlCard("已加载世界", "不可用", "unknown", ""));
+        } else {
+            html.append(htmlCard("已加载世界", String.valueOf(snap.worldCount), "normal",
+                "已加载插件: " + snap.loadedPluginCount));
+        }
 
         html.append("</div></div>\n");
 
@@ -208,7 +266,7 @@ public class ReportGenerator {
             int entities = entry.getValue();
             int chunks = snap.chunksByWorld.getOrDefault(world, 0);
             int tileEntities = snap.tileEntitiesByWorld.getOrDefault(world, 0);
-            html.append("<tr><td>").append(world).append("</td><td>").append(entities)
+            html.append("<tr><td>").append(escapeHtml(world)).append("</td><td>").append(entities)
                 .append("</td><td>").append(chunks).append("</td><td>").append(tileEntities)
                 .append("</td></tr>\n");
         }
@@ -217,32 +275,48 @@ public class ReportGenerator {
         // 实体类型 Top 15
         html.append("<div class=\"section\">\n");
         html.append("<h2>实体类型分布 (Top 15)</h2>\n");
-        html.append("<table><tr><th>实体类型</th><th>数量</th><th>占比</th></tr>\n");
-        snap.entitiesByType.entrySet().stream()
-            .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
-            .limit(15)
-            .forEach(entry -> {
-                double pct = snap.totalEntities > 0 ?
-                    (double) entry.getValue() / snap.totalEntities * 100 : 0;
-                html.append("<tr><td>").append(entry.getKey()).append("</td><td>")
-                    .append(entry.getValue()).append("</td><td>")
-                    .append(String.format("%.1f%%", pct)).append("</td></tr>\n");
-            });
-        html.append("</table></div>\n");
+        // P0-5：实体模块 unavailable 时显示"不可用"（灰色），而非空表
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_ENTITIES)) {
+            html.append("<p style=\"color:#90a4ae\">不可用</p>\n");
+        } else {
+            html.append("<table><tr><th>实体类型</th><th>数量</th><th>占比</th></tr>\n");
+            snap.entitiesByType.entrySet().stream()
+                .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+                .limit(15)
+                .forEach(entry -> {
+                    double pct = snap.totalEntities > 0 ?
+                        (double) entry.getValue() / snap.totalEntities * 100 : 0;
+                    html.append("<tr><td>").append(escapeHtml(entry.getKey())).append("</td><td>")
+                        .append(entry.getValue()).append("</td><td>")
+                        .append(String.format("%.1f%%", pct)).append("</td></tr>\n");
+                });
+            html.append("</table>\n");
+        }
+        html.append("</div>\n");
 
         // 内存详情
         html.append("<div class=\"section\">\n");
         html.append("<h2>内存详情</h2>\n");
-        html.append("<div class=\"mem-bar\">\n");
-        html.append("<div class=\"mem-fill\" style=\"width:").append(snap.heapUsagePercent)
-            .append("%;background:").append(getMemBarColor(snap.heapUsagePercent)).append("\"></div>\n");
-        html.append("</div>\n");
-        html.append("<p>堆内存: ").append(formatBytes(snap.heapUsed)).append(" / ")
-            .append(formatBytes(snap.heapMax)).append(" (").append(snap.heapUsagePercent).append("%)</p>\n");
-        html.append("<p>非堆内存: ").append(formatBytes(snap.nonHeapUsed));
-        if (snap.nonHeapMax > 0) html.append(" / ").append(formatBytes(snap.nonHeapMax));
-        html.append("</p>\n");
-        html.append("<p>GC次数: ").append(snap.gcCount).append(" | GC耗时: ").append(snap.gcTime).append("ms</p>\n");
+        // P0-5：内存模块 unavailable 时整段显示"不可用"（灰色），而非 0 值进度条
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_MEMORY)) {
+            html.append("<p style=\"color:#90a4ae\">不可用</p>\n");
+        } else {
+            html.append("<div class=\"mem-bar\">\n");
+            html.append("<div class=\"mem-fill\" style=\"width:").append(snap.heapUsagePercent)
+                .append("%;background:").append(getMemBarColor(snap.heapUsagePercent)).append("\"></div>\n");
+            html.append("</div>\n");
+            html.append("<p>堆内存: ").append(formatBytes(snap.heapUsed)).append(" / ")
+                .append(formatBytes(snap.heapMax)).append(" (").append(snap.heapUsagePercent).append("%)</p>\n");
+            html.append("<p>非堆内存: ").append(formatBytes(snap.nonHeapUsed));
+            if (snap.nonHeapMax > 0) html.append(" / ").append(formatBytes(snap.nonHeapMax));
+            html.append("</p>\n");
+        }
+        // P0-5：GC 模块独立判断（与概览一致），unavailable 时显示"不可用"
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_GC)) {
+            html.append("<p style=\"color:#90a4ae\">GC: 不可用</p>\n");
+        } else {
+            html.append("<p>GC次数: ").append(snap.gcCount).append(" | GC耗时: ").append(snap.gcTime).append("ms</p>\n");
+        }
         html.append("</div>\n");
 
         // 告警
@@ -250,10 +324,10 @@ public class ReportGenerator {
             html.append("<div class=\"section\">\n");
             html.append("<h2>活跃告警</h2>\n");
             for (String critical : snap.activeCriticals) {
-                html.append("<p class=\"critical\">[!!!] ").append(critical).append("</p>\n");
+                html.append("<p class=\"critical\">[!!!] ").append(escapeHtml(critical)).append("</p>\n");
             }
             for (String warning : snap.activeWarnings) {
-                html.append("<p class=\"warning\">[!] ").append(warning).append("</p>\n");
+                html.append("<p class=\"warning\">[!] ").append(escapeHtml(warning)).append("</p>\n");
             }
             html.append("</div>\n");
         }
@@ -277,19 +351,55 @@ public class ReportGenerator {
         sb.append("========================================\n");
         sb.append("  PerfScope 服务器性能报告\n");
         sb.append("========================================\n");
-        sb.append("生成时间: ").append(new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new Date())).append("\n");
+        sb.append("生成时间: ").append(LocalDateTime.now().format(DISPLAY_TS)).append("\n");
         sb.append("运行时间: ").append(formatUptime(snap.uptimeSeconds)).append("\n\n");
 
         sb.append("--- 性能概览 ---\n");
-        sb.append(String.format("TPS (1m/5m/15m): %.2f / %.2f / %.2f\n", snap.tps1m, snap.tps5m, snap.tps15m));
-        sb.append(String.format("MSPT (avg/min/max): %.2f / %.2f / %.2f ms\n", snap.msptAvg, snap.msptMin, snap.msptMax));
-        sb.append(String.format("在线玩家: %d / %d\n", snap.playerCount, snap.maxPlayers));
-        sb.append(String.format("实体总数: %d\n", snap.totalEntities));
-        sb.append(String.format("加载区块: %d (强加载: %d)\n", snap.totalLoadedChunks, snap.totalForceLoadedChunks));
-        sb.append(String.format("堆内存: %s / %s (%d%%)\n", formatBytes(snap.heapUsed),
-            formatBytes(snap.heapMax), snap.heapUsagePercent));
-        sb.append(String.format("进程CPU: %.1f%% | 系统CPU: %.1f%%\n", snap.processCpuLoad, snap.systemCpuLoad));
-        sb.append(String.format("GC: %d次 / %dms\n", snap.gcCount, snap.gcTime));
+        // P0-5：unavailable 模块显示"不可用"；P0-13：MSPT/CPU -1 哨兵显示"未知"
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_TPS)) {
+            sb.append("TPS (1m/5m/15m): 不可用\n");
+        } else {
+            sb.append(String.format("TPS (1m/5m/15m): %.2f / %.2f / %.2f\n", snap.tps1m, snap.tps5m, snap.tps15m));
+        }
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT)) {
+            sb.append("MSPT (avg/min/max): 不可用\n");
+        } else if (snap.msptAvg < 0) {
+            sb.append("MSPT (avg/min/max): 未知\n");
+        } else {
+            sb.append(String.format("MSPT (avg/min/max): %.2f / %.2f / %.2f ms\n", snap.msptAvg, snap.msptMin, snap.msptMax));
+        }
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_PLAYERS)) {
+            sb.append("在线玩家: 不可用\n");
+        } else {
+            sb.append(String.format("在线玩家: %d / %d\n", snap.playerCount, snap.maxPlayers));
+        }
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_ENTITIES)) {
+            sb.append("实体总数: 不可用\n");
+        } else {
+            sb.append(String.format("实体总数: %d\n", snap.totalEntities));
+        }
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_CHUNKS)) {
+            sb.append("加载区块: 不可用\n");
+        } else {
+            sb.append(String.format("加载区块: %d (强加载: %d)\n", snap.totalLoadedChunks, snap.totalForceLoadedChunks));
+        }
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_MEMORY)) {
+            sb.append("堆内存: 不可用\n");
+        } else {
+            sb.append(String.format("堆内存: %s / %s (%d%%)\n", formatBytes(snap.heapUsed),
+                formatBytes(snap.heapMax), snap.heapUsagePercent));
+        }
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_CPU)) {
+            sb.append("进程CPU: 不可用\n");
+        } else {
+            sb.append("进程CPU: ").append(formatCpuPct(snap.processCpuLoad))
+                .append(" | 系统CPU: ").append(formatCpuPct(snap.systemCpuLoad)).append("\n");
+        }
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_GC)) {
+            sb.append("GC: 不可用\n");
+        } else {
+            sb.append(String.format("GC: %d次 / %dms\n", snap.gcCount, snap.gcTime));
+        }
         sb.append("\n");
 
         sb.append("--- 实体按世界分布 ---\n");
@@ -302,14 +412,19 @@ public class ReportGenerator {
         sb.append("\n");
 
         sb.append("--- 实体类型 Top 10 ---\n");
-        snap.entitiesByType.entrySet().stream()
-            .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
-            .limit(10)
-            .forEach(entry -> {
-                double pct = snap.totalEntities > 0 ?
-                    (double) entry.getValue() / snap.totalEntities * 100 : 0;
-                sb.append(String.format("  %s: %d (%.1f%%)\n", entry.getKey(), entry.getValue(), pct));
-            });
+        // P0-5：实体模块 unavailable 时显示"不可用"，而非空列表
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_ENTITIES)) {
+            sb.append("  不可用\n");
+        } else {
+            snap.entitiesByType.entrySet().stream()
+                .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+                .limit(10)
+                .forEach(entry -> {
+                    double pct = snap.totalEntities > 0 ?
+                        (double) entry.getValue() / snap.totalEntities * 100 : 0;
+                    sb.append(String.format("  %s: %d (%.1f%%)\n", entry.getKey(), entry.getValue(), pct));
+                });
+        }
         sb.append("\n");
 
         if (!snap.activeCriticals.isEmpty() || !snap.activeWarnings.isEmpty()) {
@@ -326,120 +441,185 @@ public class ReportGenerator {
 
     // ==================== JSON 报告 ====================
 
+    /**
+     * P0-11：JSON 改用 Gson 生成。键名与旧手拼版本完全一致（老解析脚本兼容）。
+     * P0-5：unavailable 模块对应段输出 {"status": "unavailable"}。
+     * P0-13：MSPT/CPU 保留数字 -1 哨兵，前端自解释。
+     */
     private String generateJsonReport(MetricsSnapshot snap, List<MetricsSnapshot> history) {
-        StringBuilder json = new StringBuilder();
-        json.append("{\n");
-        json.append("  \"generated_at\": \"").append(new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new Date())).append("\",\n");
-        json.append("  \"plugin_version\": \"").append(plugin.getDescription().getVersion()).append("\",\n");
+        Map<String, Object> root = new LinkedHashMap<>();
+        root.put("generated_at", LocalDateTime.now().format(DISPLAY_TS));
+        root.put("plugin_version", plugin.getDescription().getVersion());
 
         // TPS
-        json.append("  \"tps\": {\n");
-        json.append("    \"1m\": ").append(snap.tps1m).append(",\n");
-        json.append("    \"5m\": ").append(snap.tps5m).append(",\n");
-        json.append("    \"15m\": ").append(snap.tps15m).append("\n");
-        json.append("  },\n");
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_TPS)) {
+            root.put("tps", unavailableSection());
+        } else {
+            Map<String, Object> tps = new LinkedHashMap<>();
+            tps.put("1m", safeDouble(snap.tps1m));
+            tps.put("5m", safeDouble(snap.tps5m));
+            tps.put("15m", safeDouble(snap.tps15m));
+            root.put("tps", tps);
+        }
 
         // MSPT
-        json.append("  \"mspt\": {\n");
-        json.append("    \"avg\": ").append(snap.msptAvg).append(",\n");
-        json.append("    \"min\": ").append(snap.msptMin).append(",\n");
-        json.append("    \"max\": ").append(snap.msptMax).append("\n");
-        json.append("  },\n");
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT)) {
+            root.put("mspt", unavailableSection());
+        } else {
+            Map<String, Object> mspt = new LinkedHashMap<>();
+            mspt.put("avg", safeDouble(snap.msptAvg));
+            mspt.put("min", safeDouble(snap.msptMin));
+            mspt.put("max", safeDouble(snap.msptMax));
+            root.put("mspt", mspt);
+        }
 
         // 玩家
-        json.append("  \"players\": {\n");
-        json.append("    \"online\": ").append(snap.playerCount).append(",\n");
-        json.append("    \"max\": ").append(snap.maxPlayers).append("\n");
-        json.append("  },\n");
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_PLAYERS)) {
+            root.put("players", unavailableSection());
+        } else {
+            Map<String, Object> players = new LinkedHashMap<>();
+            players.put("online", snap.playerCount);
+            players.put("max", snap.maxPlayers);
+            root.put("players", players);
+        }
 
         // 实体
-        json.append("  \"entities\": {\n");
-        json.append("    \"total\": ").append(snap.totalEntities).append(",\n");
-        json.append("    \"by_world\": ").append(jsonMap(snap.entitiesByWorld)).append(",\n");
-        json.append("    \"by_type\": ").append(jsonMap(snap.entitiesByType)).append("\n");
-        json.append("  },\n");
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_ENTITIES)) {
+            root.put("entities", unavailableSection());
+        } else {
+            Map<String, Object> entities = new LinkedHashMap<>();
+            entities.put("total", snap.totalEntities);
+            entities.put("by_world", snap.entitiesByWorld);
+            entities.put("by_type", snap.entitiesByType);
+            root.put("entities", entities);
+        }
 
         // 区块
-        json.append("  \"chunks\": {\n");
-        json.append("    \"total_loaded\": ").append(snap.totalLoadedChunks).append(",\n");
-        json.append("    \"total_force_loaded\": ").append(snap.totalForceLoadedChunks).append(",\n");
-        json.append("    \"by_world\": ").append(jsonMap(snap.chunksByWorld)).append("\n");
-        json.append("  },\n");
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_CHUNKS)) {
+            root.put("chunks", unavailableSection());
+        } else {
+            Map<String, Object> chunks = new LinkedHashMap<>();
+            chunks.put("total_loaded", snap.totalLoadedChunks);
+            chunks.put("total_force_loaded", snap.totalForceLoadedChunks);
+            chunks.put("by_world", snap.chunksByWorld);
+            root.put("chunks", chunks);
+        }
 
         // 内存
-        json.append("  \"memory\": {\n");
-        json.append("    \"heap_used\": ").append(snap.heapUsed).append(",\n");
-        json.append("    \"heap_max\": ").append(snap.heapMax).append(",\n");
-        json.append("    \"heap_total\": ").append(snap.heapTotal).append(",\n");
-        json.append("    \"heap_usage_percent\": ").append(snap.heapUsagePercent).append(",\n");
-        json.append("    \"non_heap_used\": ").append(snap.nonHeapUsed).append(",\n");
-        json.append("    \"non_heap_max\": ").append(snap.nonHeapMax).append("\n");
-        json.append("  },\n");
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_MEMORY)) {
+            root.put("memory", unavailableSection());
+        } else {
+            Map<String, Object> memory = new LinkedHashMap<>();
+            memory.put("heap_used", snap.heapUsed);
+            memory.put("heap_max", snap.heapMax);
+            memory.put("heap_total", snap.heapTotal);
+            memory.put("heap_usage_percent", snap.heapUsagePercent);
+            memory.put("non_heap_used", snap.nonHeapUsed);
+            memory.put("non_heap_max", snap.nonHeapMax);
+            root.put("memory", memory);
+        }
 
         // CPU
-        json.append("  \"cpu\": {\n");
-        json.append("    \"process_load\": ").append(snap.processCpuLoad).append(",\n");
-        json.append("    \"system_load\": ").append(snap.systemCpuLoad).append(",\n");
-        json.append("    \"available_processors\": ").append(snap.availableProcessors).append("\n");
-        json.append("  },\n");
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_CPU)) {
+            root.put("cpu", unavailableSection());
+        } else {
+            Map<String, Object> cpu = new LinkedHashMap<>();
+            cpu.put("process_load", safeDouble(snap.processCpuLoad));
+            cpu.put("system_load", safeDouble(snap.systemCpuLoad));
+            cpu.put("available_processors", snap.availableProcessors);
+            root.put("cpu", cpu);
+        }
 
         // GC
-        json.append("  \"gc\": {\n");
-        json.append("    \"count\": ").append(snap.gcCount).append(",\n");
-        json.append("    \"time_ms\": ").append(snap.gcTime).append("\n");
-        json.append("  },\n");
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_GC)) {
+            root.put("gc", unavailableSection());
+        } else {
+            Map<String, Object> gc = new LinkedHashMap<>();
+            gc.put("count", snap.gcCount);
+            gc.put("time_ms", snap.gcTime);
+            root.put("gc", gc);
+        }
 
         // 服务器信息
-        json.append("  \"server\": {\n");
-        json.append("    \"uptime_seconds\": ").append(snap.uptimeSeconds).append(",\n");
-        json.append("    \"thread_count\": ").append(snap.threadCount).append(",\n");
-        json.append("    \"plugin_count\": ").append(snap.loadedPluginCount).append(",\n");
-        json.append("    \"world_count\": ").append(snap.worldCount).append("\n");
-        json.append("  },\n");
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_SERVER)) {
+            root.put("server", unavailableSection());
+        } else {
+            Map<String, Object> server = new LinkedHashMap<>();
+            server.put("uptime_seconds", snap.uptimeSeconds);
+            server.put("thread_count", snap.threadCount);
+            server.put("plugin_count", snap.loadedPluginCount);
+            server.put("world_count", snap.worldCount);
+            root.put("server", server);
+        }
 
         // 告警
-        json.append("  \"alerts\": {\n");
-        json.append("    \"critical\": ").append(jsonArray(snap.activeCriticals)).append(",\n");
-        json.append("    \"warnings\": ").append(jsonArray(snap.activeWarnings)).append("\n");
-        json.append("  },\n");
+        Map<String, Object> alerts = new LinkedHashMap<>();
+        alerts.put("critical", snap.activeCriticals);
+        alerts.put("warnings", snap.activeWarnings);
+        root.put("alerts", alerts);
 
         // 历史趋势 (TPS)
-        json.append("  \"tps_history\": [");
-        for (int i = 0; i < history.size(); i++) {
-            if (i > 0) json.append(", ");
-            json.append(String.format("%.2f", history.get(i).tps1m));
+        List<Double> tpsHistory = new ArrayList<>(history.size());
+        for (MetricsSnapshot h : history) {
+            tpsHistory.add(safeDouble(h.tps1m));
         }
-        json.append("]\n");
+        root.put("tps_history", tpsHistory);
 
-        json.append("}\n");
-        return json.toString();
+        return GSON.toJson(root) + "\n";
     }
 
     // ==================== 工具方法 ====================
 
-    private String jsonMap(Map<String, Integer> map) {
-        StringBuilder sb = new StringBuilder("{");
-        boolean first = true;
-        for (Map.Entry<String, Integer> entry : map.entrySet()) {
-            if (!first) sb.append(", ");
-            sb.append("\"").append(entry.getKey()).append("\": ").append(entry.getValue());
-            first = false;
-        }
-        sb.append("}");
-        return sb.toString();
+    /**
+     * P0-11：unavailable 模块的 JSON 段。
+     */
+    private static Map<String, Object> unavailableSection() {
+        Map<String, Object> section = new LinkedHashMap<>();
+        section.put("status", "unavailable");
+        return section;
     }
 
-    private String jsonArray(List<String> list) {
-        return "[" + list.stream().map(s -> "\"" + s + "\"").collect(Collectors.joining(", ")) + "]";
+    /**
+     * P0-11：Gson 默认拒绝 NaN/Infinity，非有限值统一转为 -1 哨兵。
+     */
+    private static double safeDouble(double v) {
+        return Double.isFinite(v) ? v : -1;
+    }
+
+    /**
+     * P0-11：HTML 最小转义（& < > " '），防世界名/告警文案破版与 XSS。
+     */
+    private static String escapeHtml(String s) {
+        if (s == null) return "";
+        StringBuilder out = new StringBuilder(s.length() + 16);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '&': out.append("&amp;"); break;
+                case '<': out.append("&lt;"); break;
+                case '>': out.append("&gt;"); break;
+                case '"': out.append("&quot;"); break;
+                case '\'': out.append("&#39;"); break;
+                default: out.append(c);
+            }
+        }
+        return out.toString();
+    }
+
+    /**
+     * P0-13：CPU -1 哨兵渲染为"未知"。
+     */
+    private static String formatCpuPct(double v) {
+        return v < 0 ? "未知" : String.format("%.1f%%", v);
     }
 
     private String htmlCard(String title, String value, String cssClass, String subtitle) {
         StringBuilder card = new StringBuilder();
         card.append("<div class=\"card ").append(cssClass).append("\">\n");
-        card.append("<div class=\"card-value\">").append(value).append("</div>\n");
-        card.append("<div class=\"card-title\">").append(title).append("</div>\n");
+        card.append("<div class=\"card-value\">").append(escapeHtml(value)).append("</div>\n");
+        card.append("<div class=\"card-title\">").append(escapeHtml(title)).append("</div>\n");
         if (!subtitle.isEmpty()) {
-            card.append("<div class=\"card-subtitle\">").append(subtitle).append("</div>\n");
+            card.append("<div class=\"card-subtitle\">").append(escapeHtml(subtitle)).append("</div>\n");
         }
         card.append("</div>\n");
         return card.toString();
@@ -533,6 +713,8 @@ public class ReportGenerator {
             .card.good { border-left-color: #69F0AE; }
             .card.warn { border-left-color: #FFB300; }
             .card.critical { border-left-color: #FF5252; }
+            .card.unknown { border-left-color: #607d8b; }
+            .card.unknown .card-value { color: #90a4ae; }
             .card-value { font-size: 1.8em; font-weight: bold; color: #4DD0E1; }
             .card.good .card-value { color: #69F0AE; }
             .card.warn .card-value { color: #FFB300; }

@@ -7,8 +7,9 @@ author: PerfScope Team
 website: https://github.com/PerfScope
 
 # 兼容 Paper / Spigot / Bukkit 全系列
-# Paper 上可获得完整 MSPT/红石/网络/ActionBar 功能
+# Paper 上可获得完整 MSPT/ActionBar 功能
 # Spigot/Bukkit 上 MSPT 通过 TPS 反推估算，部分功能降级
+# （红石/网络监测已于 v1.1 下线）
 
 commands:
   perfscope:
@@ -23,14 +24,20 @@ permissions:
   perfscope.use:
     description: 允许使用 PerfScope 基本指令
     default: op
-  perfscope.admin:
-    description: 允许使用 PerfScope 管理指令
-    default: op
-    children:
-      perfscope.use: true
   perfscope.reload:
     description: 允许重载 PerfScope 配置
     default: op
   perfscope.export:
     description: 允许导出性能报告
     default: op
+  perfscope.alert:
+    description: 允许接收 PerfScope 告警推送
+    default: op
+  perfscope.admin:
+    description: 允许使用 PerfScope 管理指令
+    default: op
+    children:
+      perfscope.use: true
+      perfscope.reload: true
+      perfscope.export: true
+      perfscope.alert: true
