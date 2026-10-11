@@ -2,6 +2,7 @@ name: PerfScope
 version: 1.0.0
 main: cn.perfscope.PerfScope
 api-version: "1.20"
+folia-supported: true
 description: 高性能服务器性能监测插件 - 兼容 Paper/Spigot/Bukkit
 author: PerfScope Team
 website: https://github.com/PerfScope

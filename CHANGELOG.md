@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased] - v1.1 Wave 2 批次一（性能与调度）
+
+### Changed
+- P0-1：采集异步化 + 分级降频——纯 JVM 指标（内存/CPU/GC/运行时间）移至异步任务并经 volatile 发布，实体/区块每 5 个采集周期、方块实体每 10 个周期才真正遍历（其余周期复用缓存），显著降低主线程占用
+- P0-8：新增 `SchedulerAdapter` 调度适配层——Folia 下经反射走 GlobalRegionScheduler/AsyncScheduler，非 Folia 走 Bukkit 调度器；采集与自动报告任务改走统一调度；`plugin.yml` 声明 `folia-supported: true`
+
+### Known
+- monitor 命令的调度迁移、Spigot 消息适配（P0-3）与 pom 构建清理（P0-15）留待 Wave 2 批次二；本批次 Folia 仅"能加载+全局/JVM 指标正确"，实体/区块在 Folia 为尽力而为
+
 ## [Unreleased] - v1.1 Wave 1 止血修复
 
 ### Fixed

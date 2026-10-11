@@ -18,6 +18,7 @@
 package cn.perfscope.metrics;
 
 import cn.perfscope.PerfScope;
+import cn.perfscope.compat.SchedulerAdapter;
 import cn.perfscope.compat.ServerCompat;
 import cn.perfscope.config.ConfigManager;
 import org.bukkit.Bukkit;
@@ -39,7 +40,19 @@ public class MetricsCollector {
 
     private final PerfScope plugin;
     private final ConfigManager configManager;
-    private int taskId = -1;
+
+    // P0-1/P0-8：采集任务句柄（主线程节拍 syncHandle + 异步 JVM 节拍 jvmHandle），替代旧的 Bukkit taskId
+    private SchedulerAdapter.TaskHandle syncHandle;
+    private SchedulerAdapter.TaskHandle jvmHandle;
+
+    // P0-1 分级降频：采集周期计数器（仅主线程 collectSync 访问，无需同步）
+    private long tickCounter = 0;
+
+    // P0-1 分级降频倍数：重模块每 N 个采集周期才真正遍历一次世界，其余周期复用上次缓存值，
+    // 以降低主线程遍历实体/区块/方块实体的开销（常量，不进 config）
+    private static final long ENTITY_SAMPLE_EVERY = 5;   // 实体：每 5 个采集周期遍历一次
+    private static final long CHUNK_SAMPLE_EVERY = 5;    // 区块：每 5 个采集周期遍历一次
+    private static final long TE_SAMPLE_EVERY = 10;      // 方块实体：每 10 个采集周期遍历一次
 
     // 历史数据
     private final Deque<MetricsSnapshot> history = new ConcurrentLinkedDeque<>();
@@ -54,6 +67,40 @@ public class MetricsCollector {
     // 启动时缓存的反射方法（P0-1/P0-6：热路径只做 invoke，避免每次采集重复查找）
     private Method avgTickMethod;
     private Method tileEntityCountMethod;
+
+    // ==================== P0-1 重模块节流缓存（仅主线程 collectSync 访问，无需同步） ====================
+    // 复用语义：采集周期命中采样倍数时真正遍历刷新缓存，其余周期直接复用缓存值填入快照；
+    // unavailable 标记随缓存一起复用（上次失败/禁用则复用期间同样标记不可用）
+
+    // 实体缓存
+    private boolean entitiesCacheReady = false;        // 是否已有过一次真实采集（含失败/禁用）
+    private boolean entitiesCacheUnavailable = false;  // 上次真实采集是否失败或被禁用
+    private int cachedTotalEntities = 0;
+    private Map<String, Integer> cachedEntitiesByType = new LinkedHashMap<>();
+    private Map<String, Integer> cachedEntitiesByWorld = new LinkedHashMap<>();
+    private List<String> cachedEntityWarnings = new ArrayList<>();
+    private List<String> cachedEntityCriticals = new ArrayList<>();
+
+    // 区块缓存
+    private boolean chunksCacheReady = false;
+    private boolean chunksCacheUnavailable = false;
+    private int cachedTotalLoadedChunks = 0;
+    private int cachedTotalForceLoadedChunks = 0;
+    private Map<String, Integer> cachedChunksByWorld = new LinkedHashMap<>();
+    private Map<String, Integer> cachedForceLoadedChunksByWorld = new LinkedHashMap<>();
+    private List<String> cachedChunkWarnings = new ArrayList<>();
+    private List<String> cachedChunkCriticals = new ArrayList<>();
+
+    // 方块实体缓存（collectTileEntities 无阈值告警，仅缓存计数）
+    private boolean teCacheReady = false;
+    private boolean teCacheUnavailable = false;
+    private int cachedTileEntityCount = 0;
+    private Map<String, Integer> cachedTileEntitiesByWorld = new LinkedHashMap<>();
+
+    // ==================== P0-1 JVM 异步缓存（volatile 跨线程发布） ====================
+    // collectJvmAsync（异步线程）整体构造后发布，collectSync（主线程）读取填入快照；
+    // 启动初期为 null 表示异步尚未产出，相关模块按 unavailable 处理，避免 0 值误导或 NPE
+    private volatile MetricsSnapshot jvmCache = null;
 
     public MetricsCollector(PerfScope plugin) {
         this.plugin = plugin;
@@ -106,43 +153,241 @@ public class MetricsCollector {
         }
     }
 
+    /**
+     * 启动采集任务（P0-1/P0-8），拆分为两个节拍，间隔均为 general.update_interval：
+     *  - syncHandle：主线程（Folia 下 GlobalRegionScheduler）节拍，采集 TPS/MSPT/玩家等轻量 Bukkit 指标，
+     *    并对实体/区块/方块实体做分级降频；每周期产出完整快照入 history。
+     *  - jvmHandle：异步（Folia 下 AsyncScheduler）节拍，采集纯 JVM/MXBean 指标写入 volatile 缓存。
+     * Folia 下世界 API 的 region 线程归属问题由 P0-5 的 safeCollect 兜底（抛异常则标 unavailable）。
+     */
     public void start() {
+        stop(); // 防呆：先停旧任务，支持 reload 重复调用不叠加（P0-14 幂等）
+        // 重置降频计数与缓存，使 reload 后首个周期立即重新采集，不复用旧快照数据
+        tickCounter = 0;
+        entitiesCacheReady = false;
+        chunksCacheReady = false;
+        teCacheReady = false;
+        jvmCache = null;
+
         long interval = configManager.get().general_updateInterval;
-        taskId = plugin.getServer().getScheduler().scheduleSyncRepeatingTask(
-            plugin,
-            this::collect,
-            0L,
-            interval
-        );
+        syncHandle = SchedulerAdapter.runGlobalTimer(plugin, this::collectSync, 0L, interval);
+        jvmHandle = SchedulerAdapter.runAsyncTimer(plugin, this::collectJvmAsync, 0L, interval);
     }
 
+    /** 停止采集任务：取消两个任务句柄（句柄为空时无操作），并置空以便重建。 */
     public void stop() {
-        if (taskId != -1) {
-            plugin.getServer().getScheduler().cancelTask(taskId);
-            taskId = -1;
+        if (syncHandle != null) {
+            syncHandle.cancel();
+            syncHandle = null;
+        }
+        if (jvmHandle != null) {
+            jvmHandle.cancel();
+            jvmHandle = null;
         }
     }
 
-    public void collect() {
+    /**
+     * 主线程采集节拍（P0-1）。轻量 Bukkit 指标每周期采集；实体/区块/方块实体分级降频复用缓存；
+     * JVM 指标从异步缓存读取填入。每周期产出完整 MetricsSnapshot 入 history（节奏不变，趋势/报告不受影响）。
+     */
+    private void collectSync() {
+        tickCounter++;
         MetricsSnapshot snap = new MetricsSnapshot();
         ConfigManager.ConfigData cfg = configManager.get();
 
-        // P0-5：每模块独立 try-catch，失败仅标记 unavailable，不中断其余模块
+        // 轻量 Bukkit 模块：每周期采集（开销小），仍用 P0-5 的 runOrMark 包裹
         runOrMark(snap, cfg.tps_enabled, MetricsSnapshot.MODULE_TPS, () -> collectTPS(snap, cfg));
         runOrMark(snap, cfg.mspt_enabled, MetricsSnapshot.MODULE_MSPT, () -> collectMSPT(snap, cfg));
         runOrMark(snap, cfg.players_enabled, MetricsSnapshot.MODULE_PLAYERS, () -> collectPlayers(snap, cfg));
-        runOrMark(snap, cfg.entities_enabled, MetricsSnapshot.MODULE_ENTITIES, () -> collectEntities(snap, cfg));
-        runOrMark(snap, cfg.chunks_enabled, MetricsSnapshot.MODULE_CHUNKS, () -> collectChunks(snap, cfg));
-        runOrMark(snap, cfg.memory_enabled, MetricsSnapshot.MODULE_MEMORY, () -> collectMemory(snap, cfg));
-        runOrMark(snap, cfg.cpu_enabled, MetricsSnapshot.MODULE_CPU, () -> collectCPU(snap, cfg));
-        safeCollect(MetricsSnapshot.MODULE_GC, snap, () -> collectGC(snap));
-        runOrMark(snap, cfg.tileEntities_enabled, MetricsSnapshot.MODULE_TILE_ENTITIES, () -> collectTileEntities(snap));
-        safeCollect(MetricsSnapshot.MODULE_SERVER, snap, () -> collectServerInfo(snap));
+
+        // 重模块：分级降频，非采集周期复用缓存（见各 throttle 方法）
+        collectEntitiesThrottled(snap, cfg);
+        collectChunksThrottled(snap, cfg);
+        collectTileEntitiesThrottled(snap, cfg);
+
+        // 服务器信息 Bukkit 部分（世界数/插件数）：主线程采集
+        safeCollect(MetricsSnapshot.MODULE_SERVER, snap, () -> collectServerInfoBukkit(snap));
+
+        // JVM 指标：从异步缓存读取填入（内存/CPU/GC/运行时信息）
+        applyJvmCache(snap);
 
         history.addLast(snap);
         while (history.size() > MAX_HISTORY) {
             history.pollFirst();
         }
+    }
+
+    /**
+     * 异步采集节拍（P0-1）：采集纯 JVM/MXBean 指标（内存/CPU/GC/运行时信息），整体发布到 volatile 缓存
+     * 供主线程 collectSync 读取填入快照。仍用 runOrMark/safeCollect 包裹，保持 P0-5 异常隔离与 unavailable 语义。
+     */
+    private void collectJvmAsync() {
+        MetricsSnapshot jvmSnap = new MetricsSnapshot();
+        ConfigManager.ConfigData cfg = configManager.get();
+
+        runOrMark(jvmSnap, cfg.memory_enabled, MetricsSnapshot.MODULE_MEMORY, () -> collectMemory(jvmSnap, cfg));
+        runOrMark(jvmSnap, cfg.cpu_enabled, MetricsSnapshot.MODULE_CPU, () -> collectCPU(jvmSnap, cfg));
+        safeCollect(MetricsSnapshot.MODULE_GC, jvmSnap, () -> collectGC(jvmSnap));
+        safeCollect(MetricsSnapshot.MODULE_SERVER, jvmSnap, () -> collectServerInfoJvm(jvmSnap));
+
+        jvmCache = jvmSnap; // volatile 整体发布，主线程读到的始终是某一轮的完整数据，无半成品
+    }
+
+    // ==================== P0-1 重模块分级降频（节流缓存，仅主线程） ====================
+
+    /** 实体采集（分级降频）：每 ENTITY_SAMPLE_EVERY 个周期遍历一次世界实体并刷新缓存，其余周期复用缓存值填入快照。 */
+    private void collectEntitiesThrottled(MetricsSnapshot snap, ConfigManager.ConfigData cfg) {
+        if (!entitiesCacheReady || tickCounter % ENTITY_SAMPLE_EVERY == 0) {
+            refreshEntitiesCache(cfg);
+        }
+        applyEntitiesCache(snap);
+    }
+
+    private void refreshEntitiesCache(ConfigManager.ConfigData cfg) {
+        entitiesCacheReady = true;
+        if (!cfg.entities_enabled) {   // 配置禁用：与 runOrMark 语义一致，标记不可用
+            entitiesCacheUnavailable = true;
+            return;
+        }
+        // 临时快照承接本次采集，隔离出本模块产生的告警，便于缓存后在复用周期一并还原
+        MetricsSnapshot tmp = new MetricsSnapshot();
+        safeCollect(MetricsSnapshot.MODULE_ENTITIES, tmp, () -> collectEntities(tmp, cfg));
+        if (tmp.unavailable.contains(MetricsSnapshot.MODULE_ENTITIES)) {
+            entitiesCacheUnavailable = true;
+            return;
+        }
+        entitiesCacheUnavailable = false;
+        cachedTotalEntities = tmp.totalEntities;
+        cachedEntitiesByType = tmp.entitiesByType;
+        cachedEntitiesByWorld = tmp.entitiesByWorld;
+        cachedEntityWarnings = tmp.activeWarnings;
+        cachedEntityCriticals = tmp.activeCriticals;
+    }
+
+    private void applyEntitiesCache(MetricsSnapshot snap) {
+        if (!entitiesCacheReady || entitiesCacheUnavailable) {
+            snap.unavailable.add(MetricsSnapshot.MODULE_ENTITIES);
+            return;
+        }
+        snap.totalEntities = cachedTotalEntities;
+        snap.entitiesByType = cachedEntitiesByType;
+        snap.entitiesByWorld = cachedEntitiesByWorld;
+        snap.activeWarnings.addAll(cachedEntityWarnings);
+        snap.activeCriticals.addAll(cachedEntityCriticals);
+    }
+
+    /** 区块采集（分级降频）：每 CHUNK_SAMPLE_EVERY 个周期遍历一次已加载区块并刷新缓存，其余周期复用缓存值填入快照。 */
+    private void collectChunksThrottled(MetricsSnapshot snap, ConfigManager.ConfigData cfg) {
+        if (!chunksCacheReady || tickCounter % CHUNK_SAMPLE_EVERY == 0) {
+            refreshChunksCache(cfg);
+        }
+        applyChunksCache(snap);
+    }
+
+    private void refreshChunksCache(ConfigManager.ConfigData cfg) {
+        chunksCacheReady = true;
+        if (!cfg.chunks_enabled) {
+            chunksCacheUnavailable = true;
+            return;
+        }
+        MetricsSnapshot tmp = new MetricsSnapshot();
+        safeCollect(MetricsSnapshot.MODULE_CHUNKS, tmp, () -> collectChunks(tmp, cfg));
+        if (tmp.unavailable.contains(MetricsSnapshot.MODULE_CHUNKS)) {
+            chunksCacheUnavailable = true;
+            return;
+        }
+        chunksCacheUnavailable = false;
+        cachedTotalLoadedChunks = tmp.totalLoadedChunks;
+        cachedTotalForceLoadedChunks = tmp.totalForceLoadedChunks;
+        cachedChunksByWorld = tmp.chunksByWorld;
+        cachedForceLoadedChunksByWorld = tmp.forceLoadedChunksByWorld;
+        cachedChunkWarnings = tmp.activeWarnings;
+        cachedChunkCriticals = tmp.activeCriticals;
+    }
+
+    private void applyChunksCache(MetricsSnapshot snap) {
+        if (!chunksCacheReady || chunksCacheUnavailable) {
+            snap.unavailable.add(MetricsSnapshot.MODULE_CHUNKS);
+            return;
+        }
+        snap.totalLoadedChunks = cachedTotalLoadedChunks;
+        snap.totalForceLoadedChunks = cachedTotalForceLoadedChunks;
+        snap.chunksByWorld = cachedChunksByWorld;
+        snap.forceLoadedChunksByWorld = cachedForceLoadedChunksByWorld;
+        snap.activeWarnings.addAll(cachedChunkWarnings);
+        snap.activeCriticals.addAll(cachedChunkCriticals);
+    }
+
+    /** 方块实体采集（分级降频）：每 TE_SAMPLE_EVERY 个周期遍历一次并刷新缓存，其余周期复用缓存值填入快照。 */
+    private void collectTileEntitiesThrottled(MetricsSnapshot snap, ConfigManager.ConfigData cfg) {
+        if (!teCacheReady || tickCounter % TE_SAMPLE_EVERY == 0) {
+            refreshTileEntitiesCache(cfg);
+        }
+        applyTileEntitiesCache(snap);
+    }
+
+    private void refreshTileEntitiesCache(ConfigManager.ConfigData cfg) {
+        teCacheReady = true;
+        if (!cfg.tileEntities_enabled) {
+            teCacheUnavailable = true;
+            return;
+        }
+        MetricsSnapshot tmp = new MetricsSnapshot();
+        safeCollect(MetricsSnapshot.MODULE_TILE_ENTITIES, tmp, () -> collectTileEntities(tmp));
+        if (tmp.unavailable.contains(MetricsSnapshot.MODULE_TILE_ENTITIES)) {
+            teCacheUnavailable = true;
+            return;
+        }
+        teCacheUnavailable = false;
+        cachedTileEntityCount = tmp.tileEntityCount;
+        cachedTileEntitiesByWorld = tmp.tileEntitiesByWorld;
+    }
+
+    private void applyTileEntitiesCache(MetricsSnapshot snap) {
+        if (!teCacheReady || teCacheUnavailable) {
+            snap.unavailable.add(MetricsSnapshot.MODULE_TILE_ENTITIES);
+            return;
+        }
+        snap.tileEntityCount = cachedTileEntityCount;
+        snap.tileEntitiesByWorld = cachedTileEntitiesByWorld;
+    }
+
+    // ==================== P0-1 JVM 异步缓存读取 ====================
+
+    /**
+     * 将异步 JVM 缓存填入当前快照（P0-1）。
+     * 缓存为空（启动初期异步尚未产出）时，内存/CPU/GC 标记 unavailable，避免 0 值误导或 NPE；
+     * server 的 Bukkit 部分已在主线程采集，JVM 部分（运行时长/线程数）短暂为默认值，下一周期即补上。
+     */
+    private void applyJvmCache(MetricsSnapshot snap) {
+        MetricsSnapshot jvm = jvmCache; // volatile 读一次，保证本次填入一致
+        if (jvm == null) {
+            snap.unavailable.add(MetricsSnapshot.MODULE_MEMORY);
+            snap.unavailable.add(MetricsSnapshot.MODULE_CPU);
+            snap.unavailable.add(MetricsSnapshot.MODULE_GC);
+            return;
+        }
+        // 内存
+        snap.heapUsed = jvm.heapUsed;
+        snap.heapMax = jvm.heapMax;
+        snap.heapTotal = jvm.heapTotal;
+        snap.nonHeapUsed = jvm.nonHeapUsed;
+        snap.nonHeapMax = jvm.nonHeapMax;
+        snap.heapUsagePercent = jvm.heapUsagePercent;
+        // CPU
+        snap.processCpuLoad = jvm.processCpuLoad;
+        snap.systemCpuLoad = jvm.systemCpuLoad;
+        snap.availableProcessors = jvm.availableProcessors;
+        // GC
+        snap.gcCount = jvm.gcCount;
+        snap.gcTime = jvm.gcTime;
+        // 服务器信息 - JVM 部分（运行时长 / 线程数）
+        snap.uptimeSeconds = jvm.uptimeSeconds;
+        snap.threadCount = jvm.threadCount;
+        // JVM 模块的不可用标记与告警一并并入当前快照（内存/CPU 的阈值告警在采集时已生成）
+        snap.unavailable.addAll(jvm.unavailable);
+        snap.activeWarnings.addAll(jvm.activeWarnings);
+        snap.activeCriticals.addAll(jvm.activeCriticals);
     }
 
     /**
@@ -456,9 +701,18 @@ public class MetricsCollector {
 
     // ==================== 服务器信息 ====================
 
-    private void collectServerInfo(MetricsSnapshot snap) {
+    /**
+     * 服务器信息 - 纯 JVM 部分（运行时长 / 线程数），由异步任务采集（MXBean 线程安全）。
+     */
+    private void collectServerInfoJvm(MetricsSnapshot snap) {
         snap.uptimeSeconds = ManagementFactory.getRuntimeMXBean().getUptime() / 1000;
         snap.threadCount = ManagementFactory.getThreadMXBean().getThreadCount();
+    }
+
+    /**
+     * 服务器信息 - Bukkit 部分（插件数 / 世界数），留在主线程采集（Bukkit API 安全优先）。
+     */
+    private void collectServerInfoBukkit(MetricsSnapshot snap) {
         snap.loadedPluginCount = Bukkit.getPluginManager().getPlugins().length;
         snap.worldCount = Bukkit.getWorlds().size();
     }

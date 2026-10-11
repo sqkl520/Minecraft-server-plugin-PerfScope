@@ -18,13 +18,13 @@
 package cn.perfscope;
 
 import cn.perfscope.command.PerfScopeCommand;
+import cn.perfscope.compat.SchedulerAdapter;
 import cn.perfscope.compat.ServerCompat;
 import cn.perfscope.config.ConfigManager;
 import cn.perfscope.metrics.MetricsCollector;
 import cn.perfscope.report.ReportGenerator;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.java.JavaPlugin;
-import org.bukkit.scheduler.BukkitTask;
 
 public final class PerfScope extends JavaPlugin {
 
@@ -34,7 +34,7 @@ public final class PerfScope extends JavaPlugin {
     private MetricsCollector metricsCollector;
     private ReportGenerator reportGenerator;
     private PerfScopeCommand command;
-    private BukkitTask autoReportTask;
+    private SchedulerAdapter.TaskHandle autoReportTask;
 
     @Override
     public void onEnable() {
@@ -120,9 +120,9 @@ public final class PerfScope extends JavaPlugin {
     private void startAutoReport() {
         stopAutoReport(); // 防呆：避免重复启动叠任务
         long intervalTicks = configManager.get().report_autoExportInterval * 60L * 20L;
-        autoReportTask = getServer().getScheduler().runTaskTimerAsynchronously(this, () -> {
-            reportGenerator.generateAndSave();
-        }, intervalTicks, intervalTicks);
+        // P0-8：经 SchedulerAdapter 走异步调度（Folia 下自动用 AsyncScheduler）
+        autoReportTask = SchedulerAdapter.runAsyncTimer(
+            this, () -> reportGenerator.generateAndSave(), intervalTicks, intervalTicks);
         getLogger().info("  [+] 自动报告已启用 (间隔: " +
             configManager.get().report_autoExportInterval + " 分钟)");
     }
