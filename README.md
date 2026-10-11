@@ -102,7 +102,6 @@ GC: 42 次 / 5.23 秒
 ```yaml
 general:
   update_interval: 20       # 数据采集间隔 (tick)
-  language: zh_cn
   debug: false
 
 tps:

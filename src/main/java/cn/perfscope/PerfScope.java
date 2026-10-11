@@ -17,6 +17,7 @@
  */
 package cn.perfscope;
 
+import cn.perfscope.alert.AlertService;
 import cn.perfscope.command.PerfScopeCommand;
 import cn.perfscope.compat.SchedulerAdapter;
 import cn.perfscope.compat.ServerCompat;
@@ -35,6 +36,7 @@ public final class PerfScope extends JavaPlugin {
     private ReportGenerator reportGenerator;
     private PerfScopeCommand command;
     private SchedulerAdapter.TaskHandle autoReportTask;
+    private AlertService alertService;
 
     @Override
     public void onEnable() {
@@ -52,6 +54,10 @@ public final class PerfScope extends JavaPlugin {
         // 初始化性能采集器
         this.metricsCollector = new MetricsCollector(this);
         startCollectionTasks();
+
+        // 初始化告警服务（P0-4：位置在采集器启动之后，周期读取快照推送告警）
+        this.alertService = new AlertService(this);
+        alertService.start();
 
         // 初始化报告生成器
         this.reportGenerator = new ReportGenerator(this);
@@ -98,6 +104,8 @@ public final class PerfScope extends JavaPlugin {
             command.shutdown();
         }
         stopAutoReport();
+        // P0-4：先停告警服务，再停采集（避免告警定时器读到已停采集的旧快照）
+        stopAlertService();
         stopCollectionTasks();
         getLogger().info("PerfScope 已关闭，再见喵~");
         instance = null;
@@ -134,15 +142,32 @@ public final class PerfScope extends JavaPlugin {
         }
     }
 
+    /** 启动告警服务（P0-4）：定时器重建以应用新间隔；enabled=false 时 start() 内部直接返回。 */
+    private void startAlertService() {
+        if (alertService != null) {
+            alertService.start();
+        }
+    }
+
+    /** 停止告警服务（P0-4）：只取消定时器，冷却/活跃状态机保留（V1.3 规格：reload 不清状态机）。 */
+    private void stopAlertService() {
+        if (alertService != null) {
+            alertService.stop();
+        }
+    }
+
     /**
      * 真重载（P0-14）：stop→重读→start，重建采集与自动报告任务。
      * monitor 任务不受影响（玩家监测态保持，间隔固定 20 tick 无配置项）。
+     * P0-4：告警服务同步启停（enabled 切 false 时不重建定时器），但不重置冷却/活跃状态机。
      */
     public void reload() {
         stopCollectionTasks();
         stopAutoReport();
+        stopAlertService();
         configManager.load();
         startCollectionTasks();
+        startAlertService();
         if (configManager.get().report_autoExport) {
             startAutoReport();
         }
@@ -164,5 +189,9 @@ public final class PerfScope extends JavaPlugin {
 
     public ReportGenerator getReportGenerator() {
         return reportGenerator;
+    }
+
+    public AlertService getAlertService() {
+        return alertService;
     }
 }

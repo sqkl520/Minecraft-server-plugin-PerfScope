@@ -49,7 +49,6 @@ public class ConfigManager {
 
         // === 常规设置 ===
         config.general_updateInterval = yaml.getInt("general.update_interval", 20);
-        config.general_language = yaml.getString("general.language", "zh_cn");
         config.general_verboseStartup = yaml.getBoolean("general.verbose_startup", true);
         config.general_debug = yaml.getBoolean("general.debug", false);
 
@@ -72,7 +71,6 @@ public class ConfigManager {
         config.entities_enabled = yaml.getBoolean("entities.enabled", true);
         config.entities_totalWarningThreshold = yaml.getInt("entities.total_warning_threshold", 2000);
         config.entities_totalCriticalThreshold = yaml.getInt("entities.total_critical_threshold", 3000);
-        config.entities_trackedTypes = new HashSet<>(yaml.getStringList("entities.tracked_types"));
 
         // === 区块 ===
         config.chunks_enabled = yaml.getBoolean("chunks.enabled", true);
@@ -101,7 +99,13 @@ public class ConfigManager {
         config.report_autoExportInterval = yaml.getInt("report.auto_export_interval", 30);
         config.report_format = yaml.getString("report.format", "html");
         config.report_retentionDays = yaml.getInt("report.retention_days", 7);
-        config.report_verboseReport = yaml.getBoolean("report.verbose_report", true);
+
+        // === 告警（P0-4 基础版：控制台 + OP 游戏内 + 冷却） ===
+        config.alerts_enabled = yaml.getBoolean("alerts.enabled", true);
+        config.alerts_console = yaml.getBoolean("alerts.console", true);
+        config.alerts_in_game = yaml.getBoolean("alerts.in-game", true);
+        config.alerts_cooldownSeconds = yaml.getInt("alerts.cooldown-seconds", 300);
+        config.alerts_notifyRecovery = yaml.getBoolean("alerts.notify-recovery", true);
 
         // === 各世界设置 ===
         config.worldSettings = new HashMap<>();
@@ -135,7 +139,6 @@ public class ConfigManager {
     public static class ConfigData {
         // 常规
         public int general_updateInterval;
-        public String general_language;
         public boolean general_verboseStartup;
         public boolean general_debug;
 
@@ -158,7 +161,6 @@ public class ConfigManager {
         public boolean entities_enabled;
         public int entities_totalWarningThreshold;
         public int entities_totalCriticalThreshold;
-        public Set<String> entities_trackedTypes;
 
         // 区块
         public boolean chunks_enabled;
@@ -187,7 +189,13 @@ public class ConfigManager {
         public int report_autoExportInterval;
         public String report_format;
         public int report_retentionDays;
-        public boolean report_verboseReport;
+
+        // 告警（P0-4 基础版）
+        public boolean alerts_enabled;
+        public boolean alerts_console;
+        public boolean alerts_in_game;
+        public int alerts_cooldownSeconds;
+        public boolean alerts_notifyRecovery;
 
         // 各世界设置
         public Map<String, WorldSettings> worldSettings;

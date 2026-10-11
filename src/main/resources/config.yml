@@ -6,8 +6,6 @@
 general:
   # 数据采集间隔 (tick), 20 = 1秒
   update_interval: 20
-  # 语言 (暂支持 zh_cn)
-  language: zh_cn
   # 是否在插件启动时显示详细信息
   verbose_startup: true
   # 是否启用调试日志
@@ -40,16 +38,6 @@ entities:
   # 总实体数告警阈值
   total_warning_threshold: 2000
   total_critical_threshold: 3000
-  # 按实体类型单独监测 (不在此列表中的类型也会被统计)
-  tracked_types:
-    - ZOMBIE
-    - SKELETON
-    - CREEPER
-    - ITEM
-    - ITEM_FRAME
-    - ARMOR_STAND
-    - VILLAGER
-    - MINECART
 
 # 区块监测
 chunks:
@@ -98,8 +86,19 @@ report:
   format: html
   # 报告保留天数 (0 = 永久保留)
   retention_days: 7
-  # 是否在报告中包含详细信息
-  verbose_report: true
+
+# 告警推送 (v1.1 基础版：控制台 + 在线 OP 游戏内推送 + 冷却)
+alerts:
+  # 总开关 (false = 完全不做告警检查与推送)
+  enabled: true
+  # 控制台推送 (critical 用 severe / warning 用 warning / 恢复用 info)
+  console: true
+  # 游戏内推送 (发送给在线且有 perfscope.alert 权限的玩家)
+  in-game: true
+  # 同一告警的冷却秒数 (0 = 无冷却，仍受采集周期节流)
+  cooldown-seconds: 300
+  # 恢复通知 (告警消失时推送一条"已恢复正常")
+  notify-recovery: true
 
 # 各世界单独设置 (可覆盖全局设置)
 worlds:

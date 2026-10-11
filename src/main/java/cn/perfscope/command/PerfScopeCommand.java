@@ -44,7 +44,9 @@ import org.bukkit.event.player.PlayerQuitEvent;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.text.SimpleDateFormat;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -167,7 +169,9 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         // === 头部 ===
         sender.sendMessage(Component.text("=== PerfScope 诊断 ===", GOLD, TextDecoration.BOLD));
         sender.sendMessage(Component.text("服务端: " + ServerCompat.getServerName(), GRAY));
-        sender.sendMessage(Component.text("采集时间: " + new SimpleDateFormat("HH:mm:ss").format(new Date(snap.timestamp)), GRAY));
+        sender.sendMessage(Component.text("采集时间: "
+            + DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault())
+                .format(Instant.ofEpochMilli(snap.timestamp)), GRAY));
 
         // TPS（P0-5：模块不可用显示"不可用"）
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_TPS)) {

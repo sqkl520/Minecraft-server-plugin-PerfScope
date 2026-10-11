@@ -102,7 +102,6 @@ Key configuration options (`config.yml`):
 ```yaml
 general:
   update_interval: 20       # Data collection interval (ticks)
-  language: zh_cn
   debug: false
 
 tps:

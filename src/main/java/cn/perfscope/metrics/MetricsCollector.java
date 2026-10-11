@@ -715,6 +715,13 @@ public class MetricsCollector {
     private void collectServerInfoBukkit(MetricsSnapshot snap) {
         snap.loadedPluginCount = Bukkit.getPluginManager().getPlugins().length;
         snap.worldCount = Bukkit.getWorlds().size();
+        // V1.2 D-SYS-02 诊断用；Folia 下 getPendingTasks 可能不适用，若抛异常由 safeCollect 隔离
+        // （此处就地 try-catch 置 -1 哨兵，避免牵连整个 server 模块被标 unavailable）
+        try {
+            snap.pendingTasks = Bukkit.getScheduler().getPendingTasks().size();
+        } catch (Exception | LinkageError t) {
+            snap.pendingTasks = -1;
+        }
     }
 
     // ==================== 公共访问方法 ====================
