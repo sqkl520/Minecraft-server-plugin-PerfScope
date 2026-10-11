@@ -3,13 +3,12 @@ version: 1.0.0
 main: cn.perfscope.PerfScope
 api-version: "1.20"
 folia-supported: true
-description: 高性能服务器性能监测插件 - 兼容 Paper/Spigot/Bukkit
+description: 高性能服务器性能监测插件 - 专注 Paper 系服务端（Paper/Purpur/Pufferfish/Folia）
 author: PerfScope Team
 website: https://github.com/PerfScope
 
-# 兼容 Paper / Spigot / Bukkit 全系列
-# Paper 上可获得完整 MSPT/ActionBar 功能
-# Spigot/Bukkit 上 MSPT 通过 TPS 反推估算，部分功能降级
+# 专注 Paper 系服务端：Paper / Purpur / Pufferfish / Folia 及其分支
+# Paper 运行时原生自带 Adventure，完整 MSPT / ActionBar 功能，无需 shade
 # （红石/网络监测已于 v1.1 下线）
 
 commands:

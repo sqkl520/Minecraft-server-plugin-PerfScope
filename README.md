@@ -14,9 +14,7 @@
 - **区块统计** —— 加载区块数/强加载区块数/按世界分布，支持独立告警
 - **内存诊断** —— 堆内存使用/上限/使用率/已分配，非堆内存使用，GC 次数/耗时/各收集器详情
 - **CPU 诊断** —— 进程 CPU 使用率/系统 CPU 负载/可用处理器数/活跃线程数
-- **红石活动追踪** —— Paper 服务端红石线活跃计数
 - **Tile Entity 统计** —— 总数/按世界分布
-- **网络吞吐量监测** —— 每秒收发字节数，支持流量告警
 - **服务器运行信息** —— uptime/线程数/已加载插件数/已加载世界数/JVM 版本
 - **高度自定义配置** —— 所有模块的告警阈值、采集间隔、实体追踪类型均可配置
 - **ActionBar 实时监测** —— `/perfscope monitor` 切换，每秒刷新核心指标到屏幕顶部
@@ -24,6 +22,14 @@
 - **自动报告生成** —— 可配置间隔，异步生成不阻塞主线程，旧报告自动按保留天数清理
 - **按世界独立告警** —— 各世界可覆盖实体告警阈值
 - **彩色 UI 面板** —— 使用 Paper Adventure API 渲染，TPS/MSPT/内存根据阈值自动变色（绿/黄/红）
+
+## 目标平台与兼容性
+
+PerfScope 自 v1.1 起专注 **Paper 系**服务端，深度依赖 Paper 原生 Adventure API 等特性：
+
+- **支持**：Paper 1.20.4+ 及其下游分支（Purpur / Pufferfish / Leaves 等）
+- **Folia**：自 v1.1 起支持——通过调度适配层经 `GlobalRegionScheduler` / `AsyncScheduler` 适配，`plugin.yml` 已声明 `folia-supported: true`（全局与 JVM 级指标完整，实体/区块指标为尽力而为）
+- **不支持**：纯 Spigot / CraftBukkit
 
 ## 命令
 
@@ -39,7 +45,7 @@
 | `/perfscope cpu` | CPU 诊断（进程/系统/线程） |
 | `/perfscope players` | 玩家统计（在线数/列表/延迟） |
 | `/perfscope world [世界]` | 世界详情（可点击跳转） |
-| `/perfscope redstone` | 红石活动 |
+| `/perfscope redstone` | 红石活动（v1.1 已下线） |
 | `/perfscope tileentities` | Tile Entity 统计 |
 | `/perfscope uptime` | 运行时间 + JVM 信息 |
 | `/perfscope gc` | GC 统计（各收集器详情） |
@@ -154,10 +160,10 @@ worlds:
 | 内存 | 堆使用/上限/使用率/已分配/非堆 | JVM 内存状况 |
 | CPU | 进程 CPU/系统 CPU/可用处理器 | 处理器负载 |
 | GC | GC 次数/耗时/各收集器详情 | 垃圾回收统计 |
-| 红石 | 活跃红石线数 | 红石活动追踪 |
 | Tile Entity | 总数/按世界分布 | 方块实体负载 |
-| 网络 | 每秒收发字节数 | 网络吞吐量 |
 | 服务器 | uptime/线程数/插件数/世界数/JVM | 服务器基本信息 |
+
+> 注：**红石活动**与**网络吞吐量**监测已于 v1.1 下线（此前为空实现），相关指标与功能不再提供；`/perfscope redstone` 子命令保留入口但仅返回下线提示。
 
 ## 依赖
 

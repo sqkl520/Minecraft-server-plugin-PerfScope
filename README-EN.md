@@ -14,9 +14,7 @@ A comprehensive performance monitoring plugin for Minecraft servers, focused on 
 - **Chunk Statistics** —— Loaded chunks/force-loaded chunks/per-world, with independent alerts
 - **Memory Diagnostics** —— Heap used/max/usage%/allocated, non-heap memory, GC count/time/per-collector details
 - **CPU Diagnostics** —— Process CPU usage/system CPU load/available processors/active threads
-- **Redstone Activity Tracking** —— Paper server redstone wire active count
 - **Tile Entity Statistics** —— Total/per-world distribution
-- **Network Throughput** —— Bytes sent/received per second, with traffic alerts
 - **Server Info** —— Uptime/thread count/plugin count/world count/JVM version
 - **Highly Customizable Config** —— All module alert thresholds, collection intervals, entity tracking types configurable
 - **ActionBar Live Monitor** —— `/perfscope monitor` to toggle, refreshes core metrics every second on screen top
@@ -24,6 +22,14 @@ A comprehensive performance monitoring plugin for Minecraft servers, focused on 
 - **Auto Report Generation** —— Configurable interval, async generation without blocking main thread, auto cleanup by retention days
 - **Per-World Independent Alerts** —— Override entity alert thresholds per world
 - **Color-Coded UI** —— Rendered via Paper Adventure API, TPS/MSPT/memory auto-color by threshold (green/yellow/red)
+
+## Target Platform & Compatibility
+
+Since v1.1, PerfScope focuses on the **Paper family** of servers and relies heavily on Paper-native features such as the Adventure API:
+
+- **Supported**: Paper 1.20.4+ and its downstream forks (Purpur / Pufferfish / Leaves, etc.)
+- **Folia**: supported since v1.1 — adapted through a scheduler layer via `GlobalRegionScheduler` / `AsyncScheduler`, with `folia-supported: true` declared in `plugin.yml` (global and JVM-level metrics are complete; entity/chunk metrics are best-effort)
+- **Not supported**: plain Spigot / CraftBukkit
 
 ## Commands
 
@@ -39,7 +45,7 @@ A comprehensive performance monitoring plugin for Minecraft servers, focused on 
 | `/perfscope cpu` | CPU diagnostics (process/system/threads) |
 | `/perfscope players` | Player statistics (online/list/ping) |
 | `/perfscope world [world]` | World details (clickable navigation) |
-| `/perfscope redstone` | Redstone activity |
+| `/perfscope redstone` | Redstone activity (discontinued in v1.1) |
 | `/perfscope tileentities` | Tile Entity statistics |
 | `/perfscope uptime` | Uptime + JVM info |
 | `/perfscope gc` | GC statistics (per-collector details) |
@@ -154,10 +160,10 @@ See `plugins/PerfScope/config.yml` for complete configuration details.
 | Memory | heap used/max/usage%/allocated/non-heap | JVM memory status |
 | CPU | process CPU/system CPU/processors | Processor load |
 | GC | count/time/per-collector | Garbage collection stats |
-| Redstone | active redstone wire count | Redstone activity |
 | Tile Entity | total/per-world | Block entity load |
-| Network | bytes sent/received per second | Network throughput |
 | Server | uptime/threads/plugins/worlds/JVM | Server basic info |
+
+> Note: **Redstone activity** and **network throughput** monitoring were discontinued in v1.1 (previously stub implementations); these metrics and features are no longer provided. The `/perfscope redstone` subcommand is kept as an entry point but only returns a discontinued notice.
 
 ## Dependencies
 

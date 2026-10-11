@@ -37,9 +37,9 @@ public final class ServerCompat {
     public static final boolean PAPER_AVG_TICK_AVAILABLE;
     /** Paper TileEntity 计数 API 是否可用 */
     public static final boolean PAPER_TILE_ENTITY_COUNT_AVAILABLE;
-    /** Paper ActionBar API 是否可用 */
+    /** Paper ActionBar API 是否可用（Paper 系原生提供 sendActionBar(Component)，恒可用） */
     public static final boolean PAPER_ACTION_BAR_AVAILABLE;
-    /** Adventure API 是否可用 */
+    /** Adventure API 是否可用（Paper 系运行时原生自带 Adventure，恒可用） */
     public static final boolean ADVENTURE_AVAILABLE;
 
     static {
@@ -60,8 +60,10 @@ public final class ServerCompat {
         PAPER_MSPT_AVAILABLE = checkPaperMSPT();
         PAPER_AVG_TICK_AVAILABLE = checkPaperAvgTick();
         PAPER_TILE_ENTITY_COUNT_AVAILABLE = checkPaperTileEntityCount();
-        PAPER_ACTION_BAR_AVAILABLE = checkPaperActionBar();
-        ADVENTURE_AVAILABLE = checkAdventure();
+        // Paper 系原生自带 Adventure，sendActionBar(Component) 恒可用；
+        // 已移除旧 shade/Spigot 降级时期的反射检测（专注 Paper 系定位）
+        PAPER_ACTION_BAR_AVAILABLE = true;
+        ADVENTURE_AVAILABLE = true;
     }
 
     private ServerCompat() {}
@@ -159,24 +161,6 @@ public final class ServerCompat {
             org.bukkit.World.class.getMethod("getTileEntityCount");
             return true;
         } catch (NoSuchMethodException e) {
-            return false;
-        }
-    }
-
-    private static boolean checkPaperActionBar() {
-        try {
-            org.bukkit.entity.Player.class.getMethod("sendActionBar", net.kyori.adventure.text.Component.class);
-            return true;
-        } catch (NoSuchMethodException e) {
-            return false;
-        }
-    }
-
-    private static boolean checkAdventure() {
-        try {
-            Class.forName("net.kyori.adventure.text.Component");
-            return true;
-        } catch (ClassNotFoundException e) {
             return false;
         }
     }

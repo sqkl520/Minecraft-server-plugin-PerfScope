@@ -18,6 +18,7 @@
 package cn.perfscope.command;
 
 import cn.perfscope.PerfScope;
+import cn.perfscope.compat.SchedulerAdapter;
 import cn.perfscope.compat.ServerCompat;
 import cn.perfscope.config.ConfigManager;
 import cn.perfscope.metrics.MetricsCollector;
@@ -62,7 +63,8 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
 
     // 实时监测模式中的玩家（P0-12：并发 Set，遍历清理线程安全）
     private final Set<UUID> monitoringPlayers = ConcurrentHashMap.newKeySet();
-    private int monitorTaskId = -1;
+    // P0-8：monitor 定时任务句柄（经 SchedulerAdapter 统一调度，Folia 走 GlobalRegionScheduler）；null 表示未运行
+    private SchedulerAdapter.TaskHandle monitorTask;
 
     // 颜色常量
     private static final NamedTextColor GOLD = NamedTextColor.GOLD;
@@ -784,24 +786,29 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         if (monitoringPlayers.contains(player.getUniqueId())) {
             monitoringPlayers.remove(player.getUniqueId());
             player.sendMessage(Component.text("实时监测已关闭喵~", GREEN));
-            if (monitoringPlayers.isEmpty() && monitorTaskId != -1) {
-                Bukkit.getScheduler().cancelTask(monitorTaskId);
-                monitorTaskId = -1;
+            if (monitoringPlayers.isEmpty() && monitorTask != null) {
+                monitorTask.cancel();
+                monitorTask = null;
             }
         } else {
             monitoringPlayers.add(player.getUniqueId());
             player.sendMessage(Component.text("实时监测已开启喵~ 使用 /perfscope monitor 关闭", GREEN));
-            if (monitorTaskId == -1) {
+            if (monitorTask == null) {
                 startMonitorTask();
             }
         }
     }
 
     private void startMonitorTask() {
-        monitorTaskId = Bukkit.getScheduler().scheduleSyncRepeatingTask(plugin, () -> {
+        // P0-8：经 SchedulerAdapter.runGlobalTimer 调度，保持 20 tick/次推送间隔。
+        // Folia 下该任务运行于 GlobalRegionScheduler（全局区域线程）；给玩家 sendActionBar 的
+        // 跨 region 线程问题由 Adventure 消息发送的线程安全性 + 外层 try 兜底处理，不追求 Folia 下 monitor 完美。
+        monitorTask = SchedulerAdapter.runGlobalTimer(plugin, () -> {
             if (monitoringPlayers.isEmpty()) {
-                Bukkit.getScheduler().cancelTask(monitorTaskId);
-                monitorTaskId = -1;
+                if (monitorTask != null) {
+                    monitorTask.cancel();
+                    monitorTask = null;
+                }
                 return;
             }
             MetricsSnapshot snap = collector.getLatest();
@@ -997,9 +1004,9 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
 
     public void shutdown() {
         monitoringPlayers.clear();
-        if (monitorTaskId != -1) {
-            Bukkit.getScheduler().cancelTask(monitorTaskId);
-            monitorTaskId = -1;
+        if (monitorTask != null) {
+            monitorTask.cancel();
+            monitorTask = null;
         }
     }
 }

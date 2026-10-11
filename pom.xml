@@ -25,49 +25,20 @@
     </properties>
 
     <repositories>
+        <!-- 专注 Paper 系：仅保留 PaperMC 仓库，移除 SpigotMC 快照仓库 -->
         <repository>
             <id>papermc</id>
             <url>https://repo.papermc.io/repository/maven-public/</url>
         </repository>
-        <repository>
-            <id>spigotmc</id>
-            <url>https://hub.spigotmc.org/nexus/content/repositories/snapshots/</url>
-        </repository>
     </repositories>
 
     <dependencies>
-        <!-- Paper API (provided) - 主要服务端 API -->
+        <!-- Paper API (provided) - Paper 系服务端 API；传递提供 Adventure (net.kyori)，无需显式声明 -->
         <dependency>
             <groupId>io.papermc.paper</groupId>
             <artifactId>paper-api</artifactId>
             <version>1.20.4-R0.1-SNAPSHOT</version>
             <scope>provided</scope>
-        </dependency>
-        <!-- Spigot API (provided) - Spigot/Bukkit 兼容 -->
-        <dependency>
-            <groupId>org.spigotmc</groupId>
-            <artifactId>spigot-api</artifactId>
-            <version>1.20.4-R0.1-SNAPSHOT</version>
-            <scope>provided</scope>
-        </dependency>
-        <!-- Adventure API (shaded) - Spigot/Bukkit 下确保可用 -->
-        <dependency>
-            <groupId>net.kyori</groupId>
-            <artifactId>adventure-api</artifactId>
-            <version>4.14.0</version>
-            <scope>compile</scope>
-        </dependency>
-        <dependency>
-            <groupId>net.kyori</groupId>
-            <artifactId>adventure-text-minimessage</artifactId>
-            <version>4.14.0</version>
-            <scope>compile</scope>
-        </dependency>
-        <dependency>
-            <groupId>net.kyori</groupId>
-            <artifactId>adventure-platform-bukkit</artifactId>
-            <version>4.3.1</version>
-            <scope>compile</scope>
         </dependency>
         <!-- Gson (provided) - 服务端自带，仅报告 JSON 生成用，P0-11 -->
         <dependency>
@@ -90,41 +61,8 @@
                     <target>${java.version}</target>
                 </configuration>
             </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-shade-plugin</artifactId>
-                <version>3.5.1</version>
-                <executions>
-                    <execution>
-                        <phase>package</phase>
-                        <goals>
-                            <goal>shade</goal>
-                        </goals>
-                        <configuration>
-                            <relocations>
-                                <relocation>
-                                    <pattern>net.kyori.adventure</pattern>
-                                    <shadedPattern>cn.perfscope.lib.adventure</shadedPattern>
-                                </relocation>
-                                <relocation>
-                                    <pattern>net.kyori.examination</pattern>
-                                    <shadedPattern>cn.perfscope.lib.examination</shadedPattern>
-                                </relocation>
-                            </relocations>
-                            <filters>
-                                <filter>
-                                    <artifact>*:*</artifact>
-                                    <excludes>
-                                        <exclude>META-INF/*.SF</exclude>
-                                        <exclude>META-INF/*.DSA</exclude>
-                                        <exclude>META-INF/*.RSA</exclude>
-                                    </excludes>
-                                </filter>
-                            </filters>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
+            <!-- 专注 Paper 系：移除 maven-shade-plugin。Adventure/Gson 均由 Paper 运行时提供（provided），
+                 无需 shade/relocate，默认 maven-jar 打包即可（不再生成 dependency-reduced-pom.xml）。 -->
         </plugins>
         <resources>
             <resource>

@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased] - v1.1 Wave 2 批次二（专注 Paper 系）
+
+### Fixed
+- P0-3（致命）：删除 Adventure 的 shade/relocate，改用 Paper 原生 Adventure（provided）——修复此前 relocate 把 `sendMessage(Component)` 参数类型改写为 `cn.perfscope.lib.adventure.Component`、导致 Paper 上一敲命令就 `NoSuchMethodError` 的致命 bug（反编译已确认签名恢复为 `net.kyori.adventure.text.Component`）
+
+### Changed
+- 定位调整：专注 Paper 系（Paper 1.20.4+ / Purpur / Pufferfish / Folia / Leaves），不再支持纯 Spigot/CraftBukkit
+- P0-15：pom 清理——移除 spigot-api、adventure-text-minimessage、adventure-platform-bukkit、maven-shade-plugin 及失效的 spigotmc 仓库；JAR 不再打包 Adventure（由 Paper 提供），体积大减
+- P0-8 收尾：monitor 命令调度迁移到 SchedulerAdapter（Folia 下可用）
+- README 中英文更新为 Paper 系定位
+
 ## [Unreleased] - v1.1 Wave 2 批次一（性能与调度）
 
 ### Changed
