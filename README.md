@@ -174,4 +174,13 @@ JAR 文件将生成在 `target/` 目录。
 
 ## 许可证
 
-MIT License
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+
+本项目自 v1.1 起采用 [GNU Affero General Public License v3.0](https://www.gnu.org/licenses/agpl-3.0.html)（AGPL-3.0）许可证，完整条款见仓库根目录的 LICENSE 文件。
+
+这意味着：
+- 允许商用，但须保留原作者署名；
+- 二次分发（无论是否修改）须整体以 AGPL-3.0 开源；
+- 基于本插件提供网络服务（如部署在服务器上供玩家使用）须向用户提供对应源码。
+
+版本说明：v1.0.0 及之前已发布的版本永久保持 GPL-3.0，不受此次变更影响；自 v1.1 起为 AGPL-3.0。

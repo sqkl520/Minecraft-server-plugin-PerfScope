@@ -12,6 +12,7 @@
 - 启动信息增强：verbose 模式显示各功能可用性 (MSPT采集/ActionBar/红石追踪/网络统计)
 
 ### Changed
+- 许可证自本版本起变更为 AGPL-3.0（v1.0.0及之前为GPL-3.0）
 - 插件描述更新：兼容 Paper/Spigot/Bukkit 全系列，Paper 上获完整功能，Spigot/Bukkit 部分功能降级
 - ActionBar 实时监测：非 Paper 服务端使用时会提示"需要 Paper 服务端支持"
 

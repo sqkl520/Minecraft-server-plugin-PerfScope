@@ -12,6 +12,13 @@
     <name>PerfScope</name>
     <description>高性能服务器性能监测插件 - 实时监控TPS/MSPT/实体/区块/内存等</description>
 
+    <licenses>
+        <license>
+            <name>GNU Affero General Public License v3.0</name>
+            <url>https://www.gnu.org/licenses/agpl-3.0.html</url>
+        </license>
+    </licenses>
+
     <properties>
         <java.version>17</java.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
