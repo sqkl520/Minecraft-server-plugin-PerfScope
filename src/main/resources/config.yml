@@ -35,7 +35,8 @@ players:
 # 实体监测
 entities:
   enabled: true
-  # 总实体数告警阈值
+  # 实体总数告警阈值（全服合计：所有世界实体数相加后与下方阈值比较，与命令层 /perfscope entities 的总数口径一致）
+  # 配置了 worlds 覆盖的世界按各自阈值逐世界判定、同时仍计入全服合计总数；未配置的世界由全服合计阈值覆盖
   total_warning_threshold: 2000
   total_critical_threshold: 3000
 
@@ -101,6 +102,8 @@ alerts:
   notify-recovery: true
 
 # 各世界单独设置 (可覆盖全局设置)
+# 语义（与采集层判定一致）：此处配置了的世界，其实体数按该世界独立阈值逐世界判定；
+# 未在此处配置的世界，不逐世界判定，统一由上方 entities 段的全服合计阈值覆盖。
 worlds:
   world:
     entities:

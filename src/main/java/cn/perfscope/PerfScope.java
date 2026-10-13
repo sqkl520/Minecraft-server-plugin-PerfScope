@@ -87,8 +87,9 @@ public final class PerfScope extends JavaPlugin {
             getLogger().info("  [+] 指令系统已注册 (/perfscope, /pscope, /perf)");
             getLogger().info("  [+] 报告系统就绪 (格式: " +
                 configManager.get().report_format + ")");
-            // 功能可用性
-            getLogger().info("  MSPT精确采集: " + (ServerCompat.PAPER_MSPT_AVAILABLE ? "Paper API" : "TPS估算"));
+            // MC-1 标注层：一级 getTickTimes 或二级 getAverageTickTime 均非"估算"，仅三级 TPS 反推才是
+            boolean exactMspt = ServerCompat.PAPER_MSPT_AVAILABLE || ServerCompat.PAPER_AVG_TICK_AVAILABLE;
+            getLogger().info("  MSPT精确采集: " + (exactMspt ? "Paper API" : "TPS估算"));
             getLogger().info("  ActionBar: " + (ServerCompat.PAPER_ACTION_BAR_AVAILABLE ? "可用" : "不可用"));
         }
 
@@ -113,9 +114,14 @@ public final class PerfScope extends JavaPlugin {
 
     // ==================== 任务启停（P0-14 收敛：P0-8 替换为 SchedulerAdapter 时只需改这四个方法内部） ====================
 
-    /** 启动采集任务（当前经由 MetricsCollector 走 Bukkit 调度器）。 */
+    /** 启动采集任务（当前经由 MetricsCollector 走 Bukkit 调度器）。A9a：调度异常捕获，不留半状态。 */
     private void startCollectionTasks() {
-        metricsCollector.start();
+        try {
+            metricsCollector.start();
+        } catch (Exception | LinkageError e) {
+            getLogger().severe("[PerfScope] 采集任务启动失败: " + e.getMessage());
+            getLogger().log(java.util.logging.Level.SEVERE, "[PerfScope] 采集任务启动异常堆栈", e);
+        }
     }
 
     /** 停止采集任务。 */
@@ -125,14 +131,28 @@ public final class PerfScope extends JavaPlugin {
         }
     }
 
+    /** 启动自动报告任务。A9a：调度异常捕获并记录（间隔非法时 report 侧不再进入半状态）。 */
     private void startAutoReport() {
         stopAutoReport(); // 防呆：避免重复启动叠任务
-        long intervalTicks = configManager.get().report_autoExportInterval * 60L * 20L;
-        // P0-8：经 SchedulerAdapter 走异步调度（Folia 下自动用 AsyncScheduler）
-        autoReportTask = SchedulerAdapter.runAsyncTimer(
-            this, () -> reportGenerator.generateAndSave(), intervalTicks, intervalTicks);
-        getLogger().info("  [+] 自动报告已启用 (间隔: " +
-            configManager.get().report_autoExportInterval + " 分钟)");
+        // L-2/A9b：auto_export_interval ≤0 会被 Bukkit 调度器 coerce（0→每 tick 写盘 IO 风暴；
+        // 负值→单次后静默死亡）/Folia 校正为每 tick，行为分叉，故强制下限 1 分钟
+        int configuredMinutes = configManager.get().report_autoExportInterval;
+        if (configuredMinutes <= 0) {
+            getLogger().warning("[PerfScope] report.auto_export_interval=" + configuredMinutes
+                + " 非法（需 ≥1 分钟），已按 1 分钟处理");
+        }
+        long intervalMinutes = Math.max(1, configuredMinutes);
+        long intervalTicks = intervalMinutes * 60L * 20L;
+        try {
+            // P0-8：经 SchedulerAdapter 走异步调度（Folia 下自动用 AsyncScheduler）
+            autoReportTask = SchedulerAdapter.runAsyncTimer(
+                this, () -> reportGenerator.generateAndSave(), intervalTicks, intervalTicks);
+        } catch (Exception | LinkageError e) {
+            getLogger().severe("[PerfScope] 自动报告任务启动失败: " + e.getMessage());
+            autoReportTask = null;
+            return;
+        }
+        getLogger().info("  [+] 自动报告已启用 (间隔: " + intervalMinutes + " 分钟)");
     }
 
     private void stopAutoReport() {
@@ -160,19 +180,41 @@ public final class PerfScope extends JavaPlugin {
      * 真重载（P0-14）：stop→重读→start，重建采集与自动报告任务。
      * monitor 任务不受影响（玩家监测态保持，间隔固定 20 tick 无配置项）。
      * P0-4：告警服务同步启停（enabled 切 false 时不重建定时器），但不重置冷却/活跃状态机。
+     *
+     * A9a 健壮性修复（Wave4 修正注释：与 ConfigManager.load 最终实现对齐）：
+     * load 若半途抛异常（旧实现会停在"采集已停不重建"的静默冻结态），此处捕获并降级继续——
+     * load 内部以本地 fresh 承载解析、全部填充与 validateThresholds 完成后才单次替换
+     * ConfigManager.config，故失败时 config 保持旧的完整引用（不会暴露半解析态）；
+     * 采集/告警/自动报告一律照常重建（按旧配置继续运行），并给出明确日志。
      */
     public void reload() {
         stopCollectionTasks();
         stopAutoReport();
         stopAlertService();
-        configManager.load();
+        boolean loadFailed = false;
+        try {
+            configManager.load();
+        } catch (Exception | LinkageError e) {
+            loadFailed = true;
+            getLogger().severe("[PerfScope] 配置加载失败，将按旧配置继续运行: " + e.getMessage());
+            getLogger().log(java.util.logging.Level.SEVERE, "[PerfScope] 配置加载异常堆栈", e);
+        }
+        // 无论 load 成败，任务必须重建：绝不允许"采集停了不重建"的半途冻结态
         startCollectionTasks();
         startAlertService();
         if (configManager.get().report_autoExport) {
             startAutoReport();
         }
-        reportGenerator.cleanOldReports();
-        getLogger().info("PerfScope 配置已重载喵~");
+        try {
+            reportGenerator.cleanOldReports();
+        } catch (Exception | LinkageError e) {
+            getLogger().warning("[PerfScope] 旧报告清理失败: " + e.getMessage());
+        }
+        if (loadFailed) {
+            getLogger().warning("PerfScope 配置重载未完成（已按旧配置重启采集/告警）");
+        } else {
+            getLogger().info("PerfScope 配置已重载喵~");
+        }
     }
 
     public static PerfScope getInstance() {

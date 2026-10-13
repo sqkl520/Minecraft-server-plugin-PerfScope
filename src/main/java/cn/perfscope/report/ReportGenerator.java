@@ -47,6 +47,10 @@ public class ReportGenerator {
     // P0-11：线程安全的日期格式化器（SimpleDateFormat 非线程安全，已删除）
     private static final DateTimeFormatter FILE_TS = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss-SSS");
     private static final DateTimeFormatter DISPLAY_TS = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    // A5/T2b：单次清理最多删除的报告文件数硬上限——防止时钟异常/误配导致"一次删空"式批量误删
+    private static final int MAX_CLEAN_PER_RUN = 50;
+    // A5/T2c：lastModified "未来时间"容差（1 小时）——超过 now + 容差即视为时钟前跳/文件系统异常，跳过不删
+    private static final long FUTURE_MTIME_TOLERANCE_MS = 3600_000L;
     // P0-11：JSON 改用 Gson（服务端 provided）；serializeNulls 让 unavailable 语义明确
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().serializeNulls().create();
 
@@ -75,6 +79,11 @@ public class ReportGenerator {
         if (snap == null) return null;
 
         List<MetricsSnapshot> history = collector.getHistory();
+
+        // B5（RT-02 自愈）：写入前确保 reports/ 目录存在且可写（构造器只建过一次，运行中被删即永久失败）
+        if (!ensureReportDir()) {
+            return null;
+        }
 
         File file;
 
@@ -140,21 +149,75 @@ public class ReportGenerator {
     }
 
     /**
-     * 清理超过保留天数的旧报告
+     * 清理超过保留天数的旧报告。
+     *
+     * <p>T2 三连加固（RC-3 + RT-07）：</p>
+     * <ul>
+     *   <li>a. 文件名过滤：只删本插件生成的 {@code perfscope-*.html|txt|json} 普通文件，
+     *         用户在 reports/ 里自建的任何文件/子目录一律不碰（reports/ 不是插件独占目录）；</li>
+     *   <li>b. 删除上限：单次调用最多删除 {@link #MAX_CLEAN_PER_RUN} 个，防时钟异常/误配导致一次删空；</li>
+     *   <li>c. 时钟异常防御：lastModified 为"未来时间"（&gt; now + {@link #FUTURE_MTIME_TOLERANCE_MS}）
+     *         的文件跳过不删——系统时钟前跳会让正常文件被误判超期，时钟回跳后的"未来文件"不可信。</li>
+     * </ul>
      */
     public void cleanOldReports() {
         int retentionDays = configManager.get().report_retentionDays;
         if (retentionDays <= 0) return;
 
-        long cutoff = System.currentTimeMillis() - (long) retentionDays * 24 * 3600 * 1000;
+        long now = System.currentTimeMillis();
+        long cutoff = now - (long) retentionDays * 24 * 3600 * 1000;
         File[] files = reportDir.listFiles();
         if (files == null) return;
 
+        int deleted = 0;
         for (File file : files) {
-            if (file.lastModified() < cutoff) {
-                file.delete();
+            // a. 仅处理普通文件，且文件名必须匹配本插件生成模式
+            if (!file.isFile() || !isReportFileName(file.getName())) continue;
+            long mtime = file.lastModified();
+            // c. 未来时间（时钟前跳/文件系统异常）→ 跳过不删
+            if (mtime > now + FUTURE_MTIME_TOLERANCE_MS) continue;
+            if (mtime < cutoff) {
+                // b. 确实还有超期文件待删时才发现超限 → 记日志并停止本次清理
+                if (deleted >= MAX_CLEAN_PER_RUN) {
+                    plugin.getLogger().warning("[PerfScope] 单次清理已达上限 " + MAX_CLEAN_PER_RUN
+                        + " 个报告，剩余超期文件将在下次清理时处理");
+                    break;
+                }
+                if (file.delete()) {
+                    deleted++;
+                }
             }
         }
+    }
+
+    /**
+     * T2a：报告文件名判定——仅 {@code perfscope-<时间戳>[-N].html|txt|json} 视为本插件产物。
+     * 加前缀+后缀双条件，避免误删用户在 reports/ 中自建的文件。
+     */
+    private static boolean isReportFileName(String name) {
+        if (name == null || !name.startsWith("perfscope-")) return false;
+        return name.endsWith(".html") || name.endsWith(".txt") || name.endsWith(".json");
+    }
+
+    /**
+     * B5（RT-02）：确保 reports/ 目录存在且可写。
+     * 构造器只在启动时建过一次目录，运行中目录被外部删除后须在此自愈；
+     * 建目录失败或目录不可写时记明确 warning（含路径与原因）并返回 false，由调用方中止写入。
+     */
+    private boolean ensureReportDir() {
+        if (!reportDir.isDirectory()) {
+            if (!reportDir.mkdirs() && !reportDir.isDirectory()) {
+                plugin.getLogger().warning("[PerfScope] 报告目录不可用（创建失败）: " + reportDir.getAbsolutePath()
+                    + "，本次报告生成已跳过");
+                return false;
+            }
+        }
+        if (!reportDir.canWrite()) {
+            plugin.getLogger().warning("[PerfScope] 报告目录不可写: " + reportDir.getAbsolutePath()
+                + "，本次报告生成已跳过");
+            return false;
+        }
+        return true;
     }
 
     // ==================== HTML 报告 ====================
@@ -245,6 +308,12 @@ public class ReportGenerator {
             double maxTps = 20.0;
             for (int i = start; i < history.size(); i++) {
                 MetricsSnapshot h = history.get(i);
+                // A5（data-contract F2/R7）：该采样点 TPS 模块不可用时不画"红色 0 高柱"（会被读作 TPS=0 灾难），
+                // 改为中性灰色矮柱 + title"不可用"，语义清晰且不误导。
+                if (h.unavailable.contains(MetricsSnapshot.MODULE_TPS)) {
+                    html.append("<div class=\"bar\" style=\"height:2%;background:#607d8b\" title=\"不可用\"></div>\n");
+                    continue;
+                }
                 double pct = h.tps1m / maxTps * 100;
                 String color = h.tps1m >= 19.5 ? "#69F0AE" : h.tps1m >= 18 ? "#4CAF50" : h.tps1m >= 15 ? "#FFB300" : "#FF5252";
                 html.append("<div class=\"bar\" style=\"height:").append(String.format("%.1f", pct))
@@ -258,17 +327,29 @@ public class ReportGenerator {
         }
 
         // 实体分布
+        // T1a/T1b（P1-2 + data-contract F3）：三列各自按对应模块判 unavailable（entities/chunks/tile_entities），
+        // 模块不可用时对应单元格显示灰色"不可用"，而非误导性的 0；
+        // 实体模块不可用时 entitiesByWorld 为空、无行可渲染，整表以 colspan 行标注"不可用"。
         html.append("<div class=\"section\">\n");
         html.append("<h2>实体按世界分布</h2>\n");
         html.append("<table><tr><th>世界</th><th>实体数</th><th>加载区块</th><th>Tile Entity</th></tr>\n");
-        for (Map.Entry<String, Integer> entry : snap.entitiesByWorld.entrySet()) {
-            String world = entry.getKey();
-            int entities = entry.getValue();
-            int chunks = snap.chunksByWorld.getOrDefault(world, 0);
-            int tileEntities = snap.tileEntitiesByWorld.getOrDefault(world, 0);
-            html.append("<tr><td>").append(escapeHtml(world)).append("</td><td>").append(entities)
-                .append("</td><td>").append(chunks).append("</td><td>").append(tileEntities)
-                .append("</td></tr>\n");
+        boolean entitiesUnavailable = snap.unavailable.contains(MetricsSnapshot.MODULE_ENTITIES);
+        boolean chunksUnavailable = snap.unavailable.contains(MetricsSnapshot.MODULE_CHUNKS);
+        boolean teUnavailable = snap.unavailable.contains(MetricsSnapshot.MODULE_TILE_ENTITIES);
+        if (entitiesUnavailable && snap.entitiesByWorld.isEmpty()) {
+            html.append("<tr><td colspan=\"4\" style=\"color:#90a4ae\">不可用</td></tr>\n");
+        } else {
+            for (Map.Entry<String, Integer> entry : snap.entitiesByWorld.entrySet()) {
+                String world = entry.getKey();
+                int entities = entry.getValue();
+                int chunks = snap.chunksByWorld.getOrDefault(world, 0);
+                int tileEntities = snap.tileEntitiesByWorld.getOrDefault(world, 0);
+                html.append("<tr><td>").append(escapeHtml(world)).append("</td>")
+                    .append(htmlCell(entitiesUnavailable, entities))
+                    .append(htmlCell(chunksUnavailable, chunks))
+                    .append(htmlCell(teUnavailable, tileEntities))
+                    .append("</tr>\n");
+            }
         }
         html.append("</table></div>\n");
 
@@ -403,11 +484,22 @@ public class ReportGenerator {
         sb.append("\n");
 
         sb.append("--- 实体按世界分布 ---\n");
-        for (Map.Entry<String, Integer> entry : snap.entitiesByWorld.entrySet()) {
-            sb.append(String.format("  %s: %d 实体 | %d 区块 | %d TileEntity\n",
-                entry.getKey(), entry.getValue(),
-                snap.chunksByWorld.getOrDefault(entry.getKey(), 0),
-                snap.tileEntitiesByWorld.getOrDefault(entry.getKey(), 0)));
+        // T1a/T1b（P1-2 + data-contract F3）：三列各自按对应模块判 unavailable，不可用列显示"不可用"而非 0；
+        // 实体模块不可用时无行可渲染，整段标注"不可用"。
+        boolean entitiesUnavailable = snap.unavailable.contains(MetricsSnapshot.MODULE_ENTITIES);
+        boolean chunksUnavailable = snap.unavailable.contains(MetricsSnapshot.MODULE_CHUNKS);
+        boolean teUnavailable = snap.unavailable.contains(MetricsSnapshot.MODULE_TILE_ENTITIES);
+        if (entitiesUnavailable && snap.entitiesByWorld.isEmpty()) {
+            sb.append("  不可用\n");
+        } else {
+            for (Map.Entry<String, Integer> entry : snap.entitiesByWorld.entrySet()) {
+                String world = entry.getKey();
+                sb.append(String.format("  %s: %s 实体 | %s 区块 | %s TileEntity\n",
+                    world,
+                    txtCell(entitiesUnavailable, entry.getValue()),
+                    txtCell(chunksUnavailable, snap.chunksByWorld.getOrDefault(world, 0)),
+                    txtCell(teUnavailable, snap.tileEntitiesByWorld.getOrDefault(world, 0))));
+            }
         }
         sb.append("\n");
 
@@ -494,6 +586,18 @@ public class ReportGenerator {
             root.put("entities", entities);
         }
 
+        // T1a（RC-2 补段）：Tile Entity 模块状态。TE 禁用/采集失败时输出 {"status":"unavailable"}，
+        // 而非任何误导性的 0；可用时输出 total/by_world。
+        // 注意：v1.0 手拼 JSON 无此段，本段为**增量新键**（不改动任何既有键名，旧解析脚本天然忽略）。
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_TILE_ENTITIES)) {
+            root.put("tile_entities", unavailableSection());
+        } else {
+            Map<String, Object> tileEntities = new LinkedHashMap<>();
+            tileEntities.put("total", snap.tileEntityCount);
+            tileEntities.put("by_world", snap.tileEntitiesByWorld);
+            root.put("tile_entities", tileEntities);
+        }
+
         // 区块
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_CHUNKS)) {
             root.put("chunks", unavailableSection());
@@ -553,15 +657,27 @@ public class ReportGenerator {
         }
 
         // 告警
+        // RT-01（红队）：alerts 段新增 "health" 状态字段——巡检脚本（CI 门禁/Grafana 抓取）此前无法区分
+        // "真健康（无告警）"与"全模块静默死亡（采集全挂所以无告警）"：snap.unavailable 非空 = degraded。
+        // "health" 为增量新键（既有 critical/warnings 键名不动），旧脚本天然忽略。
         Map<String, Object> alerts = new LinkedHashMap<>();
         alerts.put("critical", snap.activeCriticals);
         alerts.put("warnings", snap.activeWarnings);
+        alerts.put("health", snap.unavailable.isEmpty() ? "ok" : "degraded");
         root.put("alerts", alerts);
 
         // 历史趋势 (TPS)
+        // A5/T1c（data-contract F2/R7）：不可用采样输出 null（Gson serializeNulls 会写出 null），
+        // 老解析脚本按数字解析会得到 null 而非误导性的 0.0。
+        // ⚠ 这是 v1.1 唯一有意的值语义变更（相对 v1.0：不可用采样点由 0.0 → null）；
+        //   可用但非有限值仍走 safeDouble → -1 哨兵（既有契约不变）。
         List<Double> tpsHistory = new ArrayList<>(history.size());
         for (MetricsSnapshot h : history) {
-            tpsHistory.add(safeDouble(h.tps1m));
+            if (h.unavailable.contains(MetricsSnapshot.MODULE_TPS)) {
+                tpsHistory.add(null);
+            } else {
+                tpsHistory.add(safeDouble(h.tps1m));
+            }
         }
         root.put("tps_history", tpsHistory);
 
@@ -611,6 +727,23 @@ public class ReportGenerator {
      */
     private static String formatCpuPct(double v) {
         return v < 0 ? "未知" : String.format("%.1f%%", v);
+    }
+
+    /**
+     * T1a/T1b：TXT 世界分布表单元格渲染——模块不可用时输出"不可用"文本，否则输出数值字符串。
+     */
+    private static String txtCell(boolean unavailable, int value) {
+        return unavailable ? "不可用" : String.valueOf(value);
+    }
+
+    /**
+     * T1a/T1b：世界分布表单元格渲染——模块不可用时输出灰色"不可用"（与既有 .unknown 灰色 #90a4ae 一致），
+     * 否则输出数值；数值均为非负计数，无 -1 哨兵路径。
+     */
+    private static String htmlCell(boolean unavailable, int value) {
+        return unavailable
+            ? "<td style=\"color:#90a4ae\">不可用</td>"
+            : "<td>" + value + "</td>";
     }
 
     private String htmlCard(String title, String value, String cssClass, String subtitle) {

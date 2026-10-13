@@ -58,11 +58,9 @@ public class MetricsCollector {
     private final Deque<MetricsSnapshot> history = new ConcurrentLinkedDeque<>();
     private static final int MAX_HISTORY = 300;
 
-    // Paper MSPT 反射缓存
+    // Paper MSPT 反射缓存（MC-1 修复：目标为 CraftServer.getTickTimes()，返回 long[]（nanos），
+    // 由 collectMSPT_Paper 自算 avg/min/max；旧 NMS TickTimes 对象链与其 time/minTime/maxTime 字段已随修复整体删除）
     private Method getTickTimesMethod;
-    private Method tickTimes_getTime;
-    private Method tickTimes_getMinTime;
-    private Method tickTimes_getMaxTime;
 
     // 启动时缓存的反射方法（P0-1/P0-6：热路径只做 invoke，避免每次采集重复查找）
     private Method avgTickMethod;
@@ -111,22 +109,17 @@ public class MetricsCollector {
         resolveReflections();
     }
 
+    /**
+     * 解析并缓存 CraftServer.getTickTimes()（MC-1 修复）。
+     * 目标方法位于 Bukkit.getServer() 的运行时类上（Paper 系各家 CraftServer 均有，返回 long[]，元素为 nanos）；
+     * 旧实现探测 NMS DedicatedServer 与 TickTimes.time()/minTime()/maxTime() 在全部受支持服务端上恒失败，已删除。
+     * 解析失败置 null，collectMSPT 门控自然降级到第二级，无 NPE 路径。
+     */
     private void resolvePaperMSPT() {
         try {
-            Object server = Bukkit.getServer();
-            Method getServer = server.getClass().getMethod("getServer");
-            Object nms = getServer.invoke(server);
-            getTickTimesMethod = nms.getClass().getMethod("getTickTimes");
-            Object tickTimes = getTickTimesMethod.invoke(nms);
-            tickTimes_getTime = tickTimes.getClass().getMethod("time");
-            try {
-                tickTimes_getMinTime = tickTimes.getClass().getMethod("minTime");
-                tickTimes_getMaxTime = tickTimes.getClass().getMethod("maxTime");
-            } catch (NoSuchMethodException ignored) {
-                // 某些版本可能只有 time()
-            }
+            getTickTimesMethod = Bukkit.getServer().getClass().getMethod("getTickTimes");
         } catch (Exception e) {
-            // 解析失败，降级为 Bukkit
+            getTickTimesMethod = null;
         }
     }
 
@@ -169,7 +162,15 @@ public class MetricsCollector {
         teCacheReady = false;
         jvmCache = null;
 
-        long interval = configManager.get().general_updateInterval;
+        // L-2 修复：interval ≤0 会被 Bukkit 调度器 coerce 成单次任务（负值 period=-1 跑一轮即静默死亡）
+        // 或每 tick（0 → 1），Folia 下则被 SchedulerAdapter 校正为每 tick，行为分叉，
+        // 故强制下限 1（对齐 AlertService.start 已有范式），非法配置同时记 warning 便于诊断
+        int configuredInterval = configManager.get().general_updateInterval;
+        if (configuredInterval <= 0) {
+            plugin.getLogger().warning("[PerfScope] general.update_interval=" + configuredInterval
+                + " 非法（需 ≥1），已按 1 tick 处理");
+        }
+        long interval = Math.max(1, configuredInterval);
         syncHandle = SchedulerAdapter.runGlobalTimer(plugin, this::collectSync, 0L, interval);
         jvmHandle = SchedulerAdapter.runAsyncTimer(plugin, this::collectJvmAsync, 0L, interval);
     }
@@ -436,6 +437,13 @@ public class MetricsCollector {
 
     // ==================== MSPT ====================
 
+    /**
+     * MSPT 三级降级链（顺序固定，勿调换）：
+     * ① Paper CraftServer.getTickTimes()（真实 min/max，MC-1 修复后可达）→
+     * ② getAverageTickTime()（Paper/Bukkit 平均 tick API，**不是估算**，数据真实只是无 min/max）→
+     * ③ TPS 反推（唯一"估算"级：满 TPS 时语义不可用，置 -1 哨兵）。
+     * 展示层的"(估算)"标签口径应以 ①||② 为"精确"，仅 ③ 为估算。
+     */
     private void collectMSPT(MetricsSnapshot snap, ConfigManager.ConfigData cfg) {
         if (ServerCompat.PAPER_MSPT_AVAILABLE && getTickTimesMethod != null) {
             collectMSPT_Paper(snap);
@@ -452,26 +460,46 @@ public class MetricsCollector {
         }
     }
 
-    /** Paper: getTickTimes() 获取完整 MSPT 数据 */
+    /**
+     * Paper 一级：CraftServer.getTickTimes() 返回 long[]（元素为 nanos），自算 avg/min/max（MC-1 修复）。
+     * 边界（P0-13 哨兵语义）：空数组或全为非正值（尚无有效 tick 采样/未填充槽位）→ 三值置 -1"未知"，
+     * 不做除零也不输出误导性 0；单元素 ≤0 按无效采样跳过，避免未填充槽位拉低 min/avg。
+     * 一级 invoke 失败降级到第二级 getAverageTickTime（非估算），二级再失败才落 TPS 反推。
+     */
     private void collectMSPT_Paper(MetricsSnapshot snap) {
         try {
             Object server = Bukkit.getServer();
-            Method getServer = server.getClass().getMethod("getServer");
-            Object nms = getServer.invoke(server);
-            Object tickTimes = getTickTimesMethod.invoke(nms);
-
-            double avgNanos = ((Number) tickTimes_getTime.invoke(tickTimes)).doubleValue();
-            snap.msptAvg = round2(avgNanos / 1_000_000.0);
-
-            if (tickTimes_getMinTime != null && tickTimes_getMaxTime != null) {
-                snap.msptMin = round2(((Number) tickTimes_getMinTime.invoke(tickTimes)).doubleValue() / 1_000_000.0);
-                snap.msptMax = round2(((Number) tickTimes_getMaxTime.invoke(tickTimes)).doubleValue() / 1_000_000.0);
-            } else {
-                snap.msptMin = snap.msptAvg;
-                snap.msptMax = snap.msptAvg;
+            long[] arr = (long[]) getTickTimesMethod.invoke(server);
+            long sum = 0;
+            long min = Long.MAX_VALUE;
+            long max = 0;
+            int n = 0;
+            if (arr != null) {
+                for (long t : arr) {
+                    if (t <= 0) {
+                        continue; // 跳过未填充槽位/无效采样
+                    }
+                    sum += t;
+                    n++;
+                    if (t < min) {
+                        min = t;
+                    }
+                    if (t > max) {
+                        max = t;
+                    }
+                }
             }
+            if (n == 0) {
+                snap.msptAvg = -1;
+                snap.msptMin = -1;
+                snap.msptMax = -1;
+                return;
+            }
+            snap.msptAvg = round2(sum / (double) n / 1_000_000.0);
+            snap.msptMin = round2(min / 1_000_000.0);
+            snap.msptMax = round2(max / 1_000_000.0);
         } catch (Exception e) {
-            collectMSPT_TPSFallback(snap);
+            collectMSPT_BukkitAvg(snap);
         }
     }
 
@@ -542,16 +570,28 @@ public class MetricsCollector {
         snap.entitiesByType = byType;
         snap.entitiesByWorld = byWorld;
 
+        // A5/RC-1 裁决——实体阈值判定口径（与 config.yml"总实体数告警阈值"注释及命令层总数口径一致）：
+        // ① 在 worlds 段显式配置独立阈值（WorldSettings 覆盖）的世界：按该世界覆盖值逐世界判定；
+        // ② 未配置覆盖的世界：不再逐世界套用全局阈值（旧行为下默认 2000/3000 在任何单世界上几乎不可达，
+        //    导致默认实体告警全服失效），其计数由 ③ 的全服总数判定统一覆盖；
+        // ③ 全服总数判定（一次）：对 snap.totalEntities 与全局阈值比较，生成"实体总数…"文案。
         for (Map.Entry<String, Integer> entry : byWorld.entrySet()) {
             ConfigManager.WorldSettings ws = configManager.getWorldSettings(entry.getKey());
-            int warnThreshold = ws != null ? ws.entities_totalWarningThreshold : cfg.entities_totalWarningThreshold;
-            int critThreshold = ws != null ? ws.entities_totalCriticalThreshold : cfg.entities_totalCriticalThreshold;
-
-            if (entry.getValue() > critThreshold) {
+            if (ws == null) {
+                continue; // 无覆盖的世界不单独判定，由下方总数判定覆盖
+            }
+            if (entry.getValue() > ws.entities_totalCriticalThreshold) {
                 snap.activeCriticals.add("世界 " + entry.getKey() + " 实体数严重超标: " + entry.getValue());
-            } else if (entry.getValue() > warnThreshold) {
+            } else if (entry.getValue() > ws.entities_totalWarningThreshold) {
                 snap.activeWarnings.add("世界 " + entry.getKey() + " 实体数较多: " + entry.getValue());
             }
+        }
+
+        // 全服总数判定（与命令层 /ps entities 的总数口径一致）
+        if (snap.totalEntities > cfg.entities_totalCriticalThreshold) {
+            snap.activeCriticals.add("实体总数严重超标: " + snap.totalEntities);
+        } else if (snap.totalEntities > cfg.entities_totalWarningThreshold) {
+            snap.activeWarnings.add("实体总数较多: " + snap.totalEntities);
         }
     }
 
@@ -647,8 +687,16 @@ public class MetricsCollector {
         long totalGcCount = 0;
         long totalGcTime = 0;
         for (GarbageCollectorMXBean gcBean : ManagementFactory.getGarbageCollectorMXBeans()) {
-            totalGcCount += gcBean.getCollectionCount();
-            totalGcTime += gcBean.getCollectionTime();
+            // MC-2：MXBean 规范允许收集器在"未定义"时返回 -1——直接累加会污染总和，
+            // 故对负值消毒（跳过），与 P0-13 哨兵约定对齐
+            long c = gcBean.getCollectionCount();
+            long t = gcBean.getCollectionTime();
+            if (c >= 0) {
+                totalGcCount += c;
+            }
+            if (t >= 0) {
+                totalGcTime += t;
+            }
         }
         snap.gcCount = totalGcCount;
         snap.gcTime = totalGcTime;

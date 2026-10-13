@@ -26,9 +26,12 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.logging.Level;
 
 /**
  * 告警服务（P0-4 基础版）— 消费快照中的告警文案并推送到控制台与在线玩家。
@@ -40,7 +43,13 @@ import java.util.concurrent.ConcurrentHashMap;
  *   <li>去重/冷却：以"告警类别前缀"为 key（见 {@link #keyOf}），同一 key 在冷却期
  *       （alerts.cooldown-seconds，默认 300 秒）内只推一次；冷却到期仍在活跃则作为重复提醒再推；</li>
  *   <li>恢复：上一周期存在、本周期消失的 key 视为恢复，发一条通知
- *       （alerts.notify-recovery 可关，不受冷却限制）；</li>
+ *       （alerts.notify-recovery 可关，不受冷却限制）；抑制条件按<b>模块归因</b>——每个 key 经
+ *       {@link #moduleFor} 映射到对应 {@code MetricsSnapshot.MODULE_*} 常量，仅当该模块出现在快照
+ *       unavailable 集合（reload/启动首周期 JVM 窗口、模块被配置禁用或采集失败）时才抑制该 key 的恢复判定
+ *       （"消息消失"不等于"故障恢复"），抑制期间该 key 保留在 activeAlerts 中，下个周期继续判定；
+ *       可用模块的真恢复不受其他模块 unavailable 影响（含被配置禁用的模块——其长期占据 unavailable
+ *       不再波及其他模块），正常发出；无法归因的 key（映射未命中）按正常恢复处理
+ *       （宁可发真恢复，不永久静默），并记 FINE 级日志备查（详见 {@link #onSnapshot}）；</li>
  *   <li>通道：① 控制台（critical=severe、warning=warning、恢复=info，前缀 [告警]）；
  *       ② 在线且持有 perfscope.alert 权限的玩家（Paper 原生 Adventure，warning 黄 / critical 红 / 恢复 绿）。</li>
  * </ul>
@@ -139,6 +148,7 @@ public class AlertService {
         }
 
         long now = System.currentTimeMillis();
+        // 冷却防御：负值配置被 ConfigManager.getInt 截断/透传后钳到 0（"0 = 无冷却"，仍受采集周期节流，不刷屏）
         long cooldownMs = Math.max(0, cfg.alerts_cooldownSeconds) * 1000L;
 
         // 2. 活跃告警推送：新告警或冷却到期的重复提醒（同一 key 冷却期内只推一次）
@@ -157,18 +167,43 @@ public class AlertService {
         }
 
         // 3. 恢复检测：上周期存在、本周期消失的 key（每个 key 每次恢复只发一条，不受冷却限制）
+        //    P2-1 假恢复修复（A2，Wave4 修正：按模块归因）：模块被配置禁用/采集失败/Reload 窗口时，
+        //    该模块的告警文案在本周期"静默缺席"，直接做集合差分会把"缺席"误判为"恢复"发出假恢复通知。
+        //    现对每个消失 key 经 moduleFor 归因到所属模块：
+        //    - 该模块仍在 snap.unavailable 中 → 抑制本 key 恢复（保留在 activeAlerts 中不清除，下周期继续判定）；
+        //    - 其他模块不可用不影响本 key —— 修复旧实现"任一模块不可用则全部模块恢复永久静默"的缺陷
+        //      （被禁用模块会长期占据 unavailable，导致集合恒非空）；
+        //    - 无法归因（moduleFor=null）→ 按正常恢复处理（宁可发真恢复，不永久静默），记 FINE 日志备查。
+        //    注：恢复推送本身不写冷却表（cooldowns 仅在活跃告警推送时写入）；活跃告警的推送冷却
+        //    仍会压制其复现推送，属预期行为。
+        List<String> recoveredKeys = new ArrayList<>();
         for (Map.Entry<String, ActiveAlert> entry : activeAlerts.entrySet()) {
-            if (!current.containsKey(entry.getKey()) && cfg.alerts_notifyRecovery) {
+            if (current.containsKey(entry.getKey())) {
+                continue; // 本周期仍活跃：保留（数值变化由下方 putAll 刷新为最新记录）
+            }
+            String mod = moduleFor(entry.getKey());
+            if (mod != null && snap.unavailable.contains(mod)) {
+                continue; // 该 key 所属模块本周期不可用：抑制恢复，保留 key 待下周期模块可用后再判定
+            }
+            if (mod == null) {
+                plugin.getLogger().log(Level.FINE,
+                    "[告警] 恢复判定：未归因 key=" + entry.getKey() + "（按正常恢复处理，可考虑补充 moduleFor 映射）");
+            }
+            if (cfg.alerts_notifyRecovery) {
                 try {
                     pushRecovery(entry.getKey());
                 } catch (Exception | LinkageError e) {
                     plugin.getLogger().warning("[告警] 恢复通知发送失败: " + entry.getKey() + ": " + e.getMessage());
                 }
             }
+            recoveredKeys.add(entry.getKey()); // 真恢复（或通知被关闭）：登记待移除
         }
-
-        // 4. 更新状态机：记录本周期仍活跃的告警（含冷却中未推送的，供下周期恢复判定）
-        activeAlerts.clear();
+        // 真恢复（或通知被关闭）的 key 统一从状态机移除：先登记、循环外移除，遍历与修改分离（语义直白、天然安全）
+        for (String key : recoveredKeys) {
+            activeAlerts.remove(key);
+        }
+        // 4. 更新状态机：合入本周期活跃告警（含冷却中未推送的，供下周期恢复判定）并刷新为最新记录；
+        //    被抑制恢复的消失 key 已在循环内 continue 保留在表中
         activeAlerts.putAll(current);
     }
 
@@ -231,6 +266,87 @@ public class AlertService {
         String text = alertText == null ? "" : alertText.trim();
         int idx = Math.max(text.lastIndexOf(':'), text.lastIndexOf('：'));
         return idx > 0 ? text.substring(0, idx).trim() : text;
+    }
+
+    /**
+     * T1（Wave4 修正）：按告警 key 前缀归因到所属采集模块（{@code MetricsSnapshot.MODULE_*} 常量）。
+     *
+     * <p>用于恢复判定的按模块抑制：仅当 key 所属模块出现在快照 unavailable 集合时才抑制其恢复，
+     * 其他模块的不可用不再影响本 key（修复旧"全局抑制"缺陷——被禁用模块长期占据 unavailable 集合，
+     * 导致全部模块恢复判定永久跳过）。映射依据 MetricsCollector 全部告警文案构造点逐条核对（16 条），
+     * 用 startsWith 前缀匹配、先精确后宽泛排列。</p>
+     *
+     * <ul>
+     *   <li>"世界 " 开头（逐世界实体/区块文案）——世界名任意，按文案固定部分的特征词分流：
+     *       "加载区块数" → CHUNKS（区块文案独有词，实体文案不含，先判之），"实体" → ENTITIES
+     *       （对应"实体数严重超标/较多"）；两特征词皆无的未知世界文案返回 null；</li>
+     *   <li>"实体总数" → ENTITIES；"方块实体" → TILE_ENTITIES（先于宽泛"实体"判断，防御未来文案）；</li>
+     *   <li>"堆内存"/"内存" → MEMORY；"在线玩家"/"玩家" → PLAYERS；</li>
+     *   <li>"进程CPU"/"系统CPU"/"CPU" → CPU；"TPS" → TPS；"MSPT" → MSPT；</li>
+     *   <li>"GC" → GC；"区块" → CHUNKS；"服务器"/"运行时间" → SERVER
+     *       （后三条当前无对应文案，按映射规则防御性保留）。</li>
+     * </ul>
+     *
+     * @param key 告警去重 key（见 {@link #keyOf}）
+     * @return 对应 MODULE_* 常量；无法归因返回 null（调用方按正常恢复处理，不永久静默）
+     */
+    private static String moduleFor(String key) {
+        if (key == null || key.isEmpty()) {
+            return null;
+        }
+        // 逐世界文案（"世界 <名> 实体数严重超标/较多" / "世界 <名> 加载区块数严重超标/较多"）：
+        // 世界名任意，不能按固定前缀匹配；用文案固定部分的强特征词分流——"加载区块数"是区块文案
+        // 独有词（实体文案不含），先判之；再判"实体"。正常世界名不含这两个特征词，分流互斥
+        if (key.startsWith("世界")) {
+            if (key.contains("加载区块数")) {
+                return MetricsSnapshot.MODULE_CHUNKS;
+            }
+            if (key.contains("实体")) {
+                return MetricsSnapshot.MODULE_ENTITIES;
+            }
+            return null;
+        }
+        // 固定前缀，先长后短（防前缀冲突）
+        if (key.startsWith("实体总数")) {
+            return MetricsSnapshot.MODULE_ENTITIES;
+        }
+        if (key.startsWith("方块实体")) {
+            return MetricsSnapshot.MODULE_TILE_ENTITIES;
+        }
+        if (key.startsWith("实体")) {
+            return MetricsSnapshot.MODULE_ENTITIES; // 防御：未来"实体…"文案兜底（方块实体已先判，不受影响）
+        }
+        if (key.startsWith("堆内存")) {
+            return MetricsSnapshot.MODULE_MEMORY;
+        }
+        if (key.startsWith("内存")) {
+            return MetricsSnapshot.MODULE_MEMORY;
+        }
+        if (key.startsWith("在线玩家")) {
+            return MetricsSnapshot.MODULE_PLAYERS;
+        }
+        if (key.startsWith("玩家")) {
+            return MetricsSnapshot.MODULE_PLAYERS;
+        }
+        if (key.startsWith("进程CPU") || key.startsWith("系统CPU") || key.startsWith("CPU")) {
+            return MetricsSnapshot.MODULE_CPU;
+        }
+        if (key.startsWith("TPS")) {
+            return MetricsSnapshot.MODULE_TPS;
+        }
+        if (key.startsWith("MSPT")) {
+            return MetricsSnapshot.MODULE_MSPT;
+        }
+        if (key.startsWith("GC")) {
+            return MetricsSnapshot.MODULE_GC;
+        }
+        if (key.startsWith("区块")) {
+            return MetricsSnapshot.MODULE_CHUNKS;
+        }
+        if (key.startsWith("服务器") || key.startsWith("运行时间")) {
+            return MetricsSnapshot.MODULE_SERVER;
+        }
+        return null;
     }
 
     /** 判断某 key 是否仍在冷却期内；冷却 <=0 视为无冷却（天然受采集周期节流，不会刷屏） */

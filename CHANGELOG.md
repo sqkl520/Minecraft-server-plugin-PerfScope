@@ -12,10 +12,176 @@
 > 版本号只在用户明确说"更新版本号"时 bump（Patch = Bug 修复，Minor = 新功能）。
 > **本文件是开发流水账** —— 记"改了什么、为什么改、验证到哪一步、还欠什么"，不是给用户看的发布说明。
 
-> **开发计划文档索引**（均在上层工作区 `docs/06-tasks/`）：`ROADMAP.md`（愿景 + v1.0→v2.0
-> 共 49 条条目 + 35 条验收标准）、`V1.1_DEV_TASKS.md`（15 个 P0 逐项拆解）、
-> `V1.2_DIAGNOSTIC_RULES.md`（37 条诊断规则）、`V1.3_ALERT_SPEC.md`（告警中心规格，30 个配置键）。
-> 测试报告在 `docs/05-test-reports/`。
+> **开发计划文档索引**（均在上层工作区）：`docs/06-tasks/ROADMAP.md`（愿景 + 49 条条目 + 35 条验收标准）、
+> `V1.1_DEV_TASKS.md`（15 个 P0 逐项拆解）、`V1.2_DIAGNOSTIC_RULES.md`（37 条诊断规则）、
+> `V1.3_ALERT_SPEC.md`（告警中心规格，30 个配置键）。
+> **审查报告**：`docs/01-reviews/`（15 份并行审查 + 总合成 `v11-review-SYNTHESIS.md`）。
+> **测试报告**：`docs/05-test-reports/`。
+
+---
+
+## [Unreleased] — Wave 4 - 2026-10-12 ～ 10-14
+
+> **主题：审查后修复**。v1.1 三个开发波次完成后，用 **15 个并行审查 agent** 做了一次全量体检
+> （累计下载 34+ 份真实服务端工件做字节码级实证），产出了 **1 项 P1 功能缺陷 + 5 类"安静的 bug"**
+> （数据看着正常、结论是错的）+ 4 项被证伪的初始怀疑。本波把这些全部修掉。
+> 修复分三路并行（文件集互斥：采集探测链 / 命令层 / 报告配置调度）→ 统一编译 → 三维测试
+> （build 17/17 PASS、arch R1-R9 落实、code 17 修复点零回归）→ 修正轮（1 项 P2 + 2 处注释不实）→ 提交。
+
+### Fixed
+- **MC-1 · MSPT 精确采集死反射链**（🔴 全场最重，两个审查 agent 独立字节码实证）：
+  原 `getTickTimes` 反射链有**两级叠加错误**——①探的是 NMS `DedicatedServer` 的方法，而方法实际在
+  **`CraftServer`** 上；②`TickTimes` 根本没有 `time()/minTime()/maxTime()`（只有 `getTimes()/getAverage()`）。
+  后果：`PAPER_MSPT_AVAILABLE` 恒 false → min/max MSPT 恒等于 avg → **Paper 服上 `/ps` 恒显"(估算)"、
+  启动日志恒显 `MSPT精确采集: TPS估算`（真实 Paper 数据被误标估算）** → `collectMSPT_Paper` 为死代码。
+  修复：探测点改 `Bukkit.getServer().getClass().getMethod("getTickTimes")`（返回 `long[]`），删除
+  `tickTimes_getTime/MinTime/MaxTime` 三字段与 NMS 三段链；`collectMSPT_Paper` 改为遍历 `long[]` 自算
+  avg/min/max（nanos→ms，`/1_000_000.0`），边界：空数组或全非正值 → 三值置 `-1`"未知"（不做除零、
+  不输出误导性 0），单元素 ≤0 跳过（防未填充槽位拉低 min/avg）。
+  **半修复陷阱已规避**（A1 报告警告：若只修探测不修形状提取，会在 `getMethod("time")` 处静默失败但
+  `getTickTimesMethod` 已非 null → 进入死掉的 `collectMSPT_Paper` → 每周期 NPE 落第三级，比现状更糟）——
+  两项同时改，javap 复验字节码为 `checkcast [J` + 自算 + `n==0` 置 -1 哨兵，降级链正确指向二级。
+  验证：8 个真实发行版 jar（Paper 1.20.4/1.20.6/1.21.4、Purpur、Folia、Leaf）隔离 ClassLoader
+  反射探针复现旧链全部 `NoSuchMethodException`；build 维 javap 双查（源码+jar）零残留。
+- **A2 · monitor 五连伤**（🟠 5 个审查 agent 独立命中，全场最脆弱点）：`startMonitorTask` 的 ActionBar
+  推送有四处缺陷——①**六字段零状态守卫**：模块 unavailable 时上屏"TPS: 0.0"红、"内存: 0%"**假绿**、
+  MSPT 直出"-1.0"；②**无 try 边界且注释谎称有**（注释写"外层 try 兜底"实际无）；
+  ③`sendActionBar` **无 connection 守卫**（对比 `sendMessage` 有，javap 实证两变体不对称）→ 玩家断线
+  瞬间 NPE；④玩家守卫。修复：六字段全部按全仓约定渲染（module unavailable → "不可用"灰 / 值 -1 →
+  "未知"灰，复用 `formatTpsComponent`/`formatMSPTComponent`）；整个任务体包 `try-catch
+  (Exception | LinkageError)` + `general_debug` 门控堆栈；发送前 `!player.isOnline() ||
+  player.getAddress() == null` 跳过（`getAddress()` 是字节码实证的选择：真实 Paper 1.21.4 上
+  connection==null 时返回 null，且 API 非弃用）；注释改为与实现一致。顺带修复 UX-F8：monitor 的
+  TPS 配色门槛 19.5→18/15 与命令层统一、内存补 ≥90 红档、MSPT 不再恒 AQUA。
+- **A3 · entities 阈值三方语义错位**（🔴 告警实际失效）：`config.yml` 注释与命令层按"**总**实体数"
+  消费，但采集层按"**逐世界**"比较——同一个键两种判定；**默认 2000 阈值在单个世界中几乎不可达
+  （告警实际永不触发）**，而命令层却会对全服总数报警。修复（采集侧，读完 A5 报告后裁决）：
+  `worlds.*` 有覆盖的世界按各自阈值逐世界判定（保留原按世界文案）；**无覆盖的世界不再套用全局阈值**；
+  新增全服总数判定（对 `snap.totalEntities` 判一次，新文案"实体总数较多: N"/"实体总数严重超标: N"）。
+  按世界统计 Map 输出与降频缓存路径未动。config.yml 注释同步澄清（"配置了 worlds 覆盖的世界按各自
+  阈值逐世界判定、同时仍计入全服合计总数；未配置的世界由全服合计阈值覆盖"）。
+- **A4 · AlertService 假恢复**（🟠 两个 agent 独立命中）：reload/启动后首周期 JVM 模块 unavailable 窗口
+  × 状态机跨 reload 保留 → 活跃内存/CPU 告警被差分判为"消失" → **发虚假绿色"已恢复正常"**，随后被
+  冷却压制最长 300s 无纠正信号。修复：恢复差分**按模块归因**——新增 `moduleFor(key)` 把告警 key
+  （归一化后前缀）映射到 `MODULE_*`，**仅当该模块自身 unavailable 时抑制该 key 的恢复**（保留在
+  activeAlerts 中，下周期再判），其他模块照常；无法归因的 key 正常恢复 + `Level.FINE` 日志兜底排查。
+  16 条告警文案逐条 grep 核对、16/16 全命中映射（含"方块实体"先于宽泛"实体"、"世界…加载区块数"
+  先于"实体"等前缀冲突处理）。
+  ⚠️ **修正轮记录**：初版实现用"`unavailable` 集合非空"作**全局**抑制条件——而**任何被配置禁用的
+  模块都会让集合恒非空** → 恢复判定**永久**跳过、所有模块的真恢复通知**永久静默**（注释自称"宁可漏
+  一次"实为"永久漏"）；build/code/arch 三维测试中两个 agent 独立命中该 P2，修正轮改为上述按模块归因。
+- **A5 · 报告层 unavailable 契约缺口**（🟠 grep 实证 + 三出口核对）：
+  ①`MODULE_TILE_ENTITIES` 判定在 ReportGenerator **零命中** → TE 禁用/失败时 HTML/TXT 世界表与 JSON
+  照显 0；修复：三出口全补（JSON 新增 `tile_entities` 段，不可用输出 `{"status":"unavailable"}`）；
+  ②世界分布表三列（实体/区块/TE）各判各模块 + 空表兜底（HTML `colspan` 灰字行 / TXT 整段"不可用"）；
+  ③趋势三出口把不可用采样渲染成 TPS=0 灾难（命令趋势条整段"!"、HTML 红色 0 高柱、JSON 输出 0.0）——
+  命令侧改灰色"?"中性字符，HTML 侧改中性灰色矮柱（`continue`），JSON `tps_history` 不可用采样改
+  `null`（**v1.1 唯一有意的值语义变更**，注释记录；Gson `serializeNulls` 已开启）；
+  ④`showMemory` 内嵌 GC 行补 `MODULE_GC` 守卫。
+- **A6 · cleanOldReports 会删用户文件**（⚠️ 数据安全）：清理条件仅 `lastModified`、无文件名过滤 →
+  `reports/` 目录下用户自建的任何文件/子目录超 retention 即被静默删除；且**时钟前跳**（NTP 校时/
+  手动改钟）→ 全目录文件一起"过期" → 成批删除（含用户备份）。修复三连：`isReportFileName()` 只删
+  `perfscope-*.{html,txt,json}` 且 `isFile()`；`MAX_CLEAN_PER_RUN = 50` 单次删除上限（恰好删满 50
+  不误报）；`FUTURE_MTIME_TOLERANCE_MS = 3600_000L`——文件 mtime 为"未来 1 小时以上"跳过不删。
+- **A9 · 健壮性三小项**（🟡 操作逻辑审查独立命中）：
+  a. **reload 半途异常 = 采集停了不再重建**：`configManager.load()` 若抛异常（如 `update_interval`
+     配成负值触发），之后采集任务停摆、告警不启，命令静默输出旧快照，控制台仅一句 Bukkit 通用报错。
+     修复：load 包 `try-catch (Exception | LinkageError)`，**无论成败都继续重建采集/告警/自动报告**，
+     失败时 severe + 堆栈日志 + "重载未完成"消息，成功才打"配置已重载喵~"。
+  b. **interval ≤0 无下限校验**：0→每 tick 采集；负值 Bukkit 下被调度器 coerce 成"单次任务"静默死亡、
+     Folia 下被校正为每 tick（**行为分叉且静默**）。修复：`MetricsCollector.start()` 与
+     `startAutoReport()` 统一 `Math.max(1, …)` + warning 日志（对齐 AlertService 已有范式）。
+  c. **阈值配反（warning > critical）零校验**（7 处判定点受影响，低值告警类恒显 critical、高值类恒显
+     warning）：新增 `ConfigManager.validateThresholds()` 集中校验——区分**低值差**（tps：`warning < critical`
+     即倒置）与**高值差**（mspt/内存/玩家/实体/区块：`warning > critical` 即倒置）两类语义 +
+     worlds 段覆盖对 + CPU 非有限值（NaN/Inf）+ `alerts.cooldown-seconds` 负值钳 0；倒置一律
+     warning 日志（模板化文案）+ 回退默认值，不静默不抛异常。
+- **GC -1 消毒**（🟡 低概率）：`collectGC` 对 MXBean 的 -1（未定义语义）不消毒直接累加，可能污染
+  `gcCount/gcTime`。修复：`if (c >= 0) totalGcCount += c;`（time 同理）。
+
+### Changed
+- **B1 · SchedulerAdapter Folia 兜底地雷拆除**（🔴 "启用即被打挂"级）：Folia 分支反射 invoke 抛任何
+  异常都会落入"降级 Bukkit 调度"兜底，而该兜底在**真 Folia 上必抛 `UnsupportedOperationException`**
+  （CraftScheduler 被硬改，compat-matrix 实证）→ **插件 enable 被打挂而非降级**。修复：三个任务提交
+  入口的 Folia 分支失败**不再降级 Bukkit**，改为 `severe` 日志（"Folia 调度反射不可用，相关功能停用：
+  <原因>"）+ 返回 `TaskHandle.noop()`（无操作句柄，cancel 为空操作）；新增 `describe(Throwable)`
+  拆包 `InvocationTargetException` 显示真实 cause；类头注释更新为 "Folia 下反射失败 = 功能停用
+  （fail-safe），绝不降级 Bukkit"。
+- **B2 · help 面板点击执行字面量**（🟠 交互 bug）：`sendHelpLine` 把带方括号的用法原文直接当命令执行——
+  点 `/perfscope report [格式]` **每次都静默多生成一份 TXT 报告**、点 `entities [世界]` 以假世界名
+  `[世界]` 查询静默为空、点 `world [世界]` 报"世界 [世界] 不存在"。修复：`sendHelpLine` 增加 4 参重载
+  （display / clickCmd / desc），4 个含占位符的行改为可执行实例命令（`report html`/`entities`/`chunks`/
+  `world`）；未引入新拼接注入面（clickCmd 全为硬编码字面量）。
+- **B3 · 世界参数大小写静默全 0**（🟠 假数据）：`Bukkit.getWorld` 大小写不敏感（javap 解包 Paper jar
+  实证 CraftServer 为小写键+小写查询），但统计查询与玩家计数用**原始串** → `/ps world MyWorld`
+  实体/区块/TE/玩家全显 0。修复：新增 `resolveWorld(sender, arg)` 统一入口（null → null；不存在 →
+  发"世界不存在: <输入>"并返回 null；存在 → 返回 `World` 对象），showWorld/showEntities/showChunks/
+  showTileEntities 四处全部改用 `world.getName()`（规范名）做全部 map 查询/玩家比较/WorldSettings
+  查询/标题显示。
+- **B4 · entities 世界过滤仍是全服口径**（🟠 误导）：`/ps entities <世界>` 的"按类型 Top15 + 百分比"
+  仍是全服数据、无标注。修复：带世界参数时对该世界即时扫描 `world.getEntities()` 得类型分布，Top15
+  与百分比分母均按该世界重算，标题标注 `(Top 15, 世界: <name>)`；不带参数保持全服口径并标注
+  `(全服, Top 15)`；扫描包 try-catch（Folia 异常 → "读取失败: 无法扫描该世界实体"不中断命令）。
+- **B5 · reports 目录运行中被删永久失败不自愈**（🟠）：`mkdirs()` 仅构造器执行一次，运行中目录被删
+  即永久写失败且 auto_export 静默。修复：新增 `ensureReportDir()`（`isDirectory()` + `mkdirs()` +
+  `canWrite()` 检查），`generateSpecific` 写文件前调用，失败记明确 warning（含绝对路径与原因）并
+  返回 null。
+- **ConfigManager 原子发布**（🟡 架构改善）：`load()` 原为"开头 `config = new ConfigData()` 替换引用 →
+  逐键填充"，外部（含异步自动报告线程）可能在填充期读到**半解析态**（阈值 0）。改为本地 `fresh` 承载
+  全部解析 → `validateThresholds(fresh)` → **全部完成后单次 `this.config = fresh` 发布**；中途抛异常
+  config 保持旧的完整引用。附带 `private ConfigData config` 加 `volatile`（原子可见语义）。
+  **行为零变化**（键名/默认值/校验调用点与日志不变）。
+- **RT-01 · JSON alerts 段加健康字段**（🟡 针对巡检脚本）：原 `alerts` 段无法区分"真健康（无告警）"与
+  "全模块静默死亡（采集全挂所以无告警）"。新增 `alerts.health`：`snap.unavailable` 非空 → `"degraded"`，
+  否则 `"ok"`。既有键名零改动。
+
+### Removed
+- 清理历史遗留未用 import（非本波引入）：`PerfScopeCommand` 的 `ChatColor` 与 `java.util.stream.Collectors`
+  （各 grep 确认该文件零引用后删除）。注：审查报告称 `Collectors` 在 ReportGenerator——实际该文件为
+  `java.util.*` 通配无此 import，顺手排查后确认在 PerfScopeCommand。
+
+### Added
+- `docs/01-reviews/` **15 份并行审查报告 + 总合成**（`v11-review-SYNTHESIS.md`）：这是 v1.1 质量的主要
+  证据链。累计下载 **34+ 份真实服务端工件**（Paper 1.16.5→26.3 / Folia / Purpur / Leaf / Leaves），
+  javap 反汇编 + 隔离 ClassLoader 反射探针 + 真实 SnakeYAML/YamlConfiguration 探针。
+  四份最重的取证：`metrics-collector`（MC-1，289 次工具调用）、`report-config-compat`（315 次）、
+  `thread-safety`（231 次）、`compat-matrix`（**513 次**，47 触点全枚举）。
+- `docs/05-test-reports/` **`wave4-build.md` / `wave4-code.md` / `wave4-arch.md`**。
+
+### Notes
+- **✅ 四项初始怀疑被证伪**（防止过度修复）：①节流缓存污染 history **不成立**（refresh 为整体引用替换，
+  全文件零就地 clear/put，两个 agent 独立确认）；②jvmCache 发布后可变/撕裂 **不成立**（每轮 new 全新
+  构造 + 单次 volatile 发布 + 发布后全仓零写路径）；③冷却 key 失效 + map 无限增长 **不成立**
+  （14 条文案全表套用 `keyOf` 全部稳定，键空间有界）；④Folia 检测误判 **不成立**
+  （`RegionizedServer` 在 paper-api 1.20.4/1.21.4、Paper 1.21.4-232、leaf/leaves 中均不存在）。
+  另有"周期任务抛异常被静默取消"前提被两个 agent 字节码实证**推翻**（Paper/Folia 调度器均
+  catch+日志+照常重排）——此纠正把 monitor 的断线 NPE 从"偶发"升级为"每周期复发"，故一并修复。
+- **✅ 防线有效清单**：红队 22 个对抗场景 **P0/P1 均为 0**——现有三层防线（P0-5 异常隔离 / 权限 /
+  参数拒绝）把攻击都压成了"不可用/拒绝"。任务泄漏审计：5 类任务在 onDisable 与 reload **全部取消且
+  幂等，零叠任务零漏网**。P0-3 致命 bug 修复经**两条独立证据链**确认（build 维 + spec-conformance
+  维 javap：`cn.perfscope.lib.adventure...` → `net.kyori...`）。
+- **📋 已知欠账（进入 v1.2 首批）**：①**A8 阈值硬编码**——21 处显示决策点 0 个完整读 config
+  （默认配置下实体 510 即显假黄、区块 1600 显假红；同值不同色 7 例），需抽 `ThresholdColors` 三面共享
+  （M 级、"牵一发动全身"，刻意留到本波之后避免与 15 项 S 级修复打架）；②`PerfScopeCommand` 1015 行
+  god-class 拆分方案（code-quality 报告已给）；③输出快照金样基线（当前零测试基建，是后续重构的安全网）；
+  ④`data-contract` 产出的 11 条契约规则表（R1-R11）工程化；⑤P0-1 降频仍不可配 + 每 5/10 周期仍有一次
+  全量遍历尖峰未降（压峰值）；⑥`ServerCompat` 静态初始化异常安全（`SecurityException/LinkageError`
+  逃逸 → `ExceptionInInitializerError` 全局崩）；⑦`PluginCommand` description 过时文案、
+  `getSystemCpuLoad()` 弃用 API、死代码 15 项；⑧v1.3 前瞻：Alert 结构化 + 冷却 key 规则迁移到
+  `metric:scope`（代码重写约 60-70%）。
+- **⚠️ 规格债回写待办**：`spec-conformance` 发现的 4 处未记录偏差（P0-4 pendingTasks 决策反转 /
+  P0-8 fail-fast 反转为静默降级 / P0-1 降频键未实现 / P0-15 filtering 未改）需入档到
+  `ralph/progress.txt` 偏差节；ROADMAP 验收标准里 Spigot 相关条目（#1）与 prj.json P0-3 验收语句需随
+  "专注 Paper 系"决策回写；DoD 第 3/5 条（spark P99、异常隔离门禁）需补进 `RELEASE_TEST.md`。
+- **未验证（运行时，留给测试服，本波重点）**：
+  ① **Paper 服上 MSPT 应从"(估算)"变为精确值**，且 **min/max 不再等于 avg**（MC-1 修复的直接可见效果）；
+  ② monitor 假值消失（禁用某模块后 ActionBar 显示"不可用"而非假绿 0）；
+  ③ 告警不再误报恢复（reload 后收到真恢复而非假恢复）；
+  ④ 配置 `update_interval: -1` 不再静默停采集，改有明确日志与下限 1；
+  ⑤ Folia 上加载+命令+monitor（实体/区块为尽力而为）；
+  ⑥ MC-1 数据正确性对拍：与 `/tick times` 或 spark 对比 avg/min/max 同口径。
+- **未归档**：`versions/` 未归档 JAR（v1.1 未发布；待用户明确确认后归档）。
+- **提交**：Wave 4 三路开发 + 修正轮 + README 补全，见本段对应提交。
 
 ---
 

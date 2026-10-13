@@ -31,7 +31,7 @@ public final class ServerCompat {
     private static final String SERVER_VERSION;
     private static final String SERVER_NAME;
 
-    /** Paper TickTimes API 是否可用 */
+    /** Paper TickTimes API 是否可用（CraftServer.getTickTimes()，返回 long[]；MC-1 修复后探测目标） */
     public static final boolean PAPER_MSPT_AVAILABLE;
     /** Paper getAverageTickTime() 是否可用 */
     public static final boolean PAPER_AVG_TICK_AVAILABLE;
@@ -137,10 +137,9 @@ public final class ServerCompat {
 
     private static boolean checkPaperMSPT() {
         try {
-            Object server = Bukkit.getServer();
-            java.lang.reflect.Method getServer = server.getClass().getMethod("getServer");
-            Object nms = getServer.invoke(server);
-            nms.getClass().getMethod("getTickTimes");
+            // MC-1 修复：getTickTimes() 位于 CraftServer（即 Bukkit.getServer() 的运行时类，返回 long[]），
+            // 勿再走 getServer()→NMS DedicatedServer 旧链（该链在全部受支持服务端上恒探测失败）
+            Bukkit.getServer().getClass().getMethod("getTickTimes");
             return true;
         } catch (Exception e) {
             return false;

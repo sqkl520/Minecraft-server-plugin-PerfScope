@@ -8,20 +8,21 @@ A comprehensive performance monitoring plugin for Minecraft servers, focused on 
 
 - **Full Diagnostic** —— Type `/perfscope` to view all core performance metrics in one place, one-stop diagnostics
 - **TPS Monitoring** —— 1m/5m/15m real-time collection, with customizable warning/critical alert thresholds
-- **MSPT Monitoring** —— avg/min/max three-metric collection via Paper API reflection for TickTimes data, theoretical max TPS calculation
-- **Player Statistics** —— Online/max/per-world distribution/ping, with capacity alerts
-- **Entity Statistics** —— Total/per-world/by-type Top15, each world can have independent alert thresholds
+- **MSPT Monitoring** —— avg/min/max three-metric collection; precise tick durations via Paper `CraftServer.getTickTimes()`, degrading in order to `getAverageTickTime` / TPS inference when unavailable (only the last level is an estimate), plus theoretical max TPS calculation
+- **Player Statistics** —— Online/max/online list (world + ping), with capacity alerts
+- **Entity Statistics** —— Total/per-world/by-type Top15; entity-total alert threshold (server-wide aggregate), overridable per world in the `worlds` section
 - **Chunk Statistics** —— Loaded chunks/force-loaded chunks/per-world, with independent alerts
 - **Memory Diagnostics** —— Heap used/max/usage%/allocated, non-heap memory, GC count/time/per-collector details
 - **CPU Diagnostics** —— Process CPU usage/system CPU load/available processors/active threads
 - **Tile Entity Statistics** —— Total/per-world distribution
 - **Server Info** —— Uptime/thread count/plugin count/world count/JVM version
-- **Highly Customizable Config** —— All module alert thresholds, collection intervals, entity tracking types configurable
-- **ActionBar Live Monitor** —— `/perfscope monitor` to toggle, refreshes core metrics every second on screen top
+- **Highly Customizable Config** —— All module alert thresholds and collection intervals configurable
+- **ActionBar Live Monitor** —— `/perfscope monitor` to toggle, refreshes core metrics every second to the ActionBar (above the hotbar at the bottom of the screen)
 - **Performance Report Export** —— HTML/TXT/JSON formats, HTML reports include TPS trend chart, entity distribution table, memory progress bar, alert highlights
 - **Auto Report Generation** —— Configurable interval, async generation without blocking main thread, auto cleanup by retention days
 - **Per-World Independent Alerts** —— Override entity alert thresholds per world
-- **Color-Coded UI** —— Rendered via Paper Adventure API, TPS/MSPT/memory auto-color by threshold (green/yellow/red)
+- **Threshold Alert Push** (new in v1.1) —— When an alert fires, pushes to the console + online players holding the `perfscope.alert` permission; the same alert has a default 300-second cooldown to prevent spam; a recovery notice is sent when the issue clears; configurable in the `alerts` section of `config.yml`
+- **Color-Coded UI** —— Rendered via Paper Adventure API, key metrics colored by health (green/yellow/red); color thresholds are currently built-in constants, with full linkage to `config.yml` alert thresholds planned for v1.2
 
 ## Target Platform & Compatibility
 
@@ -86,6 +87,7 @@ GC: 42 次 / 5.23 秒
 | `perfscope.admin` | OP | Admin permissions (includes all sub-permissions) |
 | `perfscope.reload` | OP | Reload config permission |
 | `perfscope.export` | OP | Export report permission |
+| `perfscope.alert` | OP | Receive in-game alert pushes |
 
 ## Installation
 
@@ -114,6 +116,11 @@ mspt:
   warning_threshold: 45.0   # MSPT warning threshold (ms)
   critical_threshold: 50.0
 
+players:
+  enabled: true
+  warning_threshold: 80     # Player-count warning threshold (% of max players)
+  critical_threshold: 95
+
 entities:
   enabled: true
   total_warning_threshold: 2000
@@ -129,11 +136,23 @@ memory:
   heap_warning_threshold: 80
   heap_critical_threshold: 90
 
+cpu:
+  enabled: true
+  process_warning_threshold: 80.0   # Process CPU usage warning threshold (%)
+  system_warning_threshold: 90.0    # System CPU load warning threshold (%)
+
 report:
   auto_export: false
   auto_export_interval: 30  # Auto export interval (minutes)
   format: html
   retention_days: 7         # Report retention days
+
+alerts:
+  enabled: true             # Master switch (false = no alert checks or pushes at all)
+  console: true             # Console push
+  in-game: true             # In-game push (online players with perfscope.alert permission)
+  cooldown-seconds: 300     # Cooldown per alert in seconds (0 = no cooldown, still throttled by the collection cycle)
+  notify-recovery: true     # Recovery notice (sent when an alert clears)
 
 # Per-world overrides
 worlds:
@@ -153,7 +172,7 @@ See `plugins/PerfScope/config.yml` for complete configuration details.
 |------|------|------|
 | TPS | 1m/5m/15m average TPS | Core server health indicator |
 | MSPT | avg/min/max MSPT | Per-tick duration (ms), theoretical max TPS |
-| Players | online/max/per-world/ping | Player load |
+| Players | online/max/online list (world + ping) | Player load |
 | Entities | total/per-world/by-type Top15 | Entity pressure analysis |
 | Chunks | loaded/force-loaded/per-world | Chunk load |
 | Memory | heap used/max/usage%/allocated/non-heap | JVM memory status |
@@ -162,7 +181,7 @@ See `plugins/PerfScope/config.yml` for complete configuration details.
 | Tile Entity | total/per-world | Block entity load |
 | Server | uptime/threads/plugins/worlds/JVM | Server basic info |
 
-> Note: **Redstone activity** and **network throughput** monitoring were discontinued in v1.1 (previously stub implementations); these metrics and features are no longer provided. The `/perfscope redstone` subcommand is kept as an entry point but only returns a discontinued notice.
+> Note: **Redstone activity** and **network throughput** monitoring were discontinued in v1.1 (redstone was a stub implementation; network was hardcoded fake data); these metrics and features are no longer provided. The `/perfscope redstone` subcommand is kept as an entry point but only returns a discontinued notice.
 
 ## Dependencies
 

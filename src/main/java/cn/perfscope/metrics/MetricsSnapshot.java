@@ -22,6 +22,9 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 性能指标快照 - 包含某一时刻的所有性能数据
+ *
+ * <p>契约（MC-3）：快照一旦发布（写入 history 或 jvmCache）即视为只读，
+ * 任何消费方不得修改其字段/集合（命令/告警/报告层一律只读消费；需要修改时先复制）。</p>
  */
 public class MetricsSnapshot {
 

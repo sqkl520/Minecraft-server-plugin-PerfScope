@@ -21,6 +21,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.scheduler.BukkitTask;
 
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
@@ -36,8 +37,11 @@ import java.util.function.Consumer;
  * GlobalRegionScheduler / AsyncScheduler（反射）；否则走 Bukkit 调度器（直接 API）。</p>
  *
  * <p>所有反射方法在类加载时解析缓存为 static final，解析失败置 null；Folia 分支调用时
- * 若发现反射未就绪，记 warning 并降级为 Bukkit 兜底。全部反射调用包裹 try-catch，
- * 异常不抛给调用方。tick→毫秒换算仅在本类内部进行，调用方一律使用 tick。</p>
+ * 若发现反射未就绪或反射调用失败，<b>一律 fail-safe：记 severe 日志并返回无操作句柄（功能停用），
+ * 绝不降级 Bukkit 调度器</b>——真 Folia 上 Bukkit 调度器 API 必抛 UnsupportedOperationException，
+ * 降级即等于插件 enable 被打挂（compat-matrix CM-2 / R15 / R17 实证地雷）。
+ * 全部反射调用包裹 try-catch(Throwable)，异常不抛给调用方。tick→毫秒换算仅在本类内部进行，
+ * 调用方一律使用 tick。</p>
  */
 public final class SchedulerAdapter {
 
@@ -91,7 +95,8 @@ public final class SchedulerAdapter {
 
                 taskCancel = scheduledTaskClass.getMethod("cancel");
             } catch (Throwable t) {
-                // 任一解析失败则全部视为未就绪（保持 null），调用时降级 Bukkit 兜底
+                // 任一解析失败则尚未赋值的项保持 null；调用侧发现所需反射缺失时
+                // 一律 fail-safe 停用（severe 日志 + 无操作句柄），绝不降级 Bukkit 调度器
             }
         }
 
@@ -118,7 +123,12 @@ public final class SchedulerAdapter {
      * @return 统一任务句柄，可 cancel
      */
     public static TaskHandle runGlobalTimer(Plugin plugin, Runnable task, long delayTicks, long periodTicks) {
-        if (useFolia(plugin, GLOBAL_SCHEDULER_GETTER, GLOBAL_RUN_AT_FIXED_RATE)) {
+        if (FOLIA) {
+            // T5（CM-2 拆雷）：Folia 分支失败 = 功能停用（fail-safe）；绝不降级 Bukkit——真 Folia 上必抛 UOE
+            if (GLOBAL_SCHEDULER_GETTER == null || GLOBAL_RUN_AT_FIXED_RATE == null) {
+                plugin.getLogger().severe("[PerfScope] Folia 调度反射不可用，相关功能停用：全局定时任务反射未就绪");
+                return TaskHandle.noop();
+            }
             try {
                 long d = delayTicks <= 0 ? 1 : delayTicks;   // Folia 不接受 0
                 long p = periodTicks <= 0 ? 1 : periodTicks;
@@ -126,7 +136,8 @@ public final class SchedulerAdapter {
                 Object scheduledTask = GLOBAL_RUN_AT_FIXED_RATE.invoke(scheduler, plugin, wrap(task), d, p);
                 return new TaskHandle(scheduledTask, plugin);
             } catch (Throwable t) {
-                plugin.getLogger().warning("[PerfScope] Folia 全局定时任务调度失败，降级为 Bukkit: " + t.getMessage());
+                plugin.getLogger().severe("[PerfScope] Folia 调度反射不可用，相关功能停用：" + describe(t));
+                return TaskHandle.noop();
             }
         }
         BukkitTask bukkitTask = plugin.getServer().getScheduler().runTaskTimer(plugin, task, delayTicks, periodTicks);
@@ -144,7 +155,12 @@ public final class SchedulerAdapter {
      * @return 统一任务句柄，可 cancel
      */
     public static TaskHandle runAsyncTimer(Plugin plugin, Runnable task, long delayTicks, long periodTicks) {
-        if (useFolia(plugin, ASYNC_SCHEDULER_GETTER, ASYNC_RUN_AT_FIXED_RATE)) {
+        if (FOLIA) {
+            // T5（CM-2 拆雷）：Folia 分支失败 = 功能停用（fail-safe）；绝不降级 Bukkit——真 Folia 上必抛 UOE
+            if (ASYNC_SCHEDULER_GETTER == null || ASYNC_RUN_AT_FIXED_RATE == null) {
+                plugin.getLogger().severe("[PerfScope] Folia 调度反射不可用，相关功能停用：异步定时任务反射未就绪");
+                return TaskHandle.noop();
+            }
             try {
                 long dMs = (delayTicks <= 0 ? 1 : delayTicks) * 50L;    // tick → 毫秒
                 long pMs = (periodTicks <= 0 ? 1 : periodTicks) * 50L;
@@ -153,7 +169,8 @@ public final class SchedulerAdapter {
                     scheduler, plugin, wrap(task), dMs, pMs, TimeUnit.MILLISECONDS);
                 return new TaskHandle(scheduledTask, plugin);
             } catch (Throwable t) {
-                plugin.getLogger().warning("[PerfScope] Folia 异步定时任务调度失败，降级为 Bukkit: " + t.getMessage());
+                plugin.getLogger().severe("[PerfScope] Folia 调度反射不可用，相关功能停用：" + describe(t));
+                return TaskHandle.noop();
             }
         }
         BukkitTask bukkitTask = plugin.getServer().getScheduler()
@@ -171,14 +188,20 @@ public final class SchedulerAdapter {
      * @return 统一任务句柄，可 cancel
      */
     public static TaskHandle runLater(Plugin plugin, Runnable task, long delayTicks) {
-        if (useFolia(plugin, GLOBAL_SCHEDULER_GETTER, GLOBAL_RUN_DELAYED)) {
+        if (FOLIA) {
+            // T5（CM-2 拆雷）：Folia 分支失败 = 功能停用（fail-safe）；绝不降级 Bukkit——真 Folia 上必抛 UOE
+            if (GLOBAL_SCHEDULER_GETTER == null || GLOBAL_RUN_DELAYED == null) {
+                plugin.getLogger().severe("[PerfScope] Folia 调度反射不可用，相关功能停用：延迟任务反射未就绪");
+                return TaskHandle.noop();
+            }
             try {
                 long d = delayTicks <= 0 ? 1 : delayTicks;
                 Object scheduler = GLOBAL_SCHEDULER_GETTER.invoke(null);
                 Object scheduledTask = GLOBAL_RUN_DELAYED.invoke(scheduler, plugin, wrap(task), d);
                 return new TaskHandle(scheduledTask, plugin);
             } catch (Throwable t) {
-                plugin.getLogger().warning("[PerfScope] Folia 延迟任务调度失败，降级为 Bukkit: " + t.getMessage());
+                plugin.getLogger().severe("[PerfScope] Folia 调度反射不可用，相关功能停用：" + describe(t));
+                return TaskHandle.noop();
             }
         }
         BukkitTask bukkitTask = plugin.getServer().getScheduler().runTaskLater(plugin, task, delayTicks);
@@ -188,18 +211,16 @@ public final class SchedulerAdapter {
     // ==================== 内部工具 ====================
 
     /**
-     * 判定本次调用是否应走 Folia 分支：既是 Folia 环境，且所需反射均已就绪。
-     * Folia 环境但反射缺失时记 warning，返回 false 以降级 Bukkit 兜底。
+     * T5：反射失败原因描述——InvocationTargetException 拆包取其 cause 消息，
+     * 避免只显示 "java.lang.reflect.InvocationTargetException" 而看不到真实原因
+     * （如 Folia 的 IllegalStateException / 插件 disabled 检查）。
      */
-    private static boolean useFolia(Plugin plugin, Method getter, Method action) {
-        if (!FOLIA) {
-            return false;
+    private static String describe(Throwable t) {
+        if (t instanceof InvocationTargetException && t.getCause() != null) {
+            Throwable cause = t.getCause();
+            return cause.getClass().getSimpleName() + ": " + cause.getMessage();
         }
-        if (getter != null && action != null) {
-            return true;
-        }
-        plugin.getLogger().warning("[PerfScope] Folia 调度反射未就绪，降级为 Bukkit 调度器");
-        return false;
+        return t.getClass().getSimpleName() + ": " + t.getMessage();
     }
 
     /**
@@ -237,9 +258,23 @@ public final class SchedulerAdapter {
             this.plugin = plugin;
         }
 
+        private TaskHandle() {
+            this.bukkitTask = null;
+            this.foliaTask = null;
+            this.plugin = null;
+        }
+
+        /**
+         * T5：无操作句柄——Folia 反射失败（fail-safe 功能停用）时返回，
+         * {@link #cancel()} 为空操作；创建时的 severe 日志已说明停用原因。
+         */
+        static TaskHandle noop() {
+            return new TaskHandle();
+        }
+
         /**
          * 取消任务。Bukkit 路径直接 cancel；Folia 路径反射调用 ScheduledTask.cancel()。
-         * 句柄为空（调度失败）时为无操作；反射异常被吞并记 warning，不抛给调用方。
+         * 句柄为空（调度失败/无操作句柄）时为无操作；反射异常被吞并记 warning，不抛给调用方。
          */
         public void cancel() {
             if (bukkitTask != null) {
@@ -254,6 +289,12 @@ public final class SchedulerAdapter {
                         plugin.getLogger().warning("[PerfScope] 取消 Folia 任务失败: " + t.getMessage());
                     }
                 }
+                return;
+            }
+            // T5d（L-3）：Folia 句柄存在但 cancel 反射缺失（静态初始化"部分就绪"）时，
+            // cancel 为无操作——记 debug 级（FINE）日志，不再完全静默。
+            if (foliaTask != null && plugin != null) {
+                plugin.getLogger().fine("[PerfScope] 任务句柄取消为无操作：Folia ScheduledTask.cancel 反射未就绪");
             }
         }
     }

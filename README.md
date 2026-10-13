@@ -8,20 +8,21 @@
 
 - **全量诊断** —— 输入 `/perfscope` 即可查看所有核心性能指标，一站式诊断
 - **TPS 监测** —— 1m/5m/15m 实时采集，支持 warning/critical 两级告警阈值自定义
-- **MSPT 监测** —— avg/min/max 三指标采集，通过 Paper API 反射获取 TickTimes 数据，理论最大 TPS 推算
-- **玩家统计** —— 在线数/最大数/按世界分布/延迟(Ping)，支持容量告警
-- **实体统计** —— 总数/按世界/按类型 Top15，每个世界可独立设置告警阈值
+- **MSPT 监测** —— avg/min/max 三指标采集，通过 Paper `CraftServer.getTickTimes()` 获取精确 tick 耗时，不可用时依次降级 `getAverageTickTime` / TPS 反推（仅最后一级为估算），附理论最大 TPS 推算
+- **玩家统计** —— 在线数/最大数/在线列表（世界+Ping），支持容量告警
+- **实体统计** —— 总数/按世界/按类型 Top15；实体总数告警阈值（全服合计），可在 worlds 段按世界覆盖
 - **区块统计** —— 加载区块数/强加载区块数/按世界分布，支持独立告警
 - **内存诊断** —— 堆内存使用/上限/使用率/已分配，非堆内存使用，GC 次数/耗时/各收集器详情
 - **CPU 诊断** —— 进程 CPU 使用率/系统 CPU 负载/可用处理器数/活跃线程数
 - **Tile Entity 统计** —— 总数/按世界分布
 - **服务器运行信息** —— uptime/线程数/已加载插件数/已加载世界数/JVM 版本
-- **高度自定义配置** —— 所有模块的告警阈值、采集间隔、实体追踪类型均可配置
-- **ActionBar 实时监测** —— `/perfscope monitor` 切换，每秒刷新核心指标到屏幕顶部
+- **高度自定义配置** —— 所有模块的告警阈值、采集间隔均可配置
+- **ActionBar 实时监测** —— `/perfscope monitor` 切换，每秒刷新核心指标到 ActionBar（动作栏，屏幕底部物品栏上方）
 - **性能报告导出** —— 支持 HTML/TXT/JSON 三种格式，HTML 报告含 TPS 趋势图、实体分布表、内存进度条、告警高亮
 - **自动报告生成** —— 可配置间隔，异步生成不阻塞主线程，旧报告自动按保留天数清理
 - **按世界独立告警** —— 各世界可覆盖实体告警阈值
-- **彩色 UI 面板** —— 使用 Paper Adventure API 渲染，TPS/MSPT/内存根据阈值自动变色（绿/黄/红）
+- **阈值告警主动推送**（v1.1 新增） —— 告警触发时推送控制台 + 在线持有 `perfscope.alert` 权限的玩家；同一告警默认 300 秒冷却防刷屏；故障恢复时发送恢复通知；可在 `config.yml` 的 `alerts` 段配置
+- **彩色 UI 面板** —— 使用 Paper Adventure API 渲染，关键指标按健康度着色（绿/黄/红）；配色阈值当前为内置常量，与 `config.yml` 告警阈值的完全联动计划于 v1.2
 
 ## 目标平台与兼容性
 
@@ -86,6 +87,7 @@ GC: 42 次 / 5.23 秒
 | `perfscope.admin` | OP | 管理员权限（包含所有子权限） |
 | `perfscope.reload` | OP | 重载配置权限 |
 | `perfscope.export` | OP | 导出性能报告权限 |
+| `perfscope.alert` | OP | 接收游戏内告警推送权限 |
 
 ## 安装
 
@@ -114,6 +116,11 @@ mspt:
   warning_threshold: 45.0   # MSPT 告警阈值 (ms)
   critical_threshold: 50.0
 
+players:
+  enabled: true
+  warning_threshold: 80     # 玩家数告警阈值 (占最大玩家数百分比)
+  critical_threshold: 95
+
 entities:
   enabled: true
   total_warning_threshold: 2000
@@ -129,11 +136,23 @@ memory:
   heap_warning_threshold: 80
   heap_critical_threshold: 90
 
+cpu:
+  enabled: true
+  process_warning_threshold: 80.0   # 进程 CPU 使用率告警阈值 (%)
+  system_warning_threshold: 90.0    # 系统 CPU 负载告警阈值 (%)
+
 report:
   auto_export: false
   auto_export_interval: 30  # 自动导出间隔 (分钟)
   format: html
   retention_days: 7         # 报告保留天数
+
+alerts:
+  enabled: true             # 总开关 (false = 完全不做告警检查与推送)
+  console: true             # 控制台推送
+  in-game: true             # 游戏内推送 (在线且持有 perfscope.alert 权限的玩家)
+  cooldown-seconds: 300     # 同一告警的冷却秒数 (0 = 无冷却，仍受采集周期节流)
+  notify-recovery: true     # 恢复通知 (告警消失时推送恢复消息)
 
 # 各世界独立设置
 worlds:
@@ -153,7 +172,7 @@ worlds:
 |------|------|------|
 | TPS | 1m/5m/15m 平均 TPS | 服务器核心健康指标 |
 | MSPT | 平均/最小/最大 MSPT | 每 tick 耗时（毫秒），理论最大 TPS 推算 |
-| 玩家 | 在线数/最大数/按世界分布/延迟 | 玩家负载 |
+| 玩家 | 在线数/最大数/在线列表(世界+Ping) | 玩家负载 |
 | 实体 | 总数/按世界/按类型 Top15 | 实体压力分析 |
 | 区块 | 加载区块数/强加载区块数/按世界 | 区块负载 |
 | 内存 | 堆使用/上限/使用率/已分配/非堆 | JVM 内存状况 |
@@ -162,7 +181,7 @@ worlds:
 | Tile Entity | 总数/按世界分布 | 方块实体负载 |
 | 服务器 | uptime/线程数/插件数/世界数/JVM | 服务器基本信息 |
 
-> 注：**红石活动**与**网络吞吐量**监测已于 v1.1 下线（此前为空实现），相关指标与功能不再提供；`/perfscope redstone` 子命令保留入口但仅返回下线提示。
+> 注：**红石活动**与**网络吞吐量**监测已于 v1.1 下线（红石为空实现、网络为硬编码假数据），相关指标与功能不再提供；`/perfscope redstone` 子命令保留入口但仅返回下线提示。
 
 ## 依赖
 
