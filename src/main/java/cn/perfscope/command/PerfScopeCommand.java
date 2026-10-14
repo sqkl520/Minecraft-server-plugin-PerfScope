@@ -24,6 +24,7 @@ import cn.perfscope.config.ConfigManager;
 import cn.perfscope.metrics.MetricsCollector;
 import cn.perfscope.metrics.MetricsSnapshot;
 import cn.perfscope.report.ReportGenerator;
+import cn.perfscope.util.ThresholdColors;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.event.HoverEvent;
@@ -62,6 +63,8 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
     private final MetricsCollector collector;
     private final ReportGenerator reportGen;
     private final ConfigManager configManager;
+    // v1.2 A8：显示层色阶统一判定（读 config 告警阈值，替代原先 16 处硬编码）
+    private final ThresholdColors thresholdColors;
 
     // 实时监测模式中的玩家（P0-12：并发 Set，遍历清理线程安全）
     private final Set<UUID> monitoringPlayers = ConcurrentHashMap.newKeySet();
@@ -82,6 +85,7 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         this.collector = plugin.getMetricsCollector();
         this.reportGen = plugin.getReportGenerator();
         this.configManager = plugin.getConfigManager();
+        this.thresholdColors = new ThresholdColors(plugin.getConfigManager());
     }
 
     @Override
@@ -222,8 +226,9 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             sender.sendMessage(goldLabel("实体总数: ")
                 .append(Component.text("不可用", GRAY)));
         } else {
-            TextColor entityColor = snap.totalEntities > configManager.get().entities_totalWarningThreshold ? RED
-                : (snap.totalEntities > 200 ? YELLOW : GREEN);
+            // v1.2 A8：改为读 config 阈值（原硬编码 200/全局warn）
+            TextColor entityColor = thresholdColors.colorOf(
+                thresholdColors.levelOf(ThresholdColors.Metric.ENTITIES, snap.totalEntities));
             sender.sendMessage(goldLabel("实体总数: ")
                 .append(Component.text(String.valueOf(snap.totalEntities), entityColor)));
         }
@@ -247,14 +252,9 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             int forceLoaded = snap.forceLoadedChunksByWorld.getOrDefault(world.getName(), 0);
             int tileEntities = snap.tileEntitiesByWorld.getOrDefault(world.getName(), 0);
 
-            TextColor eColor;
-            if (entityCount > 500) {
-                eColor = RED;
-            } else if (entityCount > 200) {
-                eColor = YELLOW;
-            } else {
-                eColor = GREEN;
-            }
+            // v1.2 A8：改为读 config 阈值（含 worlds 段按世界覆盖；原硬编码 500/200）
+            TextColor eColor = thresholdColors.colorOf(
+                thresholdColors.levelOf(ThresholdColors.Metric.ENTITIES, entityCount, world.getName()));
 
             sender.sendMessage(Component.text("  世界: ", GRAY)
                 .append(Component.text(world.getName(), WHITE))
@@ -275,8 +275,9 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         } else {
             long usedMem = snap.heapUsed / 1024 / 1024;
             long maxMem = snap.heapMax / 1024 / 1024;
-            TextColor memColor = snap.heapUsagePercent >= 90 ? RED
-                : (snap.heapUsagePercent >= 80 ? YELLOW : GREEN);
+            // v1.2 A8：改为读 config 阈值（原硬编码 90/80）
+            TextColor memColor = thresholdColors.colorOf(
+                thresholdColors.levelOf(ThresholdColors.Metric.MEMORY, snap.heapUsagePercent));
             sender.sendMessage(goldLabel("内存: ")
                 .append(Component.text(usedMem + "MB / " + maxMem + "MB", WHITE))
                 .append(Component.text(" (" + snap.heapUsagePercent + "%)", memColor)));
@@ -333,9 +334,10 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             }
         }
 
-        // MSPT 过高建议
-        if (snap.msptAvg > 50) {
-            sender.sendMessage(Component.text("警告: MSPT 超过 50ms！TPS 已受影响。", RED));
+        // MSPT 过高建议（v1.2 A8：触发条件改为读 config 阈值，原硬编码 50）
+        if (thresholdColors.levelOf(ThresholdColors.Metric.MSPT, snap.msptAvg) == ThresholdColors.Level.CRITICAL) {
+            sender.sendMessage(Component.text("警告: MSPT 超过 " + (int) configManager.get().mspt_criticalThreshold
+                + "ms！TPS 已受影响。", RED));
             sender.sendMessage(Component.text("建议: 检查是否有大量实体堆积、区块加载过多、或其他插件消耗过高的 CPU。", GRAY));
             sender.sendMessage(Component.text("可使用 spark profiler 精确定位: /spark profiler start → /spark profiler stop", GRAY));
         }
@@ -365,7 +367,8 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         if (history.size() > 1) {
             int showCount = Math.min(60, history.size());
             sender.sendMessage(Component.text("TPS 趋势 (最近" + showCount + "次采样):", GRAY));
-            // A5（命令侧）：趋势位语义——"|" ≥19.5 / "." ≥18 / ":" ≥15 / "!" <15；
+            // A5（命令侧）：趋势位语义——"|" 满 / "." GOOD / ":" WARN / "!" CRITICAL；
+            // v1.2 A8：四档判定改读 config（阈值来源 ThresholdColors.tpsTrendBucket）；
             // TPS 值 <=0 或该采样快照 MODULE_TPS 不可用时，该位是"数据缺失"（模块禁用/启动期写入的 0 值），
             // 渲染为灰色 "?"，不得画成 "!"——"数据缺失"≠"TPS=0"，避免整段趋势被误读为"TPS 崩到 0"
             Component trend = Component.empty();
@@ -375,14 +378,13 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 double tps = sample.tps1m;
                 if (sample.unavailable.contains(MetricsSnapshot.MODULE_TPS) || tps <= 0) {
                     trend = trend.append(Component.text("?", GRAY));
-                } else if (tps >= 19.5) {
-                    trend = trend.append(Component.text("|", AQUA));
-                } else if (tps >= 18) {
-                    trend = trend.append(Component.text(".", AQUA));
-                } else if (tps >= 15) {
-                    trend = trend.append(Component.text(":", AQUA));
                 } else {
-                    trend = trend.append(Component.text("!", AQUA));
+                    switch (thresholdColors.tpsTrendBucket(tps)) {
+                        case 3: trend = trend.append(Component.text("|", AQUA)); break;
+                        case 2: trend = trend.append(Component.text(".", AQUA)); break;
+                        case 1: trend = trend.append(Component.text(":", AQUA)); break;
+                        default: trend = trend.append(Component.text("!", AQUA)); break;
+                    }
                 }
             }
             sender.sendMessage(Component.text("  ").append(trend));
@@ -428,8 +430,10 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 .append(Component.text(String.format("%.1f", Math.min(maxTPS, 20.0)), AQUA)));
         }
 
-        if (snap.msptAvg > 50) {
-            sender.sendMessage(Component.text("警告: MSPT 超过 50ms！TPS 已受影响。", RED));
+        // v1.2 A8：触发条件与文案数值改为读 config 阈值（原硬编码 50）
+        if (thresholdColors.levelOf(ThresholdColors.Metric.MSPT, snap.msptAvg) == ThresholdColors.Level.CRITICAL) {
+            sender.sendMessage(Component.text("警告: MSPT 超过 " + (int) configManager.get().mspt_criticalThreshold
+                + "ms！TPS 已受影响。", RED));
             sender.sendMessage(Component.text("建议: 检查是否有大量实体堆积、区块加载过多、或其他插件消耗过高的 CPU。", GRAY));
             sender.sendMessage(Component.text("可使用 spark profiler 精确定位: /spark profiler start → /spark profiler stop", GRAY));
         }
@@ -455,8 +459,9 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             return;
         }
 
-        TextColor entityColor = snap.totalEntities > configManager.get().entities_totalWarningThreshold ? RED
-            : (snap.totalEntities > 200 ? YELLOW : GREEN);
+        // v1.2 A8：改为读 config 阈值（原硬编码 200/全局warn）
+        TextColor entityColor = thresholdColors.colorOf(
+            thresholdColors.levelOf(ThresholdColors.Metric.ENTITIES, snap.totalEntities));
         sender.sendMessage(goldLabel("总实体数: ")
             .append(Component.text(String.valueOf(snap.totalEntities), entityColor, TextDecoration.BOLD)));
 
@@ -464,7 +469,9 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         sender.sendMessage(Component.text("按世界分布:", GRAY));
         for (Map.Entry<String, Integer> entry : snap.entitiesByWorld.entrySet()) {
             if (world != null && !entry.getKey().equals(world.getName())) continue;
-            TextColor ec = entry.getValue() > 500 ? RED : (entry.getValue() > 200 ? YELLOW : GREEN);
+            // v1.2 A8：改为读 config 阈值（含 worlds 段覆盖；原硬编码 500/200）
+            TextColor ec = thresholdColors.colorOf(
+                thresholdColors.levelOf(ThresholdColors.Metric.ENTITIES, entry.getValue(), entry.getKey()));
             sender.sendMessage(Component.text("  " + entry.getKey() + ": ", WHITE)
                 .append(Component.text(String.valueOf(entry.getValue()), ec)));
         }
@@ -553,7 +560,9 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         for (Map.Entry<String, Integer> entry : snap.chunksByWorld.entrySet()) {
             if (world != null && !entry.getKey().equals(world.getName())) continue;
             int forceLoaded = snap.forceLoadedChunksByWorld.getOrDefault(entry.getKey(), 0);
-            TextColor cc = entry.getValue() > 1500 ? RED : (entry.getValue() > 800 ? YELLOW : GREEN);
+            // v1.2 A8：改为读 config 阈值（原硬编码 1500/800——1500 实为告警黄界，红界错位修正）
+            TextColor cc = thresholdColors.colorOf(
+                thresholdColors.levelOf(ThresholdColors.Metric.CHUNKS, entry.getValue()));
             sender.sendMessage(Component.text("  " + entry.getKey() + ": ", WHITE)
                 .append(Component.text(entry.getValue() + " 个", cc))
                 .append(Component.text(" (强加载: " + forceLoaded + ")", GRAY)));
@@ -576,8 +585,9 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
 
         long usedMemMB = snap.heapUsed / 1024 / 1024;
         long maxMemMB = snap.heapMax / 1024 / 1024;
-        TextColor memColor = snap.heapUsagePercent >= 90 ? RED
-            : (snap.heapUsagePercent >= 80 ? YELLOW : GREEN);
+        // v1.2 A8：改为读 config 阈值（原硬编码 90/80，与默认巧合一致）
+        TextColor memColor = thresholdColors.colorOf(
+            thresholdColors.levelOf(ThresholdColors.Metric.MEMORY, snap.heapUsagePercent));
 
         sender.sendMessage(yellowLabel("堆内存: ")
             .append(Component.text(usedMemMB + "MB / " + maxMemMB + "MB", memColor, TextDecoration.BOLD))
@@ -607,8 +617,9 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 .append(Component.text(snap.gcTime + " ms", WHITE)));
         }
 
-        if (snap.heapUsagePercent >= 90) {
-            sender.sendMessage(Component.text("严重警告: 堆内存使用率超过 90%！", RED));
+        if (thresholdColors.levelOf(ThresholdColors.Metric.MEMORY, snap.heapUsagePercent) == ThresholdColors.Level.CRITICAL) {
+            sender.sendMessage(Component.text("严重警告: 堆内存使用率超过 "
+                + configManager.get().memory_heapCriticalThreshold + "%！", RED));
             sender.sendMessage(Component.text("建议: 增加服务器最大内存 (-Xmx) 或检查是否有内存泄漏。", GRAY));
         }
     }
@@ -627,10 +638,11 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             return;
         }
 
-        TextColor processColor = snap.processCpuLoad > 80 ? RED
-            : (snap.processCpuLoad > 60 ? YELLOW : GREEN);
-        TextColor systemColor = snap.systemCpuLoad > 90 ? RED
-            : (snap.systemCpuLoad > 70 ? YELLOW : GREEN);
+        // v1.2 A8：改为读 config 阈值（CPU 无 critical 键，最高只判到 WARN，消除"红界=告警界"错位）
+        TextColor processColor = thresholdColors.colorOf(
+            thresholdColors.levelOf(ThresholdColors.Metric.CPU_PROCESS, snap.processCpuLoad));
+        TextColor systemColor = thresholdColors.colorOf(
+            thresholdColors.levelOf(ThresholdColors.Metric.CPU_SYSTEM, snap.systemCpuLoad));
 
         // P0-13：-1 哨兵显示"未知"
         Component processCpuValue = snap.processCpuLoad < 0 ? Component.text("未知", GRAY)
@@ -663,7 +675,9 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
 
         int pct = snap.maxPlayers > 0 ? (snap.playerCount * 100 / snap.maxPlayers) : 0;
         String pBar = generateBar(pct, 30);
-        TextColor pctColor = pct >= 95 ? RED : (pct >= 80 ? YELLOW : GREEN);
+        // v1.2 A8：改为读 config 阈值（原硬编码 95/80，与默认巧合一致）
+        TextColor pctColor = thresholdColors.colorOf(
+            thresholdColors.levelOf(ThresholdColors.Metric.PLAYERS, pct));
         sender.sendMessage(Component.text("  [" + pBar + "] " + pct + "%", pctColor));
 
         if (snap.playerCount > 0) {
@@ -955,7 +969,9 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             .append(snap.unavailable.contains(MetricsSnapshot.MODULE_MEMORY)
                 ? Component.text("不可用", GRAY)
                 : Component.text(snap.heapUsagePercent + "%",
-                    snap.heapUsagePercent >= 90 ? RED : (snap.heapUsagePercent >= 80 ? YELLOW : GREEN)))
+                    // v1.2 A8：改为读 config 阈值（原硬编码 90/80）
+                    thresholdColors.colorOf(thresholdColors.levelOf(
+                        ThresholdColors.Metric.MEMORY, snap.heapUsagePercent))))
             .append(Component.text(" | 区块: ", GRAY))
             .append(snap.unavailable.contains(MetricsSnapshot.MODULE_CHUNKS)
                 ? Component.text("不可用", GRAY)
@@ -1088,10 +1104,9 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
     }
 
     private Component formatTpsComponent(double tps) {
-        NamedTextColor color;
-        if (tps >= 18.0) color = GREEN;
-        else if (tps >= 15.0) color = YELLOW;
-        else color = RED;
+        // v1.2 A8：改为读 config 阈值（原硬编码 18/15，与默认巧合一致）
+        NamedTextColor color = thresholdColors.colorOf(
+            thresholdColors.levelOf(ThresholdColors.Metric.TPS, tps));
         return Component.text(String.format("%.1f", Math.min(tps, 20.0)), color, TextDecoration.BOLD);
     }
 
@@ -1100,10 +1115,9 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         if (mspt <= 0) {
             return Component.text("未知", GRAY);
         }
-        NamedTextColor color;
-        if (mspt <= 40) color = GREEN;
-        else if (mspt <= 50) color = YELLOW;
-        else color = RED;
+        // v1.2 A8：改为读 config 阈值（原硬编码 40/50——黄界 40 曾与配置 45 脱节）
+        NamedTextColor color = thresholdColors.colorOf(
+            thresholdColors.levelOf(ThresholdColors.Metric.MSPT, mspt));
         return Component.text(String.format("%.2f ms", mspt), color, TextDecoration.BOLD);
     }
 

@@ -21,6 +21,7 @@ import cn.perfscope.PerfScope;
 import cn.perfscope.config.ConfigManager;
 import cn.perfscope.metrics.MetricsCollector;
 import cn.perfscope.metrics.MetricsSnapshot;
+import cn.perfscope.util.ThresholdColors;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -43,6 +44,8 @@ public class ReportGenerator {
     private final MetricsCollector collector;
     private final ConfigManager configManager;
     private final File reportDir;
+    // v1.2 A8：报告层阈值统一改由 ThresholdColors 读 config 判定
+    private final ThresholdColors thresholdColors;
 
     // P0-11：线程安全的日期格式化器（SimpleDateFormat 非线程安全，已删除）
     private static final DateTimeFormatter FILE_TS = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss-SSS");
@@ -58,6 +61,7 @@ public class ReportGenerator {
         this.plugin = plugin;
         this.collector = plugin.getMetricsCollector();
         this.configManager = plugin.getConfigManager();
+        this.thresholdColors = new ThresholdColors(configManager);
         this.reportDir = new File(plugin.getDataFolder(), "reports");
         if (!reportDir.exists()) {
             reportDir.mkdirs();
@@ -315,7 +319,22 @@ public class ReportGenerator {
                     continue;
                 }
                 double pct = h.tps1m / maxTps * 100;
-                String color = h.tps1m >= 19.5 ? "#69F0AE" : h.tps1m >= 18 ? "#4CAF50" : h.tps1m >= 15 ? "#FFB300" : "#FF5252";
+                // v1.2 A8：改为读 config 阈值；桶 3/2 绿（区分深浅沿用原色值）、1 黄、0 红
+                String color;
+                switch (thresholdColors.tpsTrendBucket(h.tps1m)) {
+                    case 3:
+                        color = "#69F0AE";
+                        break;
+                    case 2:
+                        color = "#4CAF50";
+                        break;
+                    case 1:
+                        color = "#FFB300";
+                        break;
+                    default:
+                        color = "#FF5252";
+                        break;
+                }
                 html.append("<div class=\"bar\" style=\"height:").append(String.format("%.1f", pct))
                     .append("%;background:").append(color).append("\" title=\"")
                     .append(String.format("%.2f", h.tps1m)).append("\"></div>\n");
@@ -759,27 +778,30 @@ public class ReportGenerator {
     }
 
     private String getTpsClass(double tps) {
-        if (tps >= 19.5) return "good";
-        if (tps >= 18) return "warn";
-        return "critical";
+        // v1.2 A8：改为读 config 阈值
+        return thresholdColors.cssClass(thresholdColors.levelOf(ThresholdColors.Metric.TPS, tps));
     }
 
     private String getMsptClass(double mspt) {
-        if (mspt <= 40) return "good";
-        if (mspt <= 50) return "warn";
-        return "critical";
+        // v1.2 A8：改为读 config 阈值
+        return thresholdColors.cssClass(thresholdColors.levelOf(ThresholdColors.Metric.MSPT, mspt));
     }
 
     private String getMemClass(int pct) {
-        if (pct < 70) return "good";
-        if (pct < 90) return "warn";
-        return "critical";
+        // v1.2 A8：改为读 config 阈值
+        return thresholdColors.cssClass(thresholdColors.levelOf(ThresholdColors.Metric.MEMORY, pct));
     }
 
     private String getMemBarColor(int pct) {
-        if (pct < 70) return "#69F0AE";
-        if (pct < 90) return "#FFB300";
-        return "#FF5252";
+        // v1.2 A8：改为读 config 阈值（档位来源改 config，色值沿用文件内既有）
+        switch (thresholdColors.levelOf(ThresholdColors.Metric.MEMORY, pct)) {
+            case GOOD:
+                return "#69F0AE";
+            case WARN:
+                return "#FFB300";
+            default:
+                return "#FF5252";
+        }
     }
 
     private String formatBytes(long bytes) {

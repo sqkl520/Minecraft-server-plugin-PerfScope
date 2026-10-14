@@ -20,6 +20,41 @@
 
 ---
 
+## [Unreleased] — v1.2 前置：A8 阈值读配置 - 2026-10-14
+
+> **主题：阈值/配色硬编码清零（A8）**。Wave 4 审查遗留欠账之一——「A8 阈值硬编码不读 config」
+> （当时刻意押后，避免与 15 项 S 级修复打架）——在本波清理：新增统一阈值色阶工具类
+> `ThresholdColors`，命令层与报告层的硬编码色阶全部替换为读 `config.yml`。
+> **状态：编译验证已通过**（`mvn clean compile` + `package -DskipTests` 双 BUILD SUCCESS；34 处调用点签名全部匹配、零修复、零残留；6 条行为变更逐条确认落地；Wave 4 修复项无一被破坏）；
+> 本波同时含「规格债回写」文档工作（见 Notes）。
+
+### Added
+- `cn.perfscope.util.ThresholdColors`（新类）：
+  - 枚举 `Level { GOOD, WARN, CRITICAL, UNKNOWN }` —— 统一四级状态色阶；
+  - 枚举 `Metric { TPS, MSPT, MEMORY, CPU_PROCESS, CPU_SYSTEM, PLAYERS, ENTITIES, CHUNKS }` —— 指标维度；
+  - `levelOf` 读 config 判定等级；`cssClass` / `colorOf` 映射展示色；`tpsTrendBucket` 统一 TPS 趋势分档。
+
+### Changed
+- **命令层 29 处 + 报告层 5 处**硬编码色阶引用，全部替换为 `ThresholdColors` 读配置
+  （消除命令层与报告层各写一套阈值的分裂）。
+- 文案 `"超过 Xms"` 的 X 改为读 config 实际数值（不再写死）。
+- **行为变更（6 条，需在测试服确认）**：
+  ① 区块红界：硬编码 1500 → config `critical` 2500；
+  ② CPU：不再有红色档（config 无 CPU critical 键，最高 WARN）；
+  ③ 报告内存界：硬编码 70 → config 80（消除与命令层 80 的矛盾，两侧由此一致）；
+  ④ MSPT 黄界：硬编码 40 → config 45；
+  ⑤ TPS 趋势：19.5 档改为「满值档 >= 20」；
+  ⑥ ActionBar（monitor）内存配色改为读配置。
+
+### Notes
+- **待验证**：行为变更 ①～⑥ 的最终阈值观感需用户在测试服确认（尤其 ① 区块红界 2500、⑤ 满值档）。
+- **编译已过**：A8 编译验证完成——`compile`/`package` 双 BUILD SUCCESS、34 处调用点零修复、零残留色阶硬编码、6 条行为变更全确认、Wave 4 守卫项（unavailable/-1/connection/try 边界/JSON 键名）抽查全数完好。
+- **同波文档工作（规格债回写）**：4 处未记录偏差入档 `ralph/progress.txt`（完整 6 项偏差表）；
+  ROADMAP v1.1 验收标准 Spigot 条目回写；`ralph/prd.json` P0-3 等 Spigot 相关
+  acceptanceCriteria 回写「Paper 系」表述；`ralph/RELEASE_TEST.md` 补录 DoD-3/5 待补条目。
+
+---
+
 ## [Unreleased] — Wave 4 - 2026-10-12 ～ 10-14
 
 > **主题：审查后修复**。v1.1 三个开发波次完成后，用 **15 个并行审查 agent** 做了一次全量体检
