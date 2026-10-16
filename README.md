@@ -97,6 +97,8 @@ GC: 42 次 / 5.23 秒
 4. 编辑 `plugins/PerfScope/config.yml` 进行自定义配置
 5. 使用 `/perfscope` 查看性能数据
 
+> 数据披露：本插件内置 bStats 匿名使用统计（默认启用，不收集玩家/服主个人信息）。当前版本作者尚未注册 bStats 项目 ID，**不会发送任何数据**；ID 注册后自动生效。可在 `plugins/bStats/config.yml` 或本插件 config.yml 的 `general.bstats-enabled: false` 关闭。
+
 ## 配置
 
 主要配置项（`config.yml`）：
@@ -216,8 +218,8 @@ JAR 文件将生成在 `target/` 目录。
 本项目自 v1.1 起采用 [GNU Affero General Public License v3.0](https://www.gnu.org/licenses/agpl-3.0.html)（AGPL-3.0）许可证，完整条款见仓库根目录的 LICENSE 文件。
 
 这意味着：
-- 允许商用，但须保留原作者署名；
-- 二次分发（无论是否修改）须整体以 AGPL-3.0 开源；
-- 基于本插件提供网络服务（如部署在服务器上供玩家使用）须向用户提供对应源码。
+- 任何人都可以自由使用本插件，包括商业用途——无需付费，也无需额外授权；
+- 任何分发（无论是否修改、无论是否商用）都必须保留版权声明与许可证文本，并整体以 AGPL-3.0 开源；
+- 通过网络提供服务（如部署在服务器上供玩家使用）时，须向用户提供对应源码（AGPL-3.0 §13）。
 
 版本说明：v1.0.0 及之前已发布的版本永久保持 GPL-3.0，不受此次变更影响；自 v1.1 起为 AGPL-3.0。

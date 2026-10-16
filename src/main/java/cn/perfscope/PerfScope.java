@@ -24,10 +24,14 @@ import cn.perfscope.compat.ServerCompat;
 import cn.perfscope.config.ConfigManager;
 import cn.perfscope.metrics.MetricsCollector;
 import cn.perfscope.report.ReportGenerator;
+import org.bstats.bukkit.Metrics;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.java.JavaPlugin;
 
 public final class PerfScope extends JavaPlugin {
+
+    // TODO: 作者在 bstats.org 注册后替换（当前占位：不发送任何数据）
+    private static final int BSTATS_PLUGIN_ID = 0;
 
     private static PerfScope instance;
 
@@ -92,6 +96,9 @@ public final class PerfScope extends JavaPlugin {
             getLogger().info("  MSPT精确采集: " + (exactMspt ? "Paper API" : "TPS估算"));
             getLogger().info("  ActionBar: " + (ServerCompat.PAPER_ACTION_BAR_AVAILABLE ? "可用" : "不可用"));
         }
+
+        // bStats 匿名统计（Wave 6D）：占位 ID 不发送任何数据；整段兜底，遥测失败绝不影响插件本体
+        startBstats();
 
         getLogger().info("========================================");
         getLogger().info("  PerfScope 启动完成喵~");
@@ -173,6 +180,41 @@ public final class PerfScope extends JavaPlugin {
     private void stopAlertService() {
         if (alertService != null) {
             alertService.stop();
+        }
+    }
+
+    /**
+     * 启动 bStats 匿名统计（Wave 6D）：general.bstats-enabled=true 且 {@code BSTATS_PLUGIN_ID > 0} 时创建
+     * {@link Metrics}（源码 import 原包名，打包期由 maven-shade 重写为 cn.perfscope.shaded.bstats）。
+     *
+     * <p>整段 try-catch 兜底：遥测初始化失败绝不影响插件本体（catch Exception | LinkageError，
+     * 与全仓异常隔离口径一致——relocate 落点缺失时的 NoClassDefFoundError 同属 LinkageError）；
+     * 失败日志按 general.debug 门控堆栈（与 safeCollect 同款口径）。</p>
+     *
+     * <p>实现注意：ID 先读入局部变量再判定，避免 javac 对常量做常量折叠，把 Metrics 引用连同整段
+     * 代码从字节码中消去——保留引用才能用 javap 验证 shade 已把 org.bstats 重写为
+     * cn.perfscope.shaded.bstats（发布门禁的 relocate 实证）。</p>
+     */
+    private void startBstats() {
+        if (!configManager.get().general_bstatsEnabled) {
+            getLogger().info("[PerfScope] bStats 匿名统计未启用 (general.bstats-enabled=false)");
+            return;
+        }
+        int bstatsPluginId = BSTATS_PLUGIN_ID; // 防常量折叠，见方法注释
+        if (bstatsPluginId <= 0) {
+            getLogger().info("[PerfScope] bStats 匿名统计未启用 (pluginId 占位为 0，作者注册 bstats.org 后替换生效)");
+            return;
+        }
+        try {
+            new Metrics(this, bstatsPluginId);
+            getLogger().info("[PerfScope] bStats 匿名统计已启用 (pluginId=" + bstatsPluginId + ")");
+        } catch (Exception | LinkageError e) {
+            // general.debug 门控堆栈（与 safeCollect / monitor 推送同款日志口径）
+            if (configManager.get().general_debug) {
+                getLogger().log(java.util.logging.Level.WARNING, "[PerfScope] bStats 匿名统计初始化失败（已跳过，不影响插件本体）", e);
+            } else {
+                getLogger().warning("[PerfScope] bStats 匿名统计初始化失败（已跳过，不影响插件本体）: " + e.getMessage());
+            }
         }
     }
 

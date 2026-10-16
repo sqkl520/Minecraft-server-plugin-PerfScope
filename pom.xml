@@ -47,6 +47,13 @@
             <version>2.10.1</version>
             <scope>provided</scope>
         </dependency>
+        <!-- bStats 匿名统计 (compile → 由 maven-shade-plugin 打包并 relocate，见 build 段注释)；
+             传递依赖 bstats-base 一并打包。自包含遥测库，不与平台 API 做签名级互操作 -->
+        <dependency>
+            <groupId>org.bstats</groupId>
+            <artifactId>bstats-bukkit</artifactId>
+            <version>3.2.1</version>
+        </dependency>
     </dependencies>
 
     <build>
@@ -57,12 +64,49 @@
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.11.0</version>
                 <configuration>
-                    <source>${java.version}</source>
-                    <target>${java.version}</target>
+                    <!-- 锐评 B 论点 10：统一 release 编译（替代 source/target），
+                         防止在 JDK21 上误链接 java.version(17) 以上的 API -->
+                    <release>${java.version}</release>
                 </configuration>
             </plugin>
-            <!-- 专注 Paper 系：移除 maven-shade-plugin。Adventure/Gson 均由 Paper 运行时提供（provided），
-                 无需 shade/relocate，默认 maven-jar 打包即可（不再生成 dependency-reduced-pom.xml）。 -->
+            <!-- maven-shade-plugin（回归仅服务 bStats 匿名统计，最小化配置）：
+                 落点用独立前缀 cn.perfscope.shaded.bstats —— 绝不使用 cn.perfscope.lib.*，
+                 保持 v1.0.0 事故指纹前缀零命中（release-check.ps1 与 CI 门禁原样作证）。
+                 与 v1.0.0 事故的前提差异：当时 relocate 的 Adventure 必须与平台 API 互操作
+                 （Component 出现在 sendMessage(Component) 签名中，Paper 运行时期待 net.kyori.*，
+                 改写类名即全命令 NoSuchMethodError）；bStats 是自包含遥测库，不与平台做签名级
+                 互操作（官方文档即推荐 shade+relocate，且其内部 checkRelocation 字节数组技巧
+                 正好认可非 org.bstats 前缀）。artifactSet 仅纳入 org.bstats 两个 artifact；
+                 createDependencyReducedPom=false（不再生成 dependency-reduced-pom.xml）；
+                 不加 minimizeJar；jar 名（finalName）与 manifest 不变。 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.6.2</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <artifactSet>
+                                <includes>
+                                    <include>org.bstats:bstats-bukkit</include>
+                                    <include>org.bstats:bstats-base</include>
+                                </includes>
+                            </artifactSet>
+                            <relocations>
+                                <relocation>
+                                    <pattern>org.bstats</pattern>
+                                    <shadedPattern>cn.perfscope.shaded.bstats</shadedPattern>
+                                </relocation>
+                            </relocations>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
         <resources>
             <resource>

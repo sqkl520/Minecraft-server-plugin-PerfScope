@@ -20,6 +20,62 @@
 
 ---
 
+## [Unreleased] — Wave 6「分发准备」- 2026-10-17
+
+> **主题：上架前的地基**（`critique-SYNTHESIS.md` 第 1 层 + `POST-CRITIQUE-FIX-PLAN.md` Wave 6）。
+> 3 agent 并行（许可/文档 / 上架材料 / bStats+门禁）+ 编排者对外信息修正，编排者统一收口。
+> **状态：全部落地；实机验证通过（release-check -WithServer 12/12，含 server boot+surface 真实 Paper 断言）**。
+
+### Added
+- **W6A · CLA 落地**（上架硬前置：无 CLA 时首个外部 PR 即永久锁死双许可）：
+  - `CLA.md`（新，中英双版本、以中文为准）：贡献者保留版权，授予维护者永久/全球/非独占/免版税/
+    不可撤销的版权许可；**第 2.3 条显式写明再许可权含闭源/商业许可证**（双许可之门）；Apache ICLA 式
+    专利许可与防御性终止；原创性/雇主授权声明；顶部醒目"自拟模板、未经法律审阅"声明。
+  - `CONTRIBUTING.md`（新）：PR 流程、构建要求、CLA 签署流程（首 PR 声明句 + 维护者记录）、行为期望。
+  - `.github/PULL_REQUEST_TEMPLATE.md`（新）：CLA checkbox + 描述/测试段。
+- **W6D · bStats 匿名统计接入**（唯一装机反馈信号；发布第一天可用）：
+  - `org.bstats:bstats-bukkit:3.2.1`（MIT）+ maven-shade-plugin 3.6.2 **最小化配置**：`artifactSet`
+    仅含 bStats 两个 artifact；relocate `org.bstats → cn.perfscope.shaded.bstats`（**独立前缀，
+    绝不使用 `cn.perfscope.lib.*`**——保持 v1.0.0 事故指纹零命中）；`createDependencyReducedPom=false`。
+  - `PerfScope.java`：`startBstats()` 双重门（`general.bstats-enabled` 且 `BSTATS_PLUGIN_ID > 0`——
+    **当前为占位 0，不发送任何数据**，注册后替换生效）+ `catch (Exception | LinkageError)` 整段兜底；
+    ID 先读局部变量以**防 javac 常量折叠消去字节码**（保住 javap relocate 实证能力，W6D agent 实测发现）。
+  - `config.yml` + `ConfigManager`：新增 `general.bstats-enabled`（缺键默认 true），注释含两处关闭方式。
+- **W6C · 上架材料包**：`docs/07-guides/PERFSCOPE-LISTING-KIT.md`（上层工作区，新）——Modrinth/Hangar/
+  MineBBS/KLpbbs 四平台可直接粘贴文案（双语）+ 截图清单 6 张 + 发布操作清单 + 30 天 KPI 观察清单；
+  全文事实核对至现行 README（无 Spigot/Velocity 声称、无 7×24 夸大、spark 互补引导内嵌）。
+
+### Changed
+- **W6B · 许可证表述纠错**（双语 README）：删除"商用须保留原作者署名"误述（**不是 AGPL 条款**），
+  改为准确表述（自由商用无需付费；任何分发须保留版权声明与许可文本并整体 AGPL；网络服务须供源码 §13）；
+  版本分界经 LICENSE 与 git 历史核实（初版 GPL-3.0 @49fe55e → AGPL-3.0 @f91985f）后保留。
+  另新增 bStats 披露（双语；并经编排者修正为"当前占位 ID 不发送数据"的准确时序表述）。
+- **W6D · 发布门禁加固**：`release-check.ps1` 新增两条断言——`net/kyori/` = 0（Adventure 永远由 Paper
+  提供）、`cn/perfscope/shaded/bstats/` ≥ 1 且裸 `org/bstats/` = 0（bStats 已打包并 relocate）；
+  `.github/workflows/build.yml` 同步新增同款 shell 断言；体积基线注记更新（~80KB → ~110-120KB）。
+- **W6D · 技术债**：compiler plugin `source/target` → `<release>${java.version}</release>`
+  （锐评 B 论点 10：防 JDK21 上误链接 17+ API）。
+- **W6E · GitHub 对外信息修正**（编排者执行，gh api）：仓库 description 删除错误的
+  "Spigot / Bukkit / Velocity" 声称，改为准确的 Paper 系双语描述；新增 10 个 topics
+  （minecraft/papermc/performance/monitoring/tps/mspt/alerts 等）。
+- `docs/07-guides/RELEASE-CHECKLIST.md`：更新至 Wave 6 状态（三层 jar 断言、~110-120KB 基线、
+  六场景（含 perfscope-vbot 12/12）、指向测试报告 §9 基线）。
+
+### Notes
+- **实机验证（编排者）**：`release-check.ps1 -WithServer` **12/12 PASS**——jar 111KB / 57 条目、
+  `cn/perfscope/lib/`=0、`net/kyori/`=0、`cn/perfscope/shaded/bstats/`=19、裸 `org/bstats/`=0；
+  真机 Paper 加载正常（boot 6/6 + surface 36/36）、控制台零异常、bStats 占位提示正确输出。
+  **v1.0.0 事故后首次在带 shade 的构建上完成"装服实证"**——这正是当年缺失的那道关卡。
+- **javap 实证（W6D）**：`new cn/perfscope/shaded/bstats/bukkit/Metrics` + `(Lorg/bukkit/plugin/Plugin;I)V`
+  ——relocate 生效且与 Paper 的互操作签名未被改写；全 class 常量池零残留裸 `org/bstats` token。
+- **待用户动作（发布链）**：① 注册 bStats 拿 pluginId 替换 `BSTATS_PLUGIN_ID = 0`（或先发布亦可——
+  占位期无任何数据发送，但装机信号从替换后才开始积累）；② 上架材料已备好
+  （`PERFSCOPE-LISTING-KIT.md`）；③ 发布（bump 1.1.0 + Release + tag）等用户口令。
+- **清单外发现（记录）**：① `CLA.md` 为自拟模板，正式启用前建议作者审阅（或咨询法律人士）；
+  ② Folia 声称支持但本机无法实机验证（装载勾选由作者拍板）；③ 游戏内输出仍全中文（英文描述已如实披露）。
+
+---
+
 ## [Unreleased] — Wave 5「发布前加固」- 2026-10-16 ～ 10-17
 
 > **主题：四路对抗性锐评后的发布前加固**（`docs/01-reviews/critique-SYNTHESIS.md` 裁决的第 0 层：

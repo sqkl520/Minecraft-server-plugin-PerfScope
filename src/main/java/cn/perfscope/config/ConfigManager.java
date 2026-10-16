@@ -54,6 +54,8 @@ public class ConfigManager {
         fresh.general_updateInterval = yaml.getInt("general.update_interval", 20);
         fresh.general_verboseStartup = yaml.getBoolean("general.verbose_startup", true);
         fresh.general_debug = yaml.getBoolean("general.debug", false);
+        // Wave 6D：bStats 匿名统计开关（缺键默认 true；pluginId 占位期间实际不发送任何数据）
+        fresh.general_bstatsEnabled = yaml.getBoolean("general.bstats-enabled", true);
 
         // === TPS ===
         fresh.tps_enabled = yaml.getBoolean("tps.enabled", true);
@@ -277,6 +279,8 @@ public class ConfigManager {
         public int general_updateInterval;
         public boolean general_verboseStartup;
         public boolean general_debug;
+        /** Wave 6D：bStats 匿名统计开关（general.bstats-enabled，缺键默认 true） */
+        public boolean general_bstatsEnabled;
 
         // TPS
         public boolean tps_enabled;

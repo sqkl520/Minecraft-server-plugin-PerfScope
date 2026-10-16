@@ -97,6 +97,8 @@ GC: 42 次 / 5.23 秒
 4. Edit `plugins/PerfScope/config.yml` for custom configuration
 5. Use `/perfscope` to view performance data
 
+> Data disclosure: This plugin bundles bStats anonymous usage statistics (enabled by default; no player or server-owner personal information is collected). In the current version the author has not yet registered a bStats plugin ID, so **no data is sent**; it activates automatically once the ID is registered. It can be disabled in `plugins/bStats/config.yml` or via `general.bstats-enabled: false` in this plugin's config.yml.
+
 ## Configuration
 
 Key configuration options (`config.yml`):
@@ -216,8 +218,8 @@ The JAR file will be generated in the `target/` directory.
 This project is licensed under the [GNU Affero General Public License v3.0](https://www.gnu.org/licenses/agpl-3.0.html) (AGPL-3.0) starting from v1.1. See the LICENSE file in the repository root for the full text.
 
 In short:
-- Commercial use is allowed, provided attribution to the original authors is retained;
-- Any redistribution (modified or not) must be licensed as a whole under AGPL-3.0;
-- Running this plugin as a network service (e.g. on your server for players) requires offering the Corresponding Source to users.
+- Anyone may freely use this plugin, including commercially — no fee and no additional permission required;
+- Any distribution (modified or not, commercial or not) must retain the copyright notice and license text, and be licensed as a whole under AGPL-3.0;
+- Running this plugin as a network service (e.g. on your server for players) requires offering the Corresponding Source to users (AGPL-3.0 §13).
 
 Version note: v1.0.0 and earlier released versions remain perpetually under GPL-3.0 and are unaffected by this change; AGPL-3.0 applies starting from v1.1.

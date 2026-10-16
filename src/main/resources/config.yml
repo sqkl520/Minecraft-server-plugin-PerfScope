@@ -10,6 +10,9 @@ general:
   verbose_startup: true
   # 是否启用调试日志
   debug: false
+  # bStats 匿名统计 (https://bstats.org): 仅上报插件使用量/服务端环境等匿名数据，无个人信息。
+  # 关闭方式二选一: 此处设为 false, 或在 plugins/bStats/config.yml 中设 enabled: false (对全服所有插件生效)
+  bstats-enabled: true
 
 # TPS 监测
 tps:

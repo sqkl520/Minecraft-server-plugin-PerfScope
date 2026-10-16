@@ -39,6 +39,35 @@ jobs:
           fi
           echo "OK: 0 entries with prefix cn/perfscope/lib/"
 
+      - name: Assert Adventure is not bundled (Paper provides it)
+        run: |
+          set -euo pipefail
+          JAR=$(ls target/PerfScope-*.jar | head -n 1)
+          if unzip -l "$JAR" | grep -q 'net/kyori/'; then
+            echo "::error::$JAR contains net/kyori/ entries -- Adventure must come from the Paper runtime (provided scope), never be bundled"
+            unzip -l "$JAR" | grep 'net/kyori/' | head -n 5
+            exit 1
+          fi
+          echo "OK: 0 entries with prefix net/kyori/"
+
+      - name: Assert bStats is packaged and relocated
+        run: |
+          set -euo pipefail
+          JAR=$(ls target/PerfScope-*.jar | head -n 1)
+          SHADED=$(unzip -l "$JAR" | grep -c 'cn/perfscope/shaded/bstats/' || true)
+          RAW=$(unzip -l "$JAR" | grep -c 'org/bstats/' || true)
+          echo "shaded bStats entries: $SHADED; raw org/bstats/ entries: $RAW"
+          if [ "$SHADED" -lt 1 ]; then
+            echo "::error::$JAR has no cn/perfscope/shaded/bstats/ entries -- bStats dependency or shade step missing from the build"
+            exit 1
+          fi
+          if [ "$RAW" -gt 0 ]; then
+            echo "::error::$JAR has raw org/bstats/ entries -- relocation did not run; raw classes would clash with other plugins' bStats copies"
+            unzip -l "$JAR" | grep 'org/bstats/' | head -n 5
+            exit 1
+          fi
+          echo "OK: bStats packaged (cn/perfscope/shaded/bstats/) and relocated (0 raw org/bstats/)"
+
       - name: Assert packaged plugin.yml version is resolved
         run: |
           set -euo pipefail
