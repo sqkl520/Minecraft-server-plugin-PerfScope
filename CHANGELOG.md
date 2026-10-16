@@ -89,13 +89,27 @@
 - **W5-A agent 被会话中断，收尾由编排者接管完成**：其重构落地完整（反射归零、隔离桥成形），
   编排者复验三步——完整构建 BUILD SUCCESS、javap 常量池隔离确认、Paper 1.20.0 工件缺类边界
   实证（下载实测 threadedregions 类数 = 0）。原计划的"API 对照表"由 javap 输出直接覆盖。
+- **Wave 5V 实机验证已通过（2026-10-17，HEAD `49c4ac0`）**：
+  ① 第一轮 5 场景 **72/72 零回归**（boot 6 + surface 36 + config 11 + alert 9 + report 10）；
+  ② 加装 VitaminMCP agent 25588 后新增 `perfscope-vbot` 场景 **12/12 全绿**——monitor 开关与
+  ActionBar 上屏、禁用模块客户端侧"实体: 不可用"降级、monitor 中强制踢出零 NPE/零推送失败、
+  控制台 player-only 守卫、无权限玩家权限门（经 `command_exec as=` 服务端侧分发实证玩家收到
+  "你没有权限使用此指令喵"）。合计 **84 条断言全过**。
+  报告：`docs/07-guides/PERFSCOPE-TEST-REPORT.md` §9。
+- **验收副产品·重要发现（命令权限两层模型）**：非 OP 玩家**自发**命令会被 Paper 的
+  per-player 命令树在**原版分发器**拦截（收到原版英文 `Unknown or incomplete command`，
+  对照组 `/list` 同样如此），**插件代码根本不执行**；插件自身的权限门需以服务端侧
+  `command_exec as=<玩家>` 路径触发方可观测。首轮 MON-04 的 FAIL 经两轮定向探针确认为
+  **测试路径设计错误而非产品 bug**，场景已按两层模型修正固化（见测试报告 §9.3）。
 - **已知行为（W5-D 引入，可接受）**：配置禁用的模块在 start/reload 后首个 tick 内（jvmCache 未发布时）
   会短暂显示"预热中"而非"不可用"，异步缓存发布即纠正（窗口 < 1 秒，纯观感）。
 - **清单外发现（记录待后波次处理，本轮未修）**：
   ① 禁用态与故障态在数据模型上不可分（`runOrMark` 对"配置禁用"也标 unavailable；需数据模型加字段）；
   ② `showAll` 世界明细段在 entities/chunks 模块 unavailable 时仍渲染按世界 0 值（与模块级口径不一致）；
-  ③ 上级 CLAUDE.md 两处描述过时（plugin.yml 版本已 filtering、.gitignore 规则已变更）。
-- **待验证（Wave 5V 实机）**：预热态文案观感、报告路径点击（vbot 无 click_chat 动作，需人工）、
+  ③ 上级 CLAUDE.md 两处描述过时（plugin.yml 版本已 filtering、.gitignore 规则已变更）；
+  ④ testharness 侧：perfscope 实例的 `server.psd1` 含中文 Notes 时必须存为 UTF-8 **BOM**
+     （PS 5.1 无 BOM 按 ANSI 读会破坏解析——已修正在案）。
+- **待验证（用户实测）**：预热态文案观感、报告路径点击（vbot 无 click_chat 动作，需人工）、
   Folia 直连版实机（本机只有 Paper，Folia 路径仍不可测，代码审查已覆盖）。
 
 ---
