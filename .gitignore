@@ -6,5 +6,8 @@ dependency-reduced-pom.xml
 /ralph
 /.claude/agent-memory
 # 编译产物不入库：发布走 GitHub Releases，versions/ 仅本地备份
-/versions/
+# 注：必须先以 /versions/* 排除"目录内容"（而非 /versions/ 整体排除目录，否则 git 不会进入
+# 该目录，任何 ! 例外都失效），才能用下一行把说明文档重新纳入版本控制
+/versions/*
+!/versions/README.md
 *.jar

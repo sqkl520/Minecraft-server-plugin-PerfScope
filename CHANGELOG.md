@@ -20,6 +20,86 @@
 
 ---
 
+## [Unreleased] — Wave 5「发布前加固」- 2026-10-16 ～ 10-17
+
+> **主题：四路对抗性锐评后的发布前加固**（`docs/01-reviews/critique-SYNTHESIS.md` 裁决的第 0 层：
+> 发布前不写新功能，先把"可发布状态"备好）。4 个 agent 并行（文件互斥：调度层 / 配置文档 /
+> 测试基建 / 命令层），编排者统一收口。修复计划全文：`docs/06-tasks/POST-CRITIQUE-FIX-PLAN.md`。
+> **状态：全部落地，编译 BUILD SUCCESS，字节码级复验通过**（含编排者对 W5-A 中断产出的接管核验）。
+
+### Refactored
+- **W5-A · SchedulerAdapter 去反射重构**（依据：锐评 B 论点 5——反射版的前提"paper-api 1.20.4 不含 Folia
+  调度类"系**误判**，javap 实测本地 paper-api 1.20.4 工件本就含 `GlobalRegionScheduler`/`AsyncScheduler`/
+  `ScheduledTask` 且 `Bukkit` 有静态 getter）：
+  - 删除全部 6 个反射 `Method` 缓存、静态初始化块与 `invoke` 调用（168 行 → 反射引用归零），
+    Folia 分支改为编译期直连；公开 API（`runGlobalTimer`/`runAsyncTimer`/`runLater`/`TaskHandle.cancel()`）
+    签名与语义逐字不变，5 处调用方零改动。
+  - **新增 `FoliaSchedulerBridge`（隔离层）**：W5-A agent 复核时发现并实证了一个真实边界——
+    plugin.yml 声明 `api-version "1.20"` 覆盖 1.20.0 全系，而 **Paper 1.20.0 的 paper-api 1.20-R0.1
+    确实不含** threadedregions 调度类（编排者复验：下载 1.20.0 工件实测 `threadedregions` 类数 = 0）。
+    理论上 1.20.0 上 `isFolia()` 恒 false、Folia 分支不可达，但为把"类/方法缺失"风险在任何 JVM
+    解析策略下压到零，全部 Folia 直连调用集中于该类——非 Folia 服务端上永不加载，常量池中的
+    Folia 符号永不进入链接流程；`SchedulerAdapter`（全环境必加载）常量池经 javap 复验已无任何
+    Folia/reflect 符号。
+  - fail-safe 语义保留：Folia 分支任何失败（含 LinkageError）记 severe + 返回 noop 句柄（功能停用），
+    绝不降级 Bukkit 调度器（真 Folia 上必抛 UOE）。
+  - **验证**：`mvn clean package -DskipTests` BUILD SUCCESS；javap 双查（SchedulerAdapter 常量池零
+    Folia/reflect 引用、FoliaSchedulerBridge 含全部直连字节码）。
+
+### Added
+- **W5-C · 发布冒烟门禁**（依据：v1.0.0"100% 不可用仍发布"事故——当时无任何发布前门禁）：
+  - `tools/release-check.ps1`（上层工作区，新建）：一键发布前检查——构建 → 产物校验（jar 存在/
+    体积量级/**断言 0 个 `cn/perfscope/lib/` 条目**（v1.0.0 shade-relocate 事故指纹）/plugin.yml
+    version 非占位符/class 条目非空）→ 可选 `-WithServer` 跑 testharness boot+surface 场景 →
+    `RELEASE CHECK: PASS/FAIL` + 非零退出码。实测 8/8 PASS；负向注入测试（假 lib 条目/占位符/
+    缺 jar）全部如实 FAIL；**并真实拦截过一次破损构建**（W5-A 重构中间态编译失败被门禁判 FAIL）。
+  - `.github/workflows/build.yml`（仓库内，新建）：push/PR → temurin 17 + maven cache → 构建 →
+    两步 shell 断言（`unzip -l | grep cn/perfscope/lib/` 反查 + plugin.yml 占位符检查）→ 上传 artifact。
+  - `docs/07-guides/RELEASE-CHECKLIST.md`（新建）：发布前人工清单（构建 → 门禁 → 5 场景 →
+    人工验收 → bump → Release/tag → 归档 → 上架）。
+- **W5-D · 快照新增 `warmingUp` 集合**（契约 `warmingUp ⊆ unavailable`，`unavailable` 本身零改动、
+  其余 69 个消费点语义不变）：`MetricsSnapshot.java` + `MetricsCollector.java`（`WARMUP_WINDOW_MS=10s`，
+  `start()` 重置；仅 jvmCache 为空且窗口内标 memory/cpu/gc；超窗回落真故障，防"永远预热中"）。
+- `versions/README.md`：标注 `PerfScope-1.0.0.jar` 为已知 100% 不可用构建存档（双语）。
+
+### Changed
+- **W5-D · 预热态与真故障文案区分**（依据：开放项 #4 / 锐评 D 信任警察——两者输出同款"不可用"，
+  事故语境下是虚假信标）：展示层新增 `unavailableText()`，预热态渲染"预热中（首轮采集未就绪，
+  稍候自动更新）"，真故障保持"不可用"；覆盖 showAll 内存/CPU/GC、`memory|cpu|gc` 专项、
+  ActionBar（短文案"预热中"）；uptime/线程数=0 的首周期"半成品面板"同步治理（M8 同源）。
+- **W5-D · 报告路径可点击**（依据：开放项 #5）：玩家收到的报告路径挂 `ClickEvent.copyToClipboard`
+  + 下划线 + hover"点击复制路径"；控制台/RCON 保持纯文本（harness 断言零冲突，已只读核对 5 场景）。
+- **W5-D · "正在采集数据中"文案**：统一走 `noData()`（消除双份硬编码，约 20 个调用点同源），
+  补原因/时限/下一步："首次采集尚未完成（插件刚启动/重载），约 1 秒后就绪；若超过 10 秒仍无数据请查看控制台"。
+- **W5-D · help 面板 `tileentities` 行补 `[世界]`**（实测发现 `te foo` 有世界参数处理但 help 未标注）。
+- **W5-B · plugin.yml 构建元数据**：`version: 1.0.0` 硬编码 → `${project.version}`（filtering 已开；
+  渲染验证通过，零 `${}` 残留；**发布前须 bump pom 版本，plugin.yml 自动跟随**）；`author: PerfScope Team`
+  → `sqkl520`（单人项目不冒充团队）；`website` 错链 `github.com/PerfScope` → `github.com/sqkl520/Minecraft-server-plugin-PerfScope`。
+- **W5-B · 双语文档（README.md / README-EN.md）6 处**：① 彩色 UI 表述改为"按 config.yml 告警阈值
+  分级着色，同一口径"（A8 已联动，原"计划于 v1.2"过时）；② 新增 TPS 阈值方向注（低值指标要求
+  `warning ≥ critical`，倒置回退默认+告警——与操作直觉相反）；③ monitor 降级为"诊断探针"定位
+  （不宣传 7×24 面板）；④ 新增「边界与不做什么」4 条（无根因剖析交 spark / 无历史持久化 /
+  MSPT 窗口约 100 tick / 无自动处置）；⑤ 告警冷却 reload 不清空的已知行为注；⑥ 拒接清单摘要。
+- **W5-B · `.gitignore`**：`/versions/` → `/versions/*` + `!/versions/README.md`（git 规则：父目录被
+  整体排除时无法重包含文件；`git check-ignore` 验证 jar 仍忽略、README 可入库）。
+- **W5-B · `PERFSCOPE-TEST-PLAN.md` 回填实测更正**：`/ps` 非有效别名（plugin.yml 只有 `pscope`/`perf`）；
+  `report <非法格式>` 静默回退目标实测为 **TXT**（非 html）。
+
+### Notes
+- **W5-A agent 被会话中断，收尾由编排者接管完成**：其重构落地完整（反射归零、隔离桥成形），
+  编排者复验三步——完整构建 BUILD SUCCESS、javap 常量池隔离确认、Paper 1.20.0 工件缺类边界
+  实证（下载实测 threadedregions 类数 = 0）。原计划的"API 对照表"由 javap 输出直接覆盖。
+- **已知行为（W5-D 引入，可接受）**：配置禁用的模块在 start/reload 后首个 tick 内（jvmCache 未发布时）
+  会短暂显示"预热中"而非"不可用"，异步缓存发布即纠正（窗口 < 1 秒，纯观感）。
+- **清单外发现（记录待后波次处理，本轮未修）**：
+  ① 禁用态与故障态在数据模型上不可分（`runOrMark` 对"配置禁用"也标 unavailable；需数据模型加字段）；
+  ② `showAll` 世界明细段在 entities/chunks 模块 unavailable 时仍渲染按世界 0 值（与模块级口径不一致）；
+  ③ 上级 CLAUDE.md 两处描述过时（plugin.yml 版本已 filtering、.gitignore 规则已变更）。
+- **待验证（Wave 5V 实机）**：预热态文案观感、报告路径点击（vbot 无 click_chat 动作，需人工）、
+  Folia 直连版实机（本机只有 Paper，Folia 路径仍不可测，代码审查已覆盖）。
+
+---
+
 ## [Unreleased] — v1.2 前置：A8 阈值读配置 - 2026-10-14
 
 > **主题：阈值/配色硬编码清零（A8）**。Wave 4 审查遗留欠账之一——「A8 阈值硬编码不读 config」

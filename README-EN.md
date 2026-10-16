@@ -17,12 +17,12 @@ A comprehensive performance monitoring plugin for Minecraft servers, focused on 
 - **Tile Entity Statistics** —— Total/per-world distribution
 - **Server Info** —— Uptime/thread count/plugin count/world count/JVM version
 - **Highly Customizable Config** —— All module alert thresholds and collection intervals configurable
-- **ActionBar Live Monitor** —— `/perfscope monitor` to toggle, refreshes core metrics every second to the ActionBar (above the hotbar at the bottom of the screen)
+- **ActionBar Live Monitor** —— `/perfscope monitor` to toggle, refreshes core metrics every second to the ActionBar (above the hotbar at the bottom of the screen). Positioned as a **diagnostic probe**: turn it on for a few dozen seconds while troubleshooting lag or handling an incident, then turn it off; it is not designed as an always-on 24/7 monitoring panel
 - **Performance Report Export** —— HTML/TXT/JSON formats, HTML reports include TPS trend chart, entity distribution table, memory progress bar, alert highlights
 - **Auto Report Generation** —— Configurable interval, async generation without blocking main thread, auto cleanup by retention days
 - **Per-World Independent Alerts** —— Override entity alert thresholds per world
 - **Threshold Alert Push** (new in v1.1) —— When an alert fires, pushes to the console + online players holding the `perfscope.alert` permission; the same alert has a default 300-second cooldown to prevent spam; a recovery notice is sent when the issue clears; configurable in the `alerts` section of `config.yml`
-- **Color-Coded UI** —— Rendered via Paper Adventure API, key metrics colored by health (green/yellow/red); color thresholds are currently built-in constants, with full linkage to `config.yml` alert thresholds planned for v1.2
+- **Color-Coded UI** —— Rendered via Paper Adventure API, key metrics colored by level (green/yellow/red) based on the `config.yml` alert thresholds; display and alerts share one source of truth, and colors follow immediately after a config reload
 
 ## Target Platform & Compatibility
 
@@ -166,6 +166,10 @@ worlds:
 
 See `plugins/PerfScope/config.yml` for complete configuration details.
 
+> Note (threshold direction): TPS is a low-is-bad metric — the lower the worse — so it requires `warning_threshold ≥ critical_threshold` (the opposite of high-is-bad metrics such as MSPT or memory; do not invert it by mistake). If inverted, `/perfscope reload` validates and falls back to the default values, logging a "配置校验：…设置倒置，已回退默认值" warning to the console — it will not take effect silently.
+>
+> Known behavior (alert cooldown across reload): the alert cooldown table is **not** cleared by `/perfscope reload` (by design, to prevent alert re-pushes on reload); as a side effect, during troubleshooting a genuine alert may be briefly suppressed by a cooldown window left over from before the reload.
+
 ## All Monitorable Metrics
 
 | Category | Metrics | Description |
@@ -182,6 +186,15 @@ See `plugins/PerfScope/config.yml` for complete configuration details.
 | Server | uptime/threads/plugins/worlds/JVM | Server basic info |
 
 > Note: **Redstone activity** and **network throughput** monitoring were discontinued in v1.1 (redstone was a stub implementation; network was hardcoded fake data); these metrics and features are no longer provided. The `/perfscope redstone` subcommand is kept as an entry point but only returns a discontinued notice.
+
+## Boundaries & What This Plugin Does Not Do
+
+An honest scope statement — the following are things this plugin does **not** do; pair it with other tools as needed:
+
+1. **No root-cause profiling** —— It narrows down *which* metric is abnormal (a suspect range), but does not produce method-level flame graphs; use `/spark profiler` to actually locate the cause of lag.
+2. **No historical persistence** —— The current version keeps only in-memory real-time snapshots and a limited sampling window; nothing is written to disk for trend analysis. Questions like "was the server laggy last night" or week-over-week trends cannot be answered.
+3. **Limited MSPT spike-detection window** —— Values come from Paper `getTickTimes()`, a rolling window (roughly the last 100 ticks); a spike that already scrolled out of the window may not be reflected, so "did it just lag?" is not always answerable.
+4. **No automatic remediation** —— The plugin only observes, alerts and exports reports; it never performs any intervention on its own (no restarts, no entity cleanup, no config changes).
 
 ## Dependencies
 

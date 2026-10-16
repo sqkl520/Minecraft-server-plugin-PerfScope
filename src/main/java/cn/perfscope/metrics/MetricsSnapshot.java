@@ -100,6 +100,13 @@ public class MetricsSnapshot {
 
     public Set<String> unavailable = ConcurrentHashMap.newKeySet();
 
+    // === 预热标记（W5-D #1） ===
+    // unavailable 中属于"首轮采集尚未就绪"（JVM 异步缓存未产出，默认 1 秒内自愈）的子集。
+    // 背景：reload/启动初期的预热与"模块真死了"此前输出同款"不可用"，事故语境下是虚假信标。
+    // 展示层据此渲染"预热中"，其余 unavailable 成员仍渲染"不可用"；契约 warmingUp ⊆ unavailable，
+    // 不改变 unavailable 本身语义（既有消费点全部不受影响）。
+    public Set<String> warmingUp = ConcurrentHashMap.newKeySet();
+
     // === 时间戳 ===
     public long timestamp;
 

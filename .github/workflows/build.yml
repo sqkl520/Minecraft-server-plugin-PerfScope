@@ -1,0 +1,58 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build + artifact gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17 (temurin, Maven cache)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Build
+        run: mvn -B -ntp clean package -DskipTests
+
+      - name: Assert jar has no relocated entries (v1.0.0 regression gate)
+        run: |
+          set -euo pipefail
+          JAR=$(ls target/PerfScope-*.jar | head -n 1)
+          echo "Checking $JAR"
+          if unzip -l "$JAR" | grep -q 'cn/perfscope/lib/'; then
+            echo "::error::$JAR contains cn/perfscope/lib/ entries -- shade/relocate regression (v1.0.0 incident fingerprint)"
+            unzip -l "$JAR" | grep 'cn/perfscope/lib/' | head -n 5
+            exit 1
+          fi
+          echo "OK: 0 entries with prefix cn/perfscope/lib/"
+
+      - name: Assert packaged plugin.yml version is resolved
+        run: |
+          set -euo pipefail
+          JAR=$(ls target/PerfScope-*.jar | head -n 1)
+          VERSION_LINE=$(unzip -p "$JAR" plugin.yml | grep -m 1 -E '^version:')
+          echo "packaged plugin.yml -> $VERSION_LINE"
+          if printf '%s' "$VERSION_LINE" | grep -q '\${'; then
+            echo "::error::plugin.yml version is still a Maven placeholder -- resource filtering did not run"
+            exit 1
+          fi
+
+      - name: Upload jar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: perfscope-jar
+          path: target/PerfScope-*.jar
+          if-no-files-found: error

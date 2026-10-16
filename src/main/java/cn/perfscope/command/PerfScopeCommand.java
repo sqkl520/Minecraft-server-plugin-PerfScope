@@ -166,7 +166,8 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
     private void showAll(CommandSender sender) {
         MetricsSnapshot snap = collector.getLatest();
         if (snap == null) {
-            sender.sendMessage(Component.text("正在采集数据中，请稍候...", YELLOW));
+            // W5-D #3：统一走 noData（此前与方法内 noData 各持一份硬编码文案，易失步）
+            noData(sender);
             return;
         }
 
@@ -268,10 +269,10 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 .append(Component.text(String.valueOf(tileEntities), WHITE)));
         }
 
-        // 内存（P0-5：模块不可用显示"不可用"）
+        // 内存（P0-5：模块不可用显示"不可用"；W5-D #1：预热态改渲染"预热中"）
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_MEMORY)) {
             sender.sendMessage(goldLabel("内存: ")
-                .append(Component.text("不可用", GRAY)));
+                .append(unavailableText(snap, MetricsSnapshot.MODULE_MEMORY)));
         } else {
             long usedMem = snap.heapUsed / 1024 / 1024;
             long maxMem = snap.heapMax / 1024 / 1024;
@@ -283,10 +284,10 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 .append(Component.text(" (" + snap.heapUsagePercent + "%)", memColor)));
         }
 
-        // CPU（P0-5：先判模块级"不可用"；P0-13：再判 -1 哨兵显示"未知"）
+        // CPU（P0-5：先判模块级"不可用"；P0-13：再判 -1 哨兵显示"未知"；W5-D #1：预热态渲染"预热中"）
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_CPU)) {
             sender.sendMessage(goldLabel("CPU: ")
-                .append(Component.text("不可用", GRAY)));
+                .append(unavailableText(snap, MetricsSnapshot.MODULE_CPU)));
         } else {
             Component showAllProcessCpu = snap.processCpuLoad < 0 ? Component.text("进程 未知", GRAY)
                 : Component.text(String.format("进程 %.1f%%", snap.processCpuLoad), WHITE);
@@ -298,10 +299,15 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 .append(showAllSystemCpu));
         }
 
-        // 运行时间（P0-5：server 模块不可用显示"不可用"）
+        // 运行时间（P0-5：server 模块不可用显示"不可用"；W5-D #1：JVM 异步就绪前 uptime/线程数为默认 0，
+        // 渲染"预热中"而非误导性的"0秒 | 线程: 0"。
+        // 注：不标 unavailable——server 模块的 Bukkit 部分（插件数/世界数）首周期即有真值，契约不动）
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_SERVER)) {
             sender.sendMessage(goldLabel("运行时间: ")
                 .append(Component.text("不可用", GRAY)));
+        } else if (snap.uptimeSeconds <= 0) {
+            sender.sendMessage(goldLabel("运行时间: ")
+                .append(uptimeWarmupText()));
         } else {
             sender.sendMessage(goldLabel("运行时间: ")
                 .append(Component.text(formatUptime(snap.uptimeSeconds), WHITE))
@@ -310,10 +316,10 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 .append(Component.text(" | 世界: " + snap.worldCount, GRAY)));
         }
 
-        // GC（P0-5：模块不可用显示"不可用"）
+        // GC（P0-5：模块不可用显示"不可用"；W5-D #1：预热态渲染"预热中"）
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_GC)) {
             sender.sendMessage(goldLabel("GC: ")
-                .append(Component.text("不可用", GRAY)));
+                .append(unavailableText(snap, MetricsSnapshot.MODULE_GC)));
         } else {
             sender.sendMessage(goldLabel("GC: ")
                 .append(Component.text(snap.gcCount + " 次", WHITE))
@@ -577,9 +583,9 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
 
         sender.sendMessage(Component.text("=== 内存诊断 ===", GOLD, TextDecoration.BOLD));
 
-        // P0-5：模块被禁用或采集异常时显示"不可用"
+        // P0-5：模块被禁用或采集异常时显示"不可用"；W5-D #1：预热态渲染"预热中"
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_MEMORY)) {
-            sender.sendMessage(yellowLabel("堆内存: ").append(Component.text("不可用", GRAY)));
+            sender.sendMessage(yellowLabel("堆内存: ").append(unavailableText(snap, MetricsSnapshot.MODULE_MEMORY)));
             return;
         }
 
@@ -606,10 +612,11 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         }
 
         // A5（命令侧）：GC 行独立守卫——内存正常但 GC 模块异常/禁用时显示"不可用"，
-        // 而非误导性的 "GC 次数: 0 / 0 ms"（此前 showAll 的 GC 行有守卫，此处为单点漏）
+        // 而非误导性的 "GC 次数: 0 / 0 ms"（此前 showAll 的 GC 行有守卫，此处为单点漏）；
+        // W5-D #1：预热态（内存/GC 同为 JVM 异步模块，常同时预热）渲染"预热中"
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_GC)) {
             sender.sendMessage(goldLabel("GC: ")
-                .append(Component.text("不可用", GRAY)));
+                .append(unavailableText(snap, MetricsSnapshot.MODULE_GC)));
         } else {
             sender.sendMessage(goldLabel("GC 次数: ")
                 .append(Component.text(String.valueOf(snap.gcCount), WHITE)));
@@ -632,9 +639,9 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
 
         sender.sendMessage(Component.text("=== CPU 诊断 ===", GOLD, TextDecoration.BOLD));
 
-        // P0-5：先判模块级"不可用"（P0-13 的 -1 哨兵"未知"仍在下方处理）
+        // P0-5：先判模块级"不可用"（P0-13 的 -1 哨兵"未知"仍在下方处理）；W5-D #1：预热态渲染"预热中"
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_CPU)) {
-            sender.sendMessage(yellowLabel("进程 CPU 使用率: ").append(Component.text("不可用", GRAY)));
+            sender.sendMessage(yellowLabel("进程 CPU 使用率: ").append(unavailableText(snap, MetricsSnapshot.MODULE_CPU)));
             return;
         }
 
@@ -795,9 +802,14 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         if (snap == null) { noData(sender); return; }
 
         sender.sendMessage(Component.text("=== 服务器运行信息 ===", GOLD, TextDecoration.BOLD));
-        // P0-5：server 模块被禁用或采集异常时显示"不可用"
+        // P0-5：server 模块被禁用或采集异常时显示"不可用"；W5-D #1：JVM 异步就绪前 uptime 为默认 0，
+        // 渲染"预热中"（与 showAll 同口径），而非误导性的"0秒"
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_SERVER)) {
             sender.sendMessage(goldLabel("运行时间: ").append(Component.text("不可用", GRAY)));
+            return;
+        }
+        if (snap.uptimeSeconds <= 0) {
+            sender.sendMessage(goldLabel("运行时间: ").append(uptimeWarmupText()));
             return;
         }
         sender.sendMessage(goldLabel("运行时间: ")
@@ -821,9 +833,9 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         if (snap == null) { noData(sender); return; }
 
         sender.sendMessage(Component.text("=== GC 统计 ===", GOLD, TextDecoration.BOLD));
-        // P0-5：模块被禁用或采集异常时显示"不可用"
+        // P0-5：模块被禁用或采集异常时显示"不可用"；W5-D #1：预热态渲染"预热中"
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_GC)) {
-            sender.sendMessage(goldLabel("累计 GC 次数: ").append(Component.text("不可用", GRAY)));
+            sender.sendMessage(goldLabel("累计 GC 次数: ").append(unavailableText(snap, MetricsSnapshot.MODULE_GC)));
             return;
         }
         sender.sendMessage(goldLabel("累计 GC 次数: ")
@@ -852,7 +864,17 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         }
         String path = args.length > 1 ? reportGen.generateSpecific(args[1]) : reportGen.generateAndSave();
         if (path != null) {
-            sender.sendMessage(Component.text("报告已生成: " + path, GREEN));
+            // W5-D #2：报告是唯一的"证据固化"出口，路径却不可点——聊天框无法选中复制，60 字符盘符路径
+            // 手抄不现实。玩家挂 copyToClipboard（悬停提示"点击复制路径"）；控制台/RCON 保持纯文本
+            //（控制台无点击交互语义，路径仍是可用的诊断信息）
+            if (sender instanceof Player) {
+                sender.sendMessage(Component.text("报告已生成: ", GREEN)
+                    .append(Component.text(path, GREEN, TextDecoration.UNDERLINED)
+                        .clickEvent(ClickEvent.copyToClipboard(path))
+                        .hoverEvent(HoverEvent.showText(Component.text("点击复制路径", GREEN)))));
+            } else {
+                sender.sendMessage(Component.text("报告已生成: " + path, GREEN));
+            }
         } else {
             sender.sendMessage(Component.text("报告生成失败喵", RED));
         }
@@ -949,7 +971,7 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         }
 
         // A2（T1a）：六字段消费三态约定，与 showAll 同口径——
-        // module unavailable → 该段"不可用"（灰）；MSPT -1 哨兵由 formatMSPTComponent 渲染"未知"（灰）。
+        // module unavailable → 该段"不可用"（灰；内存模块预热态除外，见下）；MSPT -1 哨兵由 formatMSPTComponent 渲染"未知"（灰）。
         // 修复禁用模块上屏 "TPS: 0.0"（红）/ "内存: 0%"（假绿）/ MSPT 直出 "-1.0" 的误导渲染
         Component actionBar = Component.text("TPS: ", GRAY)
             .append(snap.unavailable.contains(MetricsSnapshot.MODULE_TPS)
@@ -967,7 +989,8 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 : Component.text(String.valueOf(snap.totalEntities), WHITE))
             .append(Component.text(" | 内存: ", GRAY))
             .append(snap.unavailable.contains(MetricsSnapshot.MODULE_MEMORY)
-                ? Component.text("不可用", GRAY)
+                // W5-D #1：ActionBar 空间有限，预热态用短文案"预热中"（区别于真故障"不可用"）
+                ? Component.text(snap.warmingUp.contains(MetricsSnapshot.MODULE_MEMORY) ? "预热中" : "不可用", GRAY)
                 : Component.text(snap.heapUsagePercent + "%",
                     // v1.2 A8：改为读 config 阈值（原硬编码 90/80）
                     thresholdColors.colorOf(thresholdColors.levelOf(
@@ -999,7 +1022,8 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         sendHelpLine(sender, "/perfscope players", "玩家统计");
         sendHelpLine(sender, "/perfscope world [世界]", "/perfscope world", "世界详情");
         sendHelpLine(sender, "/perfscope redstone", "红石活动（已下线）");
-        sendHelpLine(sender, "/perfscope tileentities", "Tile Entity 统计");
+        // W5-D #4：te 自 A5 起已接受世界参数（te foo → 世界不存在: foo），help 补 [世界] 与 entities/chunks 行对齐
+        sendHelpLine(sender, "/perfscope tileentities [世界]", "/perfscope tileentities", "Tile Entity 统计");
         sendHelpLine(sender, "/perfscope uptime", "运行时间");
         sendHelpLine(sender, "/perfscope gc", "GC 统计");
         sendHelpLine(sender, "/perfscope report [格式]", "/perfscope report html", "导出性能报告");
@@ -1068,6 +1092,22 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         return Component.text(label, YELLOW);
     }
 
+    /**
+     * W5-D #1：模块降级文案——预热中与真故障区分渲染。
+     * 预热态（warmingUp ⊆ unavailable：reload/启动后 JVM 异步首轮未就绪，约 1 秒自愈）渲染"预热中"，
+     * 与"模块采集失败/被禁用"的"不可用"区分——两者此前同款文案，在事故语境下是虚假信标。
+     */
+    private Component unavailableText(MetricsSnapshot snap, String module) {
+        return snap.warmingUp.contains(module)
+            ? Component.text("预热中（首轮采集未就绪，稍候自动更新）", GRAY)
+            : Component.text("不可用", GRAY);
+    }
+
+    /** W5-D #1：运行时间行的预热文案（与 unavailableText 同词，独立方法因不涉模块判定）。 */
+    private Component uptimeWarmupText() {
+        return Component.text("预热中（首轮采集未就绪，稍候自动更新）", GRAY);
+    }
+
     private void sendHelpLine(CommandSender sender, String cmd, String desc) {
         // 无占位符行：display 与可执行命令相同
         sendHelpLine(sender, cmd, cmd, desc);
@@ -1083,7 +1123,10 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
     }
 
     private void noData(CommandSender sender) {
-        sender.sendMessage(Component.text("正在采集数据中，请稍候...", YELLOW));
+        // W5-D #3：说清原因+时限+下一步——旧文案只说"请稍候"，管理员在跑了数天的服上见到它
+        // 只会困惑"数据哪去了、是不是我把插件弄坏了"；10 秒与采集侧预热窗口（WARMUP_WINDOW_MS）同口径
+        sender.sendMessage(Component.text(
+            "首次采集尚未完成（插件刚启动/重载），约 1 秒后就绪；若超过 10 秒仍无数据请查看控制台", YELLOW));
     }
 
     /**

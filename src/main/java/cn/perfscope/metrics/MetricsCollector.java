@@ -100,6 +100,14 @@ public class MetricsCollector {
     // 启动初期为 null 表示异步尚未产出，相关模块按 unavailable 处理，避免 0 值误导或 NPE
     private volatile MetricsSnapshot jvmCache = null;
 
+    // W5-D #1：预热窗口（毫秒）——reload/启动后 JVM 异步尚未产出首轮的宽限期。
+    // 窗口内 memory/cpu/gc 的 unavailable 同时标 warmingUp（展示层据此渲染"预热中"）；
+    // 超出窗口仍未产出说明异步调度异常（非自愈场景），回落真故障"不可用"，
+    // 防"永远预热中"的虚假自愈信号；10 秒取值与用户可见文案（"超过 10 秒请查看控制台"）对齐
+    private static final long WARMUP_WINDOW_MS = 10_000;
+    // 预热窗口基准：start() 每次调用重置，使 /perfscope reload 后重新进入预热态（幂等重复调用同样重新计时）
+    private volatile long startedAtMs = System.currentTimeMillis();
+
     public MetricsCollector(PerfScope plugin) {
         this.plugin = plugin;
         this.configManager = plugin.getConfigManager();
@@ -161,6 +169,7 @@ public class MetricsCollector {
         chunksCacheReady = false;
         teCacheReady = false;
         jvmCache = null;
+        startedAtMs = System.currentTimeMillis(); // W5-D #1：reload 后重新进入预热窗口（与 jvmCache 置空同步）
 
         // L-2 修复：interval ≤0 会被 Bukkit 调度器 coerce 成单次任务（负值 period=-1 跑一轮即静默死亡）
         // 或每 tick（0 → 1），Folia 下则被 SchedulerAdapter 校正为每 tick，行为分叉，
@@ -366,6 +375,13 @@ public class MetricsCollector {
             snap.unavailable.add(MetricsSnapshot.MODULE_MEMORY);
             snap.unavailable.add(MetricsSnapshot.MODULE_CPU);
             snap.unavailable.add(MetricsSnapshot.MODULE_GC);
+            // W5-D #1：仍在预热窗口内 → 同标 warmingUp，展示层渲染"预热中"（预计自愈）；
+            // 超窗仍未产出（异步调度异常而非自愈场景）回落真故障"不可用"，防虚假自愈信号
+            if (System.currentTimeMillis() - startedAtMs <= WARMUP_WINDOW_MS) {
+                snap.warmingUp.add(MetricsSnapshot.MODULE_MEMORY);
+                snap.warmingUp.add(MetricsSnapshot.MODULE_CPU);
+                snap.warmingUp.add(MetricsSnapshot.MODULE_GC);
+            }
             return;
         }
         // 内存

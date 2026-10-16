@@ -1,11 +1,11 @@
 name: PerfScope
-version: 1.0.0
+version: ${project.version}
 main: cn.perfscope.PerfScope
 api-version: "1.20"
 folia-supported: true
 description: 高性能服务器性能监测插件 - 专注 Paper 系服务端（Paper/Purpur/Pufferfish/Folia）
-author: PerfScope Team
-website: https://github.com/PerfScope
+author: sqkl520
+website: https://github.com/sqkl520/Minecraft-server-plugin-PerfScope
 
 # 专注 Paper 系服务端：Paper / Purpur / Pufferfish / Folia 及其分支
 # Paper 运行时原生自带 Adventure，完整 MSPT / ActionBar 功能，无需 shade
