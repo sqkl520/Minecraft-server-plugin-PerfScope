@@ -32,6 +32,7 @@ A comprehensive performance monitoring plugin for Minecraft servers, focused on 
 Since v1.1, PerfScope focuses on the **Paper family** of servers and relies heavily on Paper-native features such as the Adventure API:
 
 - **Supported**: Paper 1.20.4+ and its downstream forks (Purpur / Pufferfish / Leaves, etc.)
+  — **Folia / Purpur / Leaf / Leaves verified on real servers** (full command surface + history tested on 1.21.4, 49 assertions each)
 - **Folia**: supported since v1.1 — adapted through a scheduler layer via `GlobalRegionScheduler` / `AsyncScheduler`, with `folia-supported: true` declared in `plugin.yml` (global and JVM-level metrics are complete; entity/chunk metrics are best-effort)
 - **Not supported**: plain Spigot / CraftBukkit
 

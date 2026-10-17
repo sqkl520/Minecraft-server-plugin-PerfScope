@@ -32,6 +32,7 @@
 PerfScope 自 v1.1 起专注 **Paper 系**服务端，深度依赖 Paper 原生 Adventure API 等特性：
 
 - **支持**：Paper 1.20.4+ 及其下游分支（Purpur / Pufferfish / Leaves 等）
+  —— **Folia / Purpur / Leaf / Leaves 已实机验证**（1.21.4 真实服务端跑通全部命令面与历史功能，各 49 条断言）
 - **Folia**：自 v1.1 起支持——通过调度适配层经 `GlobalRegionScheduler` / `AsyncScheduler` 适配，`plugin.yml` 已声明 `folia-supported: true`（全局与 JVM 级指标完整，实体/区块指标为尽力而为）
 - **不支持**：纯 Spigot / CraftBukkit
 
