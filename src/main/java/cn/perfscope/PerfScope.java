@@ -18,10 +18,13 @@
 package cn.perfscope;
 
 import cn.perfscope.alert.AlertService;
+import cn.perfscope.alert.DailySummaryService;
+import cn.perfscope.alert.WebhookNotifier;
 import cn.perfscope.command.PerfScopeCommand;
 import cn.perfscope.compat.SchedulerAdapter;
 import cn.perfscope.compat.ServerCompat;
 import cn.perfscope.config.ConfigManager;
+import cn.perfscope.history.HistoryStore;
 import cn.perfscope.metrics.MetricsCollector;
 import cn.perfscope.report.ReportGenerator;
 import org.bstats.bukkit.Metrics;
@@ -36,11 +39,14 @@ public final class PerfScope extends JavaPlugin {
     private static PerfScope instance;
 
     private ConfigManager configManager;
+    private HistoryStore historyStore;
     private MetricsCollector metricsCollector;
     private ReportGenerator reportGenerator;
     private PerfScopeCommand command;
     private SchedulerAdapter.TaskHandle autoReportTask;
     private AlertService alertService;
+    private WebhookNotifier webhookNotifier;
+    private DailySummaryService dailySummaryService;
 
     @Override
     public void onEnable() {
@@ -55,13 +61,23 @@ public final class PerfScope extends JavaPlugin {
         this.configManager = new ConfigManager(this);
         configManager.load();
 
+        // 初始化历史环形缓冲（Wave 7A）：由本类持有（非采集器），reload/采集重启不丢历史；
+        // 采集器构造时注入引用，collectSync 末尾按节流间隔入环
+        this.historyStore = new HistoryStore(configManager);
+
         // 初始化性能采集器
-        this.metricsCollector = new MetricsCollector(this);
+        this.metricsCollector = new MetricsCollector(this, historyStore);
         startCollectionTasks();
 
         // 初始化告警服务（P0-4：位置在采集器启动之后，周期读取快照推送告警）
         this.alertService = new AlertService(this);
         alertService.start();
+
+        // Wave 7D：webhook 出口 + 每日摘要服务（webhook 在告警服务之后装配，供其推送通道使用）
+        this.webhookNotifier = new WebhookNotifier(this);
+        this.alertService.setWebhookNotifier(webhookNotifier);
+        this.dailySummaryService = new DailySummaryService(this, webhookNotifier, alertService);
+        dailySummaryService.start();
 
         // 初始化报告生成器
         this.reportGenerator = new ReportGenerator(this);
@@ -112,6 +128,8 @@ public final class PerfScope extends JavaPlugin {
             command.shutdown();
         }
         stopAutoReport();
+        // Wave 7D：先停日报（消费告警与历史），再停告警，最后停采集
+        stopDailySummary();
         // P0-4：先停告警服务，再停采集（避免告警定时器读到已停采集的旧快照）
         stopAlertService();
         stopCollectionTasks();
@@ -183,6 +201,20 @@ public final class PerfScope extends JavaPlugin {
         }
     }
 
+    /** 启动每日摘要（Wave 7D）：enabled=false 时 start() 内部直接返回（幂等）。 */
+    private void startDailySummary() {
+        if (dailySummaryService != null) {
+            dailySummaryService.start();
+        }
+    }
+
+    /** 停止每日摘要（Wave 7D）：只取消定时器；当日已发标记保留（reload 后同日不重发）。 */
+    private void stopDailySummary() {
+        if (dailySummaryService != null) {
+            dailySummaryService.stop();
+        }
+    }
+
     /**
      * 启动 bStats 匿名统计（Wave 6D）：general.bstats-enabled=true 且 {@code BSTATS_PLUGIN_ID > 0} 时创建
      * {@link Metrics}（源码 import 原包名，打包期由 maven-shade 重写为 cn.perfscope.shaded.bstats）。
@@ -233,6 +265,7 @@ public final class PerfScope extends JavaPlugin {
         stopCollectionTasks();
         stopAutoReport();
         stopAlertService();
+        stopDailySummary();
         boolean loadFailed = false;
         try {
             configManager.load();
@@ -244,6 +277,11 @@ public final class PerfScope extends JavaPlugin {
         // 无论 load 成败，任务必须重建：绝不允许"采集停了不重建"的半途冻结态
         startCollectionTasks();
         startAlertService();
+        // Wave 7D：webhook 配置随 reload 刷新（enabled/url 变化即生效；就绪状态内部重算）
+        if (webhookNotifier != null) {
+            webhookNotifier.reload();
+        }
+        startDailySummary();
         if (configManager.get().report_autoExport) {
             startAutoReport();
         }
@@ -265,6 +303,11 @@ public final class PerfScope extends JavaPlugin {
 
     public ConfigManager getConfigManager() {
         return configManager;
+    }
+
+    /** Wave 7A：历史环形缓冲（24h 窗口）。命令层经此读取；实例生命周期 = 插件生命周期。 */
+    public HistoryStore getHistoryStore() {
+        return historyStore;
     }
 
     public MetricsCollector getMetricsCollector() {

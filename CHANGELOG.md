@@ -20,6 +20,73 @@
 
 ---
 
+## [Unreleased] — Wave 7「v1.2 核心重构」- 2026-10-17
+
+> **主题：从"看得见"到"记得住、喊得醒"**（`critique-SYNTHESIS.md` 第 2 层 + `WAVE7-DESIGN.md` 设计契约）。
+> 严格串行三批（文件重叠不可并发）：7A 历史环形缓冲 → 7B+7C 结构化 Alert + 告警收敛 → 7D 日摘要 + webhook。
+> 7B+7C 与 7D 两个 agent 先后因基础设施 API 故障中断——**7B+7C 工作已全部落盘（核验通过）；
+> 7D 未落盘任何内容，由编排者接管亲手完成**（契约全文见设计文档）。
+> **状态：全部落地，编译 BUILD SUCCESS；实机验证（Wave 7V）见下。**
+
+### Added
+- **Wave 7A · 历史环形缓冲（存亡项最小版）**（依据：锐评 D 结论——五个事故剧本里四个半的第一问是
+  "什么时候开始的"，而此前最长记忆仅 300 快照 ≈ 5 分钟）：
+  - 新包 `cn.perfscope.history`：`HistorySample`（record，RAW 值原样存哨兵）+ `HistoryStore`
+    （24h 环形缓冲；容量 = 86400/间隔 自适应；`record` 按 `history.sample-interval-seconds` 节流；
+    单锁 + `List.copyOf` 不可变副本；**TPS 模块不可用快照整条跳过**防假 0 污染最低 TPS；
+    helper（lowestTpsSince/peakEntitiesSince/peakHeapSince）过滤无效值；零新依赖）。
+  - 注入：PerfScope 持有实例（reload 伸缩不清空），collector 构造注入，命令层经 `getHistoryStore()`。
+  - 新命令 `/perfscope history`（别名 `hist`）：覆盖时长/最低 TPS/峰值实体/峰值内存（HH:mm），
+    空态"暂无历史数据"；help + Tab 补全同步。
+  - 新配置：`history.enabled`（默认 true）、`history.sample-interval-seconds`（默认 60，≤0 钳制+warning）。
+- **Wave 7B/7C · 结构化 Alert 值对象 + 告警收敛**（依据：锐评 D"默认配置日估 300-450 条=狼来了"）：
+  - 新类 `cn.perfscope.alert.Alert`（record：key/level/message/display/module/timestamp；
+    `of()` 工厂自动提取 display；key 规则 `metric:scope`，逐世界 `entities:world:<名>`）。
+  - `MetricsSnapshot.alerts`（结构化真相源）；`activeWarnings/activeCriticals` 改为**派生列表**
+    （`addAlert` 统一同步填充）——命令层 `/ps`、报告三格式、JSON `alerts.*` 全部零改动。
+  - 采集层 8 处告警生成点全部改为构造 Alert（message 逐字保留；含降频缓存与 JVM 异步的
+    alerts 一并缓存/传递/回放）。
+  - **AlertService 输入切换**：消费 `snap.alerts`；恢复抑制改用 `alert.module()` 直接对
+    `unavailable`（删除 `keyOf`/`moduleFor` 字符串解析——"中文字符串当协议"根治）。
+  - **防抖（新）**：`alerts.debounce-cycles`（默认 3，≤0 钳制+warning）——同一 key 连续 N 个
+    检查周期超标才首次推送；缺席即清零；reload 不清。
+  - **一事件一通知（新）**：级别升级只推一条 `[告警][严重] <message>（级别升级）`，
+    **不受冷却限制**，升级后刷新冷却并更新 display（之后恢复用新 display）——不再产生
+    "旧 key 恢复 + 新 key 告警"两条。
+  - **默认阈值重调**：`players 80/95 → 90/98`（80% 容量即告警过于灵敏）；
+    `memory 80/90 → 85/95`（G1 正常水位属健康区间）。README 双语配置示例同步。
+- **Wave 7D · 每日摘要 + webhook 最小版**（依据：锐评 D"告警通道与 7×24 场景互斥"；
+  编排者亲手实现）：
+  - 新类 `DailySummaryService`：每分钟检查；3 行摘要（`[PerfScope] 每日摘要 | 覆盖: 近 N 分钟` /
+    `最低 TPS: X.XX（HH:mm） | 峰值实体: N | 峰值内存: P%` / `告警统计: 推送 W 条 / 当前活跃 A 条`）；
+    出口 = 控制台 + 在线 OP + webhook；**补发语义**（今日时刻已过且未发 → 启动/重载后补发一次，
+    保证"每天都到"，也让功能可测）；每日去重 = LocalDate（reload 不清、跨天滚动）。
+  - 新类 `WebhookNotifier`：discord / onebot(QQ) 双格式；Gson 序列化；**全异步**（sendAsync，
+    主线程零阻塞）、connect/request 超时 5s、失败日志 60s 限频、**日志绝不出现完整 URL**
+    （只记 host——webhook URL 内嵌令牌，进日志即泄露）；url 空/非 http(s) 初始化即拒绝。
+  - `AlertService` 接线：pushAlert/pushUpgrade/pushRecovery 三处转发 webhook + 当日推送计数；
+    新增 `getActiveCount()` / `getPushedTodayCount()`。
+  - 新配置：`alerts.daily-summary.enabled/time`（默认 false / "08:00"，非法格式回退+warning）、
+    `alerts.webhook.enabled/type/url`（默认 false / discord / ""，未知 type 按 discord 处理+warning）。
+  - ConfigManager 新增 `parseHhMmMinutes`（容忍 "8:00"；配置校验与 Summary 共用同口径）。
+
+### Notes
+- **设计契约**：`docs/06-tasks/WAVE7-DESIGN.md`（7A/7B+7C/7D 的接口签名、key 命名、防抖语义、
+  文案锚点、补发修订全部锁定——本波三批 agent 的单一事实源）。
+- **harness 兼容**（编排者逐条核对）：既有 `perfscope-alert` 9 条断言语义在防抖生效后仍成立
+  （防抖只延迟首发 ≈3s，各 timeout 30-60s 余量充足；6s 静默窗 < 10s 冷却不变）；
+  surface/boot/report/config/vbot 场景不受影响；新增 3 个场景待 Wave 7V 验证
+  （history 7 条 / alertv2 6 条 / daily 5 条）。
+- **agent 故障记录**：7B+7C agent 死于 API 524（工作已全部落盘，编排者核验）；7D 两个 agent
+  先后死于 API 524/502 且未落盘任何内容——由编排者接管实现（含 WebhookNotifier 与
+  DailySummaryService 全文）。基础设施故障未影响本波交付完整性。
+- **清单外发现（记录）**：① alertv2 场景的 DB-01 防抖窗口断言有时序敏感性（若调度漂移使
+  3 周期落在 2s 内会 FAIL）——正腿 DB-02 保证真到达不受影响；② 空态 history 文案未提
+  `history.enabled=false` 原因（v1.3 打磨）；③ 旧 300 快照 Deque（趋势/报告用）与新 24h 环
+  并存（有意保留：前者供命令趋势图，后者供摘要/回溯）。
+
+---
+
 ## [Unreleased] — Wave 6「分发准备」- 2026-10-17
 
 > **主题：上架前的地基**（`critique-SYNTHESIS.md` 第 1 层 + `POST-CRITIQUE-FIX-PLAN.md` Wave 6）。

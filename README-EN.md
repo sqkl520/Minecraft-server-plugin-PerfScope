@@ -21,7 +21,7 @@ A comprehensive performance monitoring plugin for Minecraft servers, focused on 
 - **Performance Report Export** —— HTML/TXT/JSON formats, HTML reports include TPS trend chart, entity distribution table, memory progress bar, alert highlights
 - **Auto Report Generation** —— Configurable interval, async generation without blocking main thread, auto cleanup by retention days
 - **Per-World Independent Alerts** —— Override entity alert thresholds per world
-- **Threshold Alert Push** (new in v1.1) —— When an alert fires, pushes to the console + online players holding the `perfscope.alert` permission; the same alert has a default 300-second cooldown to prevent spam; a recovery notice is sent when the issue clears; configurable in the `alerts` section of `config.yml`
+- **Threshold Alert Push** (new in v1.1, converged in v1.2) —— When an alert fires, pushes to the console + online players holding the `perfscope.alert` permission; by default an alert must stay over-threshold for 3 consecutive collection cycles before the first push (debounce, configurable); the same alert has a default 300-second cooldown to prevent spam; level upgrades (warning→critical) send a single "（级别升级）" message bypassing the cooldown; a recovery notice is sent when the issue clears; configurable in the `alerts` section of `config.yml`
 - **Color-Coded UI** —— Rendered via Paper Adventure API, key metrics colored by level (green/yellow/red) based on the `config.yml` alert thresholds; display and alerts share one source of truth, and colors follow immediately after a config reload
 
 ## Target Platform & Compatibility
@@ -120,8 +120,8 @@ mspt:
 
 players:
   enabled: true
-  warning_threshold: 80     # Player-count warning threshold (% of max players)
-  critical_threshold: 95
+  warning_threshold: 90     # Player-count warning threshold (% of max players)
+  critical_threshold: 98
 
 entities:
   enabled: true
@@ -135,8 +135,8 @@ chunks:
 
 memory:
   enabled: true
-  heap_warning_threshold: 80
-  heap_critical_threshold: 90
+  heap_warning_threshold: 85
+  heap_critical_threshold: 95
 
 cpu:
   enabled: true
@@ -155,6 +155,7 @@ alerts:
   in-game: true             # In-game push (online players with perfscope.alert permission)
   cooldown-seconds: 300     # Cooldown per alert in seconds (0 = no cooldown, still throttled by the collection cycle)
   notify-recovery: true     # Recovery notice (sent when an alert clears)
+  debounce-cycles: 3        # Debounce: N consecutive over-threshold cycles before the first push (1 = push immediately)
 
 # Per-world overrides
 worlds:
@@ -171,6 +172,8 @@ See `plugins/PerfScope/config.yml` for complete configuration details.
 > Note (threshold direction): TPS is a low-is-bad metric — the lower the worse — so it requires `warning_threshold ≥ critical_threshold` (the opposite of high-is-bad metrics such as MSPT or memory; do not invert it by mistake). If inverted, `/perfscope reload` validates and falls back to the default values, logging a "配置校验：…设置倒置，已回退默认值" warning to the console — it will not take effect silently.
 >
 > Known behavior (alert cooldown across reload): the alert cooldown table is **not** cleared by `/perfscope reload` (by design, to prevent alert re-pushes on reload); as a side effect, during troubleshooting a genuine alert may be briefly suppressed by a cooldown window left over from before the reload.
+>
+> Known behavior (alert debounce delay): by default an alert must stay over-threshold for 3 consecutive collection cycles before the first push (`alerts.debounce-cycles`, configurable; 1 = push immediately), adding up to ~3× the collection interval of latency — a deliberate trade for a useful signal instead of a crying-wolf one; level upgrades (warning→critical) bypass both cooldown and debounce and arrive immediately as a single "（级别升级）" message.
 
 ## All Monitorable Metrics
 
@@ -197,6 +200,7 @@ An honest scope statement — the following are things this plugin does **not** 
 2. **No historical persistence** —— The current version keeps only in-memory real-time snapshots and a limited sampling window; nothing is written to disk for trend analysis. Questions like "was the server laggy last night" or week-over-week trends cannot be answered.
 3. **Limited MSPT spike-detection window** —— Values come from Paper `getTickTimes()`, a rolling window (roughly the last 100 ticks); a spike that already scrolled out of the window may not be reflected, so "did it just lag?" is not always answerable.
 4. **No automatic remediation** —— The plugin only observes, alerts and exports reports; it never performs any intervention on its own (no restarts, no entity cleanup, no config changes).
+5. **Alerts are debounced** —— By default an alert needs 3 consecutive over-threshold collection cycles before it is pushed (`alerts.debounce-cycles`, configurable), adding up to ~3× the collection interval (about 3 seconds by default) of latency; a deliberate trade to suppress threshold-flicker noise — set `debounce-cycles` to 1 if you need instant delivery.
 
 ## Dependencies
 

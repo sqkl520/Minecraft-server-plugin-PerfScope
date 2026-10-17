@@ -32,8 +32,9 @@ mspt:
 players:
   enabled: true
   # 玩家数告警阈值 (百分比 of max_players)
-  warning_threshold: 80
-  critical_threshold: 95
+  # v1.2 重调：80% 容量即告警过于灵敏（16/20 人即刷告警），满员告警应接近满员
+  warning_threshold: 90
+  critical_threshold: 98
 
 # 实体监测
 entities:
@@ -54,8 +55,9 @@ chunks:
 memory:
   enabled: true
   # 堆内存使用率告警阈值 (百分比)
-  heap_warning_threshold: 80
-  heap_critical_threshold: 90
+  # v1.2 重调：G1 正常水位 70-85% 属健康区间，80% 即告警过灵敏
+  heap_warning_threshold: 85
+  heap_critical_threshold: 95
 
 # CPU 监测
 cpu:
@@ -91,7 +93,7 @@ report:
   # 报告保留天数 (0 = 永久保留)
   retention_days: 7
 
-# 告警推送 (v1.1 基础版：控制台 + 在线 OP 游戏内推送 + 冷却)
+# 告警推送 (v1.1 基础版：控制台 + 在线 OP 游戏内推送 + 冷却；v1.2 Wave 7C：+ 防抖收敛)
 alerts:
   # 总开关 (false = 完全不做告警检查与推送)
   enabled: true
@@ -103,6 +105,27 @@ alerts:
   cooldown-seconds: 300
   # 恢复通知 (告警消失时推送一条"已恢复正常")
   notify-recovery: true
+  # 防抖：同一告警需连续 N 个采集周期超标才首次推送 (默认 3，钳 ≥1；1 = 首次出现即推)
+  # 目的：抑制指标在阈值附近秒级抖动产生的告警/恢复交替噪音
+  debounce-cycles: 3
+
+  # 每日摘要 (3 行概况：最低 TPS / 峰值实体与内存 / 告警统计；推送到控制台、在线 OP 与 webhook)
+  # 补发语义：若配置时刻已过且当日未发（如服务端在彼时停机），启动/重载后补发一次，保证"每天都到"
+  daily-summary:
+    enabled: false            # 默认关
+    time: "08:00"             # 本地时区 HH:mm
+
+  # webhook 推送 (告警 / 恢复 / 日摘要统一出口；发送失败仅记日志，不重试不阻塞)
+  webhook:
+    enabled: false
+    type: discord             # discord | onebot (QQ)
+    url: ""                   # discord: https://discord.com/api/webhooks/... ；onebot: http://127.0.0.1:3000/send_private_msg?user_id=...
+
+# 历史采样（v1.2：24h 环形缓冲；重启清零，文件持久化规划于后续版本）
+history:
+  enabled: true
+  # 采样间隔（秒）；环形容量自动 = 86400/间隔（约 24 小时窗口）
+  sample-interval-seconds: 60
 
 # 各世界单独设置 (可覆盖全局设置)
 # 语义（与采集层判定一致）：此处配置了的世界，其实体数按该世界独立阈值逐世界判定；

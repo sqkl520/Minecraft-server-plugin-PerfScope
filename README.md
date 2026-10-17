@@ -21,7 +21,7 @@
 - **性能报告导出** —— 支持 HTML/TXT/JSON 三种格式，HTML 报告含 TPS 趋势图、实体分布表、内存进度条、告警高亮
 - **自动报告生成** —— 可配置间隔，异步生成不阻塞主线程，旧报告自动按保留天数清理
 - **按世界独立告警** —— 各世界可覆盖实体告警阈值
-- **阈值告警主动推送**（v1.1 新增） —— 告警触发时推送控制台 + 在线持有 `perfscope.alert` 权限的玩家；同一告警默认 300 秒冷却防刷屏；故障恢复时发送恢复通知；可在 `config.yml` 的 `alerts` 段配置
+- **阈值告警主动推送**（v1.1 新增，v1.2 收敛） —— 告警触发时推送控制台 + 在线持有 `perfscope.alert` 权限的玩家；默认需连续 3 个采集周期超标才首次推送（防抖，可配）；同一告警默认 300 秒冷却防刷屏；级别升级（警告→严重）只推一条"（级别升级）"消息、不受冷却限制；故障恢复时发送恢复通知；可在 `config.yml` 的 `alerts` 段配置
 - **彩色 UI 面板** —— 使用 Paper Adventure API 渲染，关键指标按 `config.yml` 告警阈值分级着色（绿/黄/红）；显示与告警同一口径，改配置 reload 后颜色立即跟随
 
 ## 目标平台与兼容性
@@ -120,8 +120,8 @@ mspt:
 
 players:
   enabled: true
-  warning_threshold: 80     # 玩家数告警阈值 (占最大玩家数百分比)
-  critical_threshold: 95
+  warning_threshold: 90     # 玩家数告警阈值 (占最大玩家数百分比)
+  critical_threshold: 98
 
 entities:
   enabled: true
@@ -135,8 +135,8 @@ chunks:
 
 memory:
   enabled: true
-  heap_warning_threshold: 80
-  heap_critical_threshold: 90
+  heap_warning_threshold: 85
+  heap_critical_threshold: 95
 
 cpu:
   enabled: true
@@ -155,6 +155,7 @@ alerts:
   in-game: true             # 游戏内推送 (在线且持有 perfscope.alert 权限的玩家)
   cooldown-seconds: 300     # 同一告警的冷却秒数 (0 = 无冷却，仍受采集周期节流)
   notify-recovery: true     # 恢复通知 (告警消失时推送恢复消息)
+  debounce-cycles: 3        # 防抖：连续 N 个采集周期超标才首次推送 (1 = 首次出现即推)
 
 # 各世界独立设置
 worlds:
@@ -171,6 +172,8 @@ worlds:
 > 注（阈值方向）：TPS 是低值指标——数值越低越差，因此要求 `warning_threshold ≥ critical_threshold`（与 MSPT/内存等"高值差"指标相反，别配反）；若倒置，`/perfscope reload` 会校验并回退为默认值，同时在控制台输出"配置校验：…设置倒置，已回退默认值"的告警，不会静默生效。
 >
 > 已知行为（告警冷却与 reload）：告警冷却表在 `/perfscope reload` 后**不清空**（设计如此，防止重载导致同一告警重推刷屏）；副作用是排障时短时间内的真实告警可能被上次的冷却窗口短暂压制。
+>
+> 已知行为（告警防抖延迟）：告警默认需连续 3 个采集周期超标才推送（`alerts.debounce-cycles` 可配，1 = 立即推送），最长延迟约 3×采集间隔（默认约 3 秒）——以响应延迟换取"提示器而非狼来了"的信噪比；级别升级（警告→严重）不受冷却与防抖限制，立即以"（级别升级）"单条消息送达。
 
 ## 可监测的全部性能指标
 
@@ -197,6 +200,7 @@ worlds:
 2. **不做历史持久化** —— 当前版本只有内存内实时快照与有限采样窗口，不落盘趋势数据；因此回答不了"昨晚卡不卡""上周以来的趋势"这类回溯性问题。
 3. **MSPT 尖刺检测窗口有限** —— 底层取自 Paper `getTickTimes()` 的滚动窗口（约最近 100 tick）；若尖刺发生在窗口之外，"刚才卡了吗"不一定会如实反映。
 4. **不做任何自动处置** —— 本插件只观测、告警与出报告，不会自动执行任何干预动作（不重启、不清理实体、不改配置）。
+5. **告警有防抖延迟** —— 告警默认需连续 3 个采集周期超标才推送（`alerts.debounce-cycles` 可配），最长延迟约 3×采集间隔（默认约 3 秒）；这是为抑制阈值附近抖动噪音的有意取舍，要求秒级即时到达的场景可把 `debounce-cycles` 设为 1。
 
 ## 依赖
 

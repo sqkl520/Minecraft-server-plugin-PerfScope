@@ -21,6 +21,8 @@ import cn.perfscope.PerfScope;
 import cn.perfscope.compat.SchedulerAdapter;
 import cn.perfscope.compat.ServerCompat;
 import cn.perfscope.config.ConfigManager;
+import cn.perfscope.history.HistorySample;
+import cn.perfscope.history.HistoryStore;
 import cn.perfscope.metrics.MetricsCollector;
 import cn.perfscope.metrics.MetricsSnapshot;
 import cn.perfscope.report.ReportGenerator;
@@ -50,6 +52,7 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 import java.util.logging.Level;
 
 /**
@@ -63,6 +66,8 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
     private final MetricsCollector collector;
     private final ReportGenerator reportGen;
     private final ConfigManager configManager;
+    // Wave 7A：历史环形缓冲（24h 窗口），只读消费
+    private final HistoryStore historyStore;
     // v1.2 A8：显示层色阶统一判定（读 config 告警阈值，替代原先 16 处硬编码）
     private final ThresholdColors thresholdColors;
 
@@ -85,6 +90,7 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         this.collector = plugin.getMetricsCollector();
         this.reportGen = plugin.getReportGenerator();
         this.configManager = plugin.getConfigManager();
+        this.historyStore = plugin.getHistoryStore();
         this.thresholdColors = new ThresholdColors(plugin.getConfigManager());
     }
 
@@ -138,6 +144,9 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 break;
             case "uptime": case "up":
                 showUptime(sender);
+                break;
+            case "history": case "hist":
+                showHistory(sender);
                 break;
             case "gc":
                 showGC(sender);
@@ -826,6 +835,57 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             .append(Component.text(" (" + System.getProperty("java.vendor") + ")", GRAY)));
     }
 
+    // ==================== 专项检测: 历史摘要（Wave 7A） ====================
+
+    /**
+     * Wave 7A：/perfscope history —— 24h 环形缓冲摘要。
+     * 输出格式锁定（docs/06-tasks/WAVE7-DESIGN.md「7A」节）：标题 "=== 历史摘要 ==="、
+     * "覆盖: 近 N 分钟（M 个样本）"、"最低 TPS: x.xx（HH:mm）"、"峰值实体: N（HH:mm）"、
+     * "峰值内存: P%（HH:mm）"；空态含稳定子串 "暂无历史数据"（后续 harness 断言锚点，勿改字）。
+     * 极值均取全窗口 helper（since=0，含端点恒全员参与；无效值过滤规则见 HistoryStore 类注释）。
+     */
+    private void showHistory(CommandSender sender) {
+        List<HistorySample> samples = historyStore.samples();
+        sender.sendMessage(Component.text("=== 历史摘要 ===", GOLD, TextDecoration.BOLD));
+        if (samples.isEmpty()) {
+            // 空态原因：刚启动/重载（首个采样未到）、采样间隔未到、或 history.enabled=false
+            sender.sendMessage(Component.text("暂无历史数据（插件刚启动或首个采样间隔未到，稍后再试）", YELLOW));
+            return;
+        }
+
+        HistorySample oldest = samples.get(0);
+        HistorySample latest = samples.get(samples.size() - 1);
+        // 覆盖时长 = 跨度分钟取整，至少显示 1（契约：<1 分钟不显示 0）
+        long minutes = Math.max(1L, (latest.timestamp() - oldest.timestamp()) / 60000L);
+        sender.sendMessage(goldLabel("覆盖: ")
+            .append(Component.text("近 " + minutes + " 分钟（" + samples.size() + " 个样本）", WHITE)));
+
+        appendHistoryExtreme(sender, "最低 TPS: ", historyStore.lowestTpsSince(0L),
+            s -> String.format("%.2f", s.tps1m()));
+        appendHistoryExtreme(sender, "峰值实体: ", historyStore.peakEntitiesSince(0L),
+            s -> String.valueOf(s.totalEntities()));
+        appendHistoryExtreme(sender, "峰值内存: ", historyStore.peakHeapSince(0L),
+            s -> s.heapUsagePercent() + "%");
+    }
+
+    /** Wave 7A：历史极值行——"{label}{value}（{HH:mm}）"；helper 返回 null（窗口内全为无效值）时渲染"无有效样本"。 */
+    private void appendHistoryExtreme(CommandSender sender, String label, HistorySample sample,
+                                      Function<HistorySample, String> formatter) {
+        if (sample == null) {
+            sender.sendMessage(goldLabel(label).append(Component.text("无有效样本", GRAY)));
+            return;
+        }
+        sender.sendMessage(goldLabel(label)
+            .append(Component.text(formatter.apply(sample), WHITE))
+            .append(Component.text("（" + formatHistoryTime(sample.timestamp()) + "）", GRAY)));
+    }
+
+    /** Wave 7A：历史时间戳 → "HH:mm"（本地时区，与 showAll 采集时间行同口径）。 */
+    private String formatHistoryTime(long epochMs) {
+        return DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault())
+            .format(Instant.ofEpochMilli(epochMs));
+    }
+
     // ==================== 专项检测: GC ====================
 
     private void showGC(CommandSender sender) {
@@ -1025,6 +1085,8 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         // W5-D #4：te 自 A5 起已接受世界参数（te foo → 世界不存在: foo），help 补 [世界] 与 entities/chunks 行对齐
         sendHelpLine(sender, "/perfscope tileentities [世界]", "/perfscope tileentities", "Tile Entity 统计");
         sendHelpLine(sender, "/perfscope uptime", "运行时间");
+        // Wave 7A：历史摘要（24h 环形缓冲）
+        sendHelpLine(sender, "/perfscope history", "查看历史摘要（近 24 小时）");
         sendHelpLine(sender, "/perfscope gc", "GC 统计");
         sendHelpLine(sender, "/perfscope report [格式]", "/perfscope report html", "导出性能报告");
         sendHelpLine(sender, "/perfscope monitor", "切换 ActionBar 实时监测");
@@ -1049,7 +1111,7 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
 
         if (args.length == 1) {
             String[] subs = {"all", "tps", "mspt", "entities", "chunks", "memory", "cpu",
-                "players", "world", "redstone", "tileentities", "uptime", "gc",
+                "players", "world", "redstone", "tileentities", "uptime", "history", "gc",
                 "report", "monitor", "reload", "help"};
             boolean canExport = sender.hasPermission("perfscope.admin") || sender.hasPermission("perfscope.export");
             boolean canReload = sender.hasPermission("perfscope.admin") || sender.hasPermission("perfscope.reload");

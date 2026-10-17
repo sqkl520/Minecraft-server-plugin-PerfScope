@@ -34,31 +34,39 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
 
 /**
- * 告警服务（P0-4 基础版）— 消费快照中的告警文案并推送到控制台与在线玩家。
+ * 告警服务（Wave 7B/7C：结构化 Alert 消费 + 告警收敛）— 消费快照中的结构化告警并推送到控制台与在线玩家。
  *
- * <p>职责范围（v1.1 止血基础版；刻意不做：webhook / QQ / 日报 / 连续 N 次防抖，属于 v1.3「告警中心」）：</p>
+ * <p>职责范围（Wave 7B/7C 收敛版）：</p>
  * <ul>
- *   <li>输入：定时读取 {@link MetricsSnapshot#activeWarnings} / {@link MetricsSnapshot#activeCriticals}
- *       （各采集模块已生成的告警文案），本类不重复做阈值判定；</li>
- *   <li>去重/冷却：以"告警类别前缀"为 key（见 {@link #keyOf}），同一 key 在冷却期
- *       （alerts.cooldown-seconds，默认 300 秒）内只推一次；冷却到期仍在活跃则作为重复提醒再推；</li>
- *   <li>恢复：上一周期存在、本周期消失的 key 视为恢复，发一条通知
- *       （alerts.notify-recovery 可关，不受冷却限制）；抑制条件按<b>模块归因</b>——每个 key 经
- *       {@link #moduleFor} 映射到对应 {@code MetricsSnapshot.MODULE_*} 常量，仅当该模块出现在快照
- *       unavailable 集合（reload/启动首周期 JVM 窗口、模块被配置禁用或采集失败）时才抑制该 key 的恢复判定
- *       （"消息消失"不等于"故障恢复"），抑制期间该 key 保留在 activeAlerts 中，下个周期继续判定；
- *       可用模块的真恢复不受其他模块 unavailable 影响（含被配置禁用的模块——其长期占据 unavailable
- *       不再波及其他模块），正常发出；无法归因的 key（映射未命中）按正常恢复处理
- *       （宁可发真恢复，不永久静默），并记 FINE 级日志备查（详见 {@link #onSnapshot}）；</li>
- *   <li>通道：① 控制台（critical=severe、warning=warning、恢复=info，前缀 [告警]）；
- *       ② 在线且持有 perfscope.alert 权限的玩家（Paper 原生 Adventure，warning 黄 / critical 红 / 恢复 绿）。</li>
+ *   <li>输入：定时读取 {@link MetricsSnapshot#alerts}（结构化 {@link Alert}，采集模块已生成），
+ *       本类不重复做阈值判定；key 直接取 {@link Alert#key()}（metric:scope，唯一身份），
+ *       替代旧版按文案前缀字符串解析的启发式 key；</li>
+ *   <li>防抖（Wave 7C）：同一 key 连续 N 个检查周期（alerts.debounce-cycles，默认 3，钳 ≥1）出现才首次推送；
+ *       计数在状态机内维护、reload 不清（与 activeAlerts 同语义）；N=1 等价旧行为。
+ *       代价：首次推送最长延迟约 N × 采集间隔（README 边界段已声明）；</li>
+ *   <li>一事件一通知（Wave 7C）：级别升级（warning→critical，同 key）只推一条升级消息
+ *       {@code [告警][严重] <message>（级别升级）}（游戏内同理加后缀），不再产生"旧 key 恢复 + 新 key 告警"两条；
+ *       升级不受冷却限制（严重度上升应立即到达），推送后刷新冷却表，防抖计数视为已确认（不重新计数）。
+ *       降级（critical→warning）暂视为状态保持（不推送、不恢复，保留原记录）——记入 v1.3 Notes；</li>
+ *   <li>去重/冷却：同一 key 在冷却期（alerts.cooldown-seconds，默认 300 秒）内只推一次；
+ *       冷却到期仍在活跃则作为重复提醒再推；冷却表 reload 不清（设计行为，测试报告 §3-2 已登记）；</li>
+ *   <li>恢复：已确认（曾推送过）的 key 上周期存在、本周期消失时发一条通知
+ *       （alerts.notify-recovery 可关，不受冷却限制）；文案 = 最近一条告警的 {@link Alert#display()} + " 已恢复正常"
+ *       （级别升级后跟随新级别文案的 display）。抑制条件按<b>模块归因</b>——直接用 {@link Alert#module()}
+ *       对快照 unavailable 集合判定：仅当该模块出现在 unavailable（reload/启动首周期 JVM 窗口、模块被配置禁用
+ *       或采集失败）时才抑制该 key 的恢复判定（"消息消失"不等于"故障恢复"），抑制期间该 key 保留在
+ *       activeAlerts 中，下个周期继续判定；可用模块的真恢复不受其他模块 unavailable 影响；
+ *       module 为 null（未携带归因）按正常恢复处理（宁可发真恢复，不永久静默），并记 FINE 级日志备查；</li>
+ *   <li>通道：① 控制台（critical=severe、warning=warning、升级=severe、恢复=info，前缀 [告警]）；
+ *       ② 在线且持有 perfscope.alert 权限的玩家（Paper 原生 Adventure，warning 黄 / critical 与升级 红 / 恢复 绿）。</li>
  * </ul>
  *
  * <p>线程模型：定时器经 {@link SchedulerAdapter#runGlobalTimer} 调度，在主线程（Folia 下为全局区域线程）
- * 周期执行，玩家消息发送天然处于安全线程；冷却表用 ConcurrentHashMap，全部为内存操作，不阻塞主线程。</p>
+ * 周期执行，玩家消息发送天然处于安全线程；三张状态表（cooldowns/activeAlerts/debounceCounts）用
+ * ConcurrentHashMap，全部为内存操作，不阻塞主线程。</p>
  *
- * <p>已知边界（v1.3 状态机修复）：无连续 N 次防抖，指标在阈值附近秒级抖动时可能产生交替的告警/恢复文案；
- * 级别升级（warning→critical）文案前缀含级别词，视为不同 key，会先发旧 key 恢复再发新 key 告警。</p>
+ * <p>v1.3 Notes（暂不做）：降级仅状态保持、不推送也不恢复；防抖计数按"连续出现"语义，
+ * 待确认 key 的任何缺席（含模块不可用期）都会清零重计。</p>
  */
 public class AlertService {
 
@@ -71,21 +79,71 @@ public class AlertService {
     /** 冷却表：告警 key → 上次推送时间（epoch ms）。定时器单线程访问，ConcurrentHashMap 为防御性选择。 */
     private final Map<String, Long> cooldowns = new ConcurrentHashMap<>();
 
-    /** 基础状态机：上一周期仍活跃的告警 key → 记录（用于恢复检测，reload 时不清空） */
-    private final Map<String, ActiveAlert> activeAlerts = new ConcurrentHashMap<>();
+    /** 已确认（已推送过）的告警：key → 最近一条 Alert（恢复判定与恢复文案 display 的来源；reload 时不清空） */
+    private final Map<String, Alert> activeAlerts = new ConcurrentHashMap<>();
+
+    /**
+     * 防抖计数表（Wave 7C）：待确认告警 key → 连续出现的检查周期数。
+     * 达到 alerts.debounce-cycles 才首次推送并移入 activeAlerts；reload 不清（与 activeAlerts 同语义）。
+     */
+    private final Map<String, Integer> debounceCounts = new ConcurrentHashMap<>();
 
     /** 周期检查任务句柄（null = 未运行） */
     private SchedulerAdapter.TaskHandle timerHandle;
+
+    /** Wave 7D：webhook 出口（由 PerfScope 装配；null 或未就绪时零开销跳过） */
+    private WebhookNotifier webhookNotifier;
+
+    /** Wave 7D：当日推送计数（供每日摘要"推送 W 条"；跨天自动归零，reload 不清） */
+    private volatile int pushedToday = 0;
+    private volatile long pushedTodayDayEpoch = currentDayEpoch();
 
     public AlertService(PerfScope plugin) {
         this.plugin = plugin;
         this.configManager = plugin.getConfigManager();
     }
 
+    /** Wave 7D：装配 webhook 出口（可空；null = 不发送）。 */
+    public void setWebhookNotifier(WebhookNotifier webhookNotifier) {
+        this.webhookNotifier = webhookNotifier;
+    }
+
+    /** Wave 7D：当前活跃（已确认未恢复）告警数——每日摘要第 3 行使用。 */
+    public int getActiveCount() {
+        return activeAlerts.size();
+    }
+
+    /**
+     * Wave 7D：当日成功推送的告警条数（含新告警、重复提醒、级别升级；不含恢复）。
+     * 简单日计数器：访问时若已跨天则先归零（近似实现即可，摘要只需量级）。
+     */
+    public int getPushedTodayCount() {
+        long today = currentDayEpoch();
+        if (today != pushedTodayDayEpoch) {
+            pushedTodayDayEpoch = today;
+            pushedToday = 0;
+        }
+        return pushedToday;
+    }
+
+    private static long currentDayEpoch() {
+        return java.time.LocalDate.now().toEpochDay();
+    }
+
+    /** Wave 7D：推送成功后自增当日计数（跨天由 getPushedTodayCount 访问时归零）。 */
+    private void countPushed() {
+        long today = currentDayEpoch();
+        if (today != pushedTodayDayEpoch) {
+            pushedTodayDayEpoch = today;
+            pushedToday = 0;
+        }
+        pushedToday++;
+    }
+
     /**
      * 启动告警服务：按 general.update_interval 在主线程周期检查最新快照。
      * 幂等（先停后启，不叠加任务）；alerts.enabled=false 时不启动。
-     * reload 场景：重建定时器以应用新间隔，但不清空冷却/活跃状态（避免重载导致告警重推，按 V1.3 规格）。
+     * reload 场景：重建定时器以应用新间隔，但不清空冷却/活跃/防抖状态（避免重载导致告警重推，按 V1.3 规格）。
      */
     public void start() {
         stop(); // 防呆：先停旧定时器，支持重复调用不叠加（与 MetricsCollector.start 同范式）
@@ -98,10 +156,10 @@ public class AlertService {
         // 首查延迟一个采集周期：等采集器先产出首份快照；runGlobalTimer 在主线程执行，玩家消息发送天然安全
         timerHandle = SchedulerAdapter.runGlobalTimer(plugin, this::checkCycle, interval, interval);
         plugin.getLogger().info("[告警] 告警服务已启动 (检查间隔: " + interval + " ticks, 冷却: "
-            + cfg.alerts_cooldownSeconds + " 秒)");
+            + cfg.alerts_cooldownSeconds + " 秒, 防抖: " + Math.max(1, cfg.alerts_debounceCycles) + " 周期)");
     }
 
-    /** 停止告警服务：取消定时器（幂等）。不清空冷却/活跃状态机——reload 时按 V1.3 规格保留。 */
+    /** 停止告警服务：取消定时器（幂等）。不清空冷却/活跃/防抖状态机——reload 时按 V1.3 规格保留。 */
     public void stop() {
         if (timerHandle != null) {
             timerHandle.cancel();
@@ -129,7 +187,8 @@ public class AlertService {
 
     /**
      * 处理一份快照（公开入口，供定时器或未来采集周期末尾直接调用）。
-     * 流程：提取本周期告警（同 key 取更高级别）→ 冷却判定后推送 → 对比上周期发恢复通知 → 更新状态机。
+     * 流程：提取本周期结构化告警（同 key 取更高级别）→ 防抖计数/升级判定/冷却判定后推送
+     * → 对比上周期发恢复通知 → 更新状态机。
      * 预期由主线程串行调用；冷却判定为非原子 check-then-put（单主线程调用下无竞态）。
      */
     public void onSnapshot(MetricsSnapshot snap) {
@@ -138,79 +197,129 @@ public class AlertService {
             return;
         }
 
-        // 1. 提取本周期告警：warning 先入、critical 后入，同 key 以更高级别覆盖
-        Map<String, ActiveAlert> current = new LinkedHashMap<>();
-        for (String message : snap.activeWarnings) {
-            current.put(keyOf(message), new ActiveAlert(message, false));
-        }
-        for (String message : snap.activeCriticals) {
-            current.put(keyOf(message), new ActiveAlert(message, true));
+        // 1. 提取本周期告警（结构化真相源）：warning 先入、critical 后入，同 key 以更高级别覆盖
+        Map<String, Alert> current = new LinkedHashMap<>();
+        for (Alert alert : snap.alerts) {
+            if (alert == null || alert.key() == null) {
+                continue; // 防御：脏数据不进状态机
+            }
+            Alert prev = current.get(alert.key());
+            if (prev == null || (alert.critical() && !prev.critical())) {
+                current.put(alert.key(), alert);
+            }
         }
 
         long now = System.currentTimeMillis();
         // 冷却防御：负值配置被 ConfigManager.getInt 截断/透传后钳到 0（"0 = 无冷却"，仍受采集周期节流，不刷屏）
         long cooldownMs = Math.max(0, cfg.alerts_cooldownSeconds) * 1000L;
+        // 防抖防御：钳 ≥1（ConfigManager 已校验回退默认 3，此处兜底）；N=1 等价旧行为（首次出现即推）
+        int debounceCycles = Math.max(1, cfg.alerts_debounceCycles);
 
-        // 2. 活跃告警推送：新告警或冷却到期的重复提醒（同一 key 冷却期内只推一次）
-        for (Map.Entry<String, ActiveAlert> entry : current.entrySet()) {
+        // 2. 活跃告警收敛推送（Wave 7C）：
+        //    a. 未确认 key（不在 activeAlerts）→ 防抖计数，连续 N 个检查周期出现才首次推送；
+        //    b. 已确认 key → 级别升级：只推一条"（级别升级）"消息（不受冷却限制，推后刷新冷却表）；
+        //       降级：状态保持（不推送、不恢复，保留原记录）；同级别：刷新记录，冷却到期仍活跃则重推。
+        for (Map.Entry<String, Alert> entry : current.entrySet()) {
             String key = entry.getKey();
-            if (isCooling(key, now, cooldownMs)) {
+            Alert alert = entry.getValue();
+            Alert confirmed = activeAlerts.get(key);
+
+            if (confirmed == null) {
+                // —— 待确认：防抖计数（连续性由末尾的清理步骤保证：本周期缺席即清零） ——
+                int count = debounceCounts.merge(key, 1, Integer::sum);
+                if (count < debounceCycles) {
+                    continue; // 未达 N 周期：静默累计，暂不推送（防秒级抖动误报）
+                }
+                if (isCooling(key, now, cooldownMs)) {
+                    // 防抖已达但仍在冷却期（上一生命周期遗留的冷却条目）：等冷却到期再推
+                    // （与旧版"冷却到期仍活跃重推"语义一致，避免绕过冷却刷屏）
+                    continue;
+                }
+                cooldowns.put(key, now); // 先落冷却再推送：推送异常时也不会在下一周期立刻重试刷屏
+                try {
+                    pushAlert(alert);
+                } catch (Exception | LinkageError e) {
+                    // 单条推送失败只记日志，不中断本轮其余告警与恢复检测（失败只记日志原则）
+                    plugin.getLogger().warning("[告警] 推送失败: " + alert.message() + ": " + e.getMessage());
+                }
+                activeAlerts.put(key, alert); // 确认：移入活跃状态机（此后参与恢复判定与升级/重推收敛）
+                debounceCounts.remove(key);   // 已确认：不再计数
                 continue;
             }
-            cooldowns.put(key, now); // 先落冷却再推送：推送异常时也不会在下一周期立刻重试刷屏
-            try {
-                pushAlert(entry.getValue());
-            } catch (Exception | LinkageError e) {
-                // 单条推送失败只记日志，不中断本轮其余告警与恢复检测（失败只记日志原则）
-                plugin.getLogger().warning("[告警] 推送失败: " + entry.getValue().message() + ": " + e.getMessage());
+
+            if (alert.critical() && !confirmed.critical()) {
+                // —— 级别升级（warning→critical）：一事件一通知，只推一条升级消息 ——
+                cooldowns.put(key, now); // 升级不受冷却限制（严重度上升应立即到达），推送后刷新冷却表
+                try {
+                    pushUpgrade(alert);
+                } catch (Exception | LinkageError e) {
+                    plugin.getLogger().warning("[告警] 升级推送失败: " + alert.message() + ": " + e.getMessage());
+                }
+                // 升级即更新记录：display 跟随新级别文案（如 "堆内存使用率严重偏高"），之后恢复用新 display
+                activeAlerts.put(key, alert);
+            } else if (!alert.critical() && confirmed.critical()) {
+                // —— 降级（critical→warning）：v1.3 Notes——暂视为状态保持（不推送、不恢复，保留原记录） ——
+                // 占位注释：故意留空
+            } else {
+                // —— 同级别：刷新记录（message 数值随时间更新），冷却到期仍活跃则重推（重复提醒） ——
+                activeAlerts.put(key, alert);
+                if (!isCooling(key, now, cooldownMs)) {
+                    cooldowns.put(key, now);
+                    try {
+                        pushAlert(alert);
+                    } catch (Exception | LinkageError e) {
+                        plugin.getLogger().warning("[告警] 推送失败: " + alert.message() + ": " + e.getMessage());
+                    }
+                }
             }
         }
 
-        // 3. 恢复检测：上周期存在、本周期消失的 key（每个 key 每次恢复只发一条，不受冷却限制）
-        //    P2-1 假恢复修复（A2，Wave4 修正：按模块归因）：模块被配置禁用/采集失败/Reload 窗口时，
-        //    该模块的告警文案在本周期"静默缺席"，直接做集合差分会把"缺席"误判为"恢复"发出假恢复通知。
-        //    现对每个消失 key 经 moduleFor 归因到所属模块：
+        // 3. 恢复检测：已确认（曾推送）的 key 上周期存在、本周期消失（每个 key 每次恢复只发一条，不受冷却限制）
+        //    假恢复防护（A2/Wave4 修正语义保留，Wave 7B 改经由结构化 module 字段直接归因）：模块被配置禁用/
+        //    采集失败/Reload 窗口时，该模块的告警在本周期"静默缺席"，直接做集合差分会把"缺席"误判为"恢复"。
+        //    对每个消失 key 用 alert.module() 判定：
         //    - 该模块仍在 snap.unavailable 中 → 抑制本 key 恢复（保留在 activeAlerts 中不清除，下周期继续判定）；
-        //    - 其他模块不可用不影响本 key —— 修复旧实现"任一模块不可用则全部模块恢复永久静默"的缺陷
-        //      （被禁用模块会长期占据 unavailable，导致集合恒非空）；
-        //    - 无法归因（moduleFor=null）→ 按正常恢复处理（宁可发真恢复，不永久静默），记 FINE 日志备查。
+        //    - 其他模块不可用不影响本 key（修复旧实现"任一模块不可用则全部模块恢复永久静默"的缺陷）；
+        //    - module 为 null → 按正常恢复处理（宁可发真恢复，不永久静默），记 FINE 日志备查。
         //    注：恢复推送本身不写冷却表（cooldowns 仅在活跃告警推送时写入）；活跃告警的推送冷却
         //    仍会压制其复现推送，属预期行为。
         List<String> recoveredKeys = new ArrayList<>();
-        for (Map.Entry<String, ActiveAlert> entry : activeAlerts.entrySet()) {
-            if (current.containsKey(entry.getKey())) {
-                continue; // 本周期仍活跃：保留（数值变化由下方 putAll 刷新为最新记录）
+        for (Map.Entry<String, Alert> entry : activeAlerts.entrySet()) {
+            String key = entry.getKey();
+            if (current.containsKey(key)) {
+                continue; // 本周期仍活跃：保留
             }
-            String mod = moduleFor(entry.getKey());
-            if (mod != null && snap.unavailable.contains(mod)) {
+            String module = entry.getValue().module();
+            if (module != null && snap.unavailable.contains(module)) {
                 continue; // 该 key 所属模块本周期不可用：抑制恢复，保留 key 待下周期模块可用后再判定
             }
-            if (mod == null) {
+            if (module == null) {
                 plugin.getLogger().log(Level.FINE,
-                    "[告警] 恢复判定：未归因 key=" + entry.getKey() + "（按正常恢复处理，可考虑补充 moduleFor 映射）");
+                    "[告警] 恢复判定：key=" + key + " 未携带模块归因（按正常恢复处理）");
             }
             if (cfg.alerts_notifyRecovery) {
                 try {
-                    pushRecovery(entry.getKey());
+                    pushRecovery(entry.getValue());
                 } catch (Exception | LinkageError e) {
-                    plugin.getLogger().warning("[告警] 恢复通知发送失败: " + entry.getKey() + ": " + e.getMessage());
+                    plugin.getLogger().warning("[告警] 恢复通知发送失败: " + key + ": " + e.getMessage());
                 }
             }
-            recoveredKeys.add(entry.getKey()); // 真恢复（或通知被关闭）：登记待移除
+            recoveredKeys.add(key); // 真恢复（或通知被关闭）：登记待移除
         }
         // 真恢复（或通知被关闭）的 key 统一从状态机移除：先登记、循环外移除，遍历与修改分离（语义直白、天然安全）
         for (String key : recoveredKeys) {
             activeAlerts.remove(key);
         }
-        // 4. 更新状态机：合入本周期活跃告警（含冷却中未推送的，供下周期恢复判定）并刷新为最新记录；
-        //    被抑制恢复的消失 key 已在循环内 continue 保留在表中
-        activeAlerts.putAll(current);
+
+        // 4. 防抖计数清理：本周期缺席的待确认 key 视为"连续性中断"，计数清零（已确认 key 的计数在确认时即被移除，
+        //    本步骤只影响待确认集合）；缺席且已确认的 key 已在上方走恢复流程（含抑制保留路径）
+        debounceCounts.keySet().removeIf(key -> !current.containsKey(key));
     }
 
     // ==================== 推送通道 ====================
 
     /** 推送一条告警：控制台 + 游戏内（各通道受 alerts.* 开关控制，每次推送读取最新配置） */
-    private void pushAlert(ActiveAlert alert) {
+    private void pushAlert(Alert alert) {
         ConfigManager.ConfigData cfg = configManager.get();
         // a. 控制台：critical 用 severe，warning 用 warning，前缀 [告警]
         if (cfg.alerts_console) {
@@ -227,17 +336,46 @@ public class AlertService {
                 alert.critical() ? NamedTextColor.RED : NamedTextColor.YELLOW);
             broadcastToAlertPlayers(component);
         }
+        // c. Wave 7D：当日计数 + webhook（全异步；未就绪时零开销）
+        countPushed();
+        if (webhookNotifier != null) {
+            webhookNotifier.send("[告警][" + (alert.critical() ? "严重" : "警告") + "] " + alert.message());
+        }
     }
 
-    /** 推送恢复通知：控制台 info + 游戏内绿色 */
-    private void pushRecovery(String key) {
+    /**
+     * 推送级别升级通知（Wave 7C 锁定格式）：{@code [告警][严重] <message>（级别升级）}；
+     * 游戏内同理加后缀"（级别升级）"。升级只发生于 warning→critical，故控制台固定 severe、游戏内固定红。
+     */
+    private void pushUpgrade(Alert alert) {
         ConfigManager.ConfigData cfg = configManager.get();
-        String message = key + " 已恢复正常";
+        if (cfg.alerts_console) {
+            plugin.getLogger().severe("[告警][严重] " + alert.message() + "（级别升级）");
+        }
+        if (cfg.alerts_in_game) {
+            broadcastToAlertPlayers(Component.text(
+                "[告警·严重] " + alert.message() + "（级别升级）", NamedTextColor.RED));
+        }
+        // Wave 7D：当日计数 + webhook
+        countPushed();
+        if (webhookNotifier != null) {
+            webhookNotifier.send("[告警][严重] " + alert.message() + "（级别升级）");
+        }
+    }
+
+    /** 推送恢复通知：控制台 info + 游戏内绿色；文案 = 最近一条告警的 display + " 已恢复正常" */
+    private void pushRecovery(Alert alert) {
+        ConfigManager.ConfigData cfg = configManager.get();
+        String message = alert.display() + " 已恢复正常";
         if (cfg.alerts_console) {
             plugin.getLogger().info("[告警][恢复] " + message);
         }
         if (cfg.alerts_in_game) {
             broadcastToAlertPlayers(Component.text("[告警·恢复] " + message, NamedTextColor.GREEN));
+        }
+        // Wave 7D：webhook（恢复不计入推送计数——计数语义为"告警条数"）
+        if (webhookNotifier != null) {
+            webhookNotifier.send("[告警][恢复] " + message);
         }
     }
 
@@ -255,100 +393,6 @@ public class AlertService {
 
     // ==================== 去重 / 冷却 ====================
 
-    /**
-     * 提取告警的去重/冷却 key（告警类别前缀）。
-     * 规则：取最后一个冒号（含中文全角）之前的部分并去空白。采集侧文案约定为"类别前缀: 数值"，
-     * 数值部分不含冒号；用最后一个冒号而非第一个，是为了兼容世界名本身含冒号的极端情况
-     * （如 "世界 w:x 实体数严重超标: 3000" 取到完整类别）。示例："TPS 严重偏低: 14.20" → "TPS 严重偏低"；
-     * 无冒号时用全文。
-     */
-    private static String keyOf(String alertText) {
-        String text = alertText == null ? "" : alertText.trim();
-        int idx = Math.max(text.lastIndexOf(':'), text.lastIndexOf('：'));
-        return idx > 0 ? text.substring(0, idx).trim() : text;
-    }
-
-    /**
-     * T1（Wave4 修正）：按告警 key 前缀归因到所属采集模块（{@code MetricsSnapshot.MODULE_*} 常量）。
-     *
-     * <p>用于恢复判定的按模块抑制：仅当 key 所属模块出现在快照 unavailable 集合时才抑制其恢复，
-     * 其他模块的不可用不再影响本 key（修复旧"全局抑制"缺陷——被禁用模块长期占据 unavailable 集合，
-     * 导致全部模块恢复判定永久跳过）。映射依据 MetricsCollector 全部告警文案构造点逐条核对（16 条），
-     * 用 startsWith 前缀匹配、先精确后宽泛排列。</p>
-     *
-     * <ul>
-     *   <li>"世界 " 开头（逐世界实体/区块文案）——世界名任意，按文案固定部分的特征词分流：
-     *       "加载区块数" → CHUNKS（区块文案独有词，实体文案不含，先判之），"实体" → ENTITIES
-     *       （对应"实体数严重超标/较多"）；两特征词皆无的未知世界文案返回 null；</li>
-     *   <li>"实体总数" → ENTITIES；"方块实体" → TILE_ENTITIES（先于宽泛"实体"判断，防御未来文案）；</li>
-     *   <li>"堆内存"/"内存" → MEMORY；"在线玩家"/"玩家" → PLAYERS；</li>
-     *   <li>"进程CPU"/"系统CPU"/"CPU" → CPU；"TPS" → TPS；"MSPT" → MSPT；</li>
-     *   <li>"GC" → GC；"区块" → CHUNKS；"服务器"/"运行时间" → SERVER
-     *       （后三条当前无对应文案，按映射规则防御性保留）。</li>
-     * </ul>
-     *
-     * @param key 告警去重 key（见 {@link #keyOf}）
-     * @return 对应 MODULE_* 常量；无法归因返回 null（调用方按正常恢复处理，不永久静默）
-     */
-    private static String moduleFor(String key) {
-        if (key == null || key.isEmpty()) {
-            return null;
-        }
-        // 逐世界文案（"世界 <名> 实体数严重超标/较多" / "世界 <名> 加载区块数严重超标/较多"）：
-        // 世界名任意，不能按固定前缀匹配；用文案固定部分的强特征词分流——"加载区块数"是区块文案
-        // 独有词（实体文案不含），先判之；再判"实体"。正常世界名不含这两个特征词，分流互斥
-        if (key.startsWith("世界")) {
-            if (key.contains("加载区块数")) {
-                return MetricsSnapshot.MODULE_CHUNKS;
-            }
-            if (key.contains("实体")) {
-                return MetricsSnapshot.MODULE_ENTITIES;
-            }
-            return null;
-        }
-        // 固定前缀，先长后短（防前缀冲突）
-        if (key.startsWith("实体总数")) {
-            return MetricsSnapshot.MODULE_ENTITIES;
-        }
-        if (key.startsWith("方块实体")) {
-            return MetricsSnapshot.MODULE_TILE_ENTITIES;
-        }
-        if (key.startsWith("实体")) {
-            return MetricsSnapshot.MODULE_ENTITIES; // 防御：未来"实体…"文案兜底（方块实体已先判，不受影响）
-        }
-        if (key.startsWith("堆内存")) {
-            return MetricsSnapshot.MODULE_MEMORY;
-        }
-        if (key.startsWith("内存")) {
-            return MetricsSnapshot.MODULE_MEMORY;
-        }
-        if (key.startsWith("在线玩家")) {
-            return MetricsSnapshot.MODULE_PLAYERS;
-        }
-        if (key.startsWith("玩家")) {
-            return MetricsSnapshot.MODULE_PLAYERS;
-        }
-        if (key.startsWith("进程CPU") || key.startsWith("系统CPU") || key.startsWith("CPU")) {
-            return MetricsSnapshot.MODULE_CPU;
-        }
-        if (key.startsWith("TPS")) {
-            return MetricsSnapshot.MODULE_TPS;
-        }
-        if (key.startsWith("MSPT")) {
-            return MetricsSnapshot.MODULE_MSPT;
-        }
-        if (key.startsWith("GC")) {
-            return MetricsSnapshot.MODULE_GC;
-        }
-        if (key.startsWith("区块")) {
-            return MetricsSnapshot.MODULE_CHUNKS;
-        }
-        if (key.startsWith("服务器") || key.startsWith("运行时间")) {
-            return MetricsSnapshot.MODULE_SERVER;
-        }
-        return null;
-    }
-
     /** 判断某 key 是否仍在冷却期内；冷却 <=0 视为无冷却（天然受采集周期节流，不会刷屏） */
     private boolean isCooling(String key, long now, long cooldownMs) {
         if (cooldownMs <= 0) {
@@ -357,7 +401,4 @@ public class AlertService {
         Long lastPush = cooldowns.get(key);
         return lastPush != null && now - lastPush < cooldownMs;
     }
-
-    /** 告警跟踪记录（基础版仅需原文与级别，供推送与恢复判定使用） */
-    private record ActiveAlert(String message, boolean critical) {}
 }

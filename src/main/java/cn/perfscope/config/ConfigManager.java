@@ -69,8 +69,8 @@ public class ConfigManager {
 
         // === 玩家 ===
         fresh.players_enabled = yaml.getBoolean("players.enabled", true);
-        fresh.players_warningThreshold = yaml.getInt("players.warning_threshold", 80);
-        fresh.players_criticalThreshold = yaml.getInt("players.critical_threshold", 95);
+        fresh.players_warningThreshold = yaml.getInt("players.warning_threshold", 90);
+        fresh.players_criticalThreshold = yaml.getInt("players.critical_threshold", 98);
 
         // === 实体 ===
         fresh.entities_enabled = yaml.getBoolean("entities.enabled", true);
@@ -84,8 +84,8 @@ public class ConfigManager {
 
         // === 内存 ===
         fresh.memory_enabled = yaml.getBoolean("memory.enabled", true);
-        fresh.memory_heapWarningThreshold = yaml.getInt("memory.heap_warning_threshold", 80);
-        fresh.memory_heapCriticalThreshold = yaml.getInt("memory.heap_critical_threshold", 90);
+        fresh.memory_heapWarningThreshold = yaml.getInt("memory.heap_warning_threshold", 85);
+        fresh.memory_heapCriticalThreshold = yaml.getInt("memory.heap_critical_threshold", 95);
 
         // === CPU ===
         fresh.cpu_enabled = yaml.getBoolean("cpu.enabled", true);
@@ -105,12 +105,23 @@ public class ConfigManager {
         fresh.report_format = yaml.getString("report.format", "html");
         fresh.report_retentionDays = yaml.getInt("report.retention_days", 7);
 
-        // === 告警（P0-4 基础版：控制台 + OP 游戏内 + 冷却） ===
+        // === 告警（P0-4 基础版：控制台 + OP 游戏内 + 冷却；Wave 7C：+ 防抖收敛） ===
         fresh.alerts_enabled = yaml.getBoolean("alerts.enabled", true);
         fresh.alerts_console = yaml.getBoolean("alerts.console", true);
         fresh.alerts_in_game = yaml.getBoolean("alerts.in-game", true);
         fresh.alerts_cooldownSeconds = yaml.getInt("alerts.cooldown-seconds", 300);
         fresh.alerts_notifyRecovery = yaml.getBoolean("alerts.notify-recovery", true);
+        fresh.alerts_debounceCycles = yaml.getInt("alerts.debounce-cycles", 3);
+        // === 每日摘要与 webhook（Wave 7D） ===
+        fresh.alerts_dailySummaryEnabled = yaml.getBoolean("alerts.daily-summary.enabled", false);
+        fresh.alerts_dailySummaryTime = yaml.getString("alerts.daily-summary.time", "08:00");
+        fresh.alerts_webhookEnabled = yaml.getBoolean("alerts.webhook.enabled", false);
+        fresh.alerts_webhookType = yaml.getString("alerts.webhook.type", "discord");
+        fresh.alerts_webhookUrl = yaml.getString("alerts.webhook.url", "");
+
+        // === 历史采样（Wave 7A：24h 环形缓冲；重启清零，文件持久化规划于 Wave 8B） ===
+        fresh.history_enabled = yaml.getBoolean("history.enabled", true);
+        fresh.history_sampleIntervalSeconds = yaml.getInt("history.sample-interval-seconds", 60);
 
         // === 各世界设置 ===
         fresh.worldSettings = new HashMap<>();
@@ -166,7 +177,7 @@ public class ConfigManager {
 
         // 玩家（高值差，warning 应 <= critical）
         int[] players = sanitizeIntPair("players.warning_threshold/critical_threshold",
-            cfg.players_warningThreshold, cfg.players_criticalThreshold, 80, 95);
+            cfg.players_warningThreshold, cfg.players_criticalThreshold, 90, 98);
         cfg.players_warningThreshold = players[0];
         cfg.players_criticalThreshold = players[1];
 
@@ -184,7 +195,7 @@ public class ConfigManager {
 
         // 内存（高值差，warning 应 <= critical）
         int[] memory = sanitizeIntPair("memory.heap_warning_threshold/critical_threshold",
-            cfg.memory_heapWarningThreshold, cfg.memory_heapCriticalThreshold, 80, 90);
+            cfg.memory_heapWarningThreshold, cfg.memory_heapCriticalThreshold, 85, 95);
         cfg.memory_heapWarningThreshold = memory[0];
         cfg.memory_heapCriticalThreshold = memory[1];
 
@@ -218,6 +229,34 @@ public class ConfigManager {
             plugin.getLogger().warning("[PerfScope] 配置校验：alerts.cooldown-seconds 为负值("
                 + cfg.alerts_cooldownSeconds + ")，已钳制为 0");
             cfg.alerts_cooldownSeconds = 0;
+        }
+
+        // === alerts.debounce-cycles：非法值（≤0）钳到默认 3 并 warning（Wave 7C，与全仓 clamp 口径一致） ===
+        if (cfg.alerts_debounceCycles <= 0) {
+            plugin.getLogger().warning("[PerfScope] 配置校验：alerts.debounce-cycles="
+                + cfg.alerts_debounceCycles + " 非法（需 ≥1），已按 3 处理");
+            cfg.alerts_debounceCycles = 3;
+        }
+
+        // === alerts.daily-summary.time：非法格式回退 "08:00" 并 warning（Wave 7D；容忍 "8:00" 单数字小时） ===
+        if (!isValidHhMm(cfg.alerts_dailySummaryTime)) {
+            plugin.getLogger().warning("[PerfScope] 配置校验：alerts.daily-summary.time=\""
+                + cfg.alerts_dailySummaryTime + "\" 非法（需 HH:mm），已回退默认 08:00");
+            cfg.alerts_dailySummaryTime = "08:00";
+        }
+
+        // === alerts.webhook.type：未知值按 discord 处理并 warning（Wave 7D，不静默） ===
+        if (!"discord".equals(cfg.alerts_webhookType) && !"onebot".equals(cfg.alerts_webhookType)) {
+            plugin.getLogger().warning("[PerfScope] 配置校验：alerts.webhook.type=\""
+                + cfg.alerts_webhookType + "\" 未知（支持 discord | onebot），已按 discord 处理");
+            cfg.alerts_webhookType = "discord";
+        }
+
+        // === history.sample-interval-seconds：非法值（≤0）钳到 60 并 warning（Wave 7A，与全仓 clamp 口径一致） ===
+        if (cfg.history_sampleIntervalSeconds <= 0) {
+            plugin.getLogger().warning("[PerfScope] 配置校验：history.sample-interval-seconds="
+                + cfg.history_sampleIntervalSeconds + " 非法（需 ≥1），已按 60 秒处理");
+            cfg.history_sampleIntervalSeconds = 60;
         }
     }
 
@@ -330,15 +369,72 @@ public class ConfigManager {
         public String report_format;
         public int report_retentionDays;
 
-        // 告警（P0-4 基础版）
+        // 告警（P0-4 基础版；Wave 7C 收敛）
         public boolean alerts_enabled;
         public boolean alerts_console;
         public boolean alerts_in_game;
         public int alerts_cooldownSeconds;
         public boolean alerts_notifyRecovery;
+        /** Wave 7C：防抖周期数（alerts.debounce-cycles，缺键默认 3；非法值 ≤0 钳到 3）。同一 key 连续 N 个检查周期出现才首次推送。 */
+        public int alerts_debounceCycles;
+
+        // 每日摘要与 webhook（Wave 7D）
+        /** 每日摘要开关（alerts.daily-summary.enabled，缺键默认 false）。 */
+        public boolean alerts_dailySummaryEnabled;
+        /** 每日摘要时刻（alerts.daily-summary.time，本地时区 HH:mm，缺键默认 "08:00"；非法格式回退默认并 warning）。 */
+        public String alerts_dailySummaryTime;
+        /** webhook 总开关（alerts.webhook.enabled，缺键默认 false）。 */
+        public boolean alerts_webhookEnabled;
+        /** webhook 类型（alerts.webhook.type，discord | onebot，缺键默认 discord；未知值按 discord 处理并 warning）。 */
+        public String alerts_webhookType;
+        /** webhook 地址（alerts.webhook.url，缺键默认空串；空/非 http(s) 前缀 → 不发送、一次 warning，绝不记录完整 URL）。 */
+        public String alerts_webhookUrl;
+
+        // 历史采样（Wave 7A：24h 环形缓冲）
+        /** 历史采样总开关（history.enabled，缺键默认 true；false 时 record 直接返回、读取路径返回空）。 */
+        public boolean history_enabled;
+        /** 历史采样节流间隔秒数（history.sample-interval-seconds，缺键默认 60；非法值 ≤0 钳到 60）。 */
+        public int history_sampleIntervalSeconds;
 
         // 各世界设置
         public Map<String, WorldSettings> worldSettings;
+    }
+
+    /**
+     * Wave 7D：校验 HH:mm 形式（容忍单数字小时如 "8:00"；24 小时制）。
+     * 供 alerts.daily-summary.time 的格式校验使用——非法值由调用方回退默认。
+     */
+    private static boolean isValidHhMm(String value) {
+        if (value == null) {
+            return false;
+        }
+        String v = value.trim();
+        return v.matches("\\d{1,2}:\\d{2}") && parseHhMmMinutes(v) >= 0;
+    }
+
+    /**
+     * Wave 7D：把 HH:mm（容忍单数字小时）解析为"当日分钟数"（0-1439）；非法返回 -1。
+     * DailySummaryService 与配置校验共用此解析，保证两处口径一致。
+     */
+    public static int parseHhMmMinutes(String value) {
+        if (value == null) {
+            return -1;
+        }
+        String v = value.trim();
+        int idx = v.indexOf(':');
+        if (idx <= 0 || idx == v.length() - 1) {
+            return -1;
+        }
+        try {
+            int h = Integer.parseInt(v.substring(0, idx).trim());
+            int m = Integer.parseInt(v.substring(idx + 1).trim());
+            if (h < 0 || h > 23 || m < 0 || m > 59) {
+                return -1;
+            }
+            return h * 60 + m;
+        } catch (NumberFormatException e) {
+            return -1;
+        }
     }
 
     /**

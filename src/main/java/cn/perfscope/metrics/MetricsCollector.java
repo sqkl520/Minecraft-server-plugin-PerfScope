@@ -18,9 +18,11 @@
 package cn.perfscope.metrics;
 
 import cn.perfscope.PerfScope;
+import cn.perfscope.alert.Alert;
 import cn.perfscope.compat.SchedulerAdapter;
 import cn.perfscope.compat.ServerCompat;
 import cn.perfscope.config.ConfigManager;
+import cn.perfscope.history.HistoryStore;
 import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
 import org.bukkit.World;
@@ -40,6 +42,8 @@ public class MetricsCollector {
 
     private final PerfScope plugin;
     private final ConfigManager configManager;
+    // Wave 7A：历史环形缓冲（由 PerfScope 持有并注入；本类只写不读，stop/reload 不影响其内容）
+    private final HistoryStore historyStore;
 
     // P0-1/P0-8：采集任务句柄（主线程节拍 syncHandle + 异步 JVM 节拍 jvmHandle），替代旧的 Bukkit taskId
     private SchedulerAdapter.TaskHandle syncHandle;
@@ -76,6 +80,8 @@ public class MetricsCollector {
     private int cachedTotalEntities = 0;
     private Map<String, Integer> cachedEntitiesByType = new LinkedHashMap<>();
     private Map<String, Integer> cachedEntitiesByWorld = new LinkedHashMap<>();
+    // Wave 7B/7C：结构化告警与派生字符串列表一并缓存/回放（addAlert 同步填充两者，避免漏配）
+    private List<Alert> cachedEntityAlerts = new ArrayList<>();
     private List<String> cachedEntityWarnings = new ArrayList<>();
     private List<String> cachedEntityCriticals = new ArrayList<>();
 
@@ -86,6 +92,8 @@ public class MetricsCollector {
     private int cachedTotalForceLoadedChunks = 0;
     private Map<String, Integer> cachedChunksByWorld = new LinkedHashMap<>();
     private Map<String, Integer> cachedForceLoadedChunksByWorld = new LinkedHashMap<>();
+    // Wave 7B/7C：结构化告警与派生字符串列表一并缓存/回放
+    private List<Alert> cachedChunkAlerts = new ArrayList<>();
     private List<String> cachedChunkWarnings = new ArrayList<>();
     private List<String> cachedChunkCriticals = new ArrayList<>();
 
@@ -108,9 +116,10 @@ public class MetricsCollector {
     // 预热窗口基准：start() 每次调用重置，使 /perfscope reload 后重新进入预热态（幂等重复调用同样重新计时）
     private volatile long startedAtMs = System.currentTimeMillis();
 
-    public MetricsCollector(PerfScope plugin) {
+    public MetricsCollector(PerfScope plugin, HistoryStore historyStore) {
         this.plugin = plugin;
         this.configManager = plugin.getConfigManager();
+        this.historyStore = historyStore;
         if (ServerCompat.PAPER_MSPT_AVAILABLE) {
             resolvePaperMSPT();
         }
@@ -225,6 +234,10 @@ public class MetricsCollector {
         while (history.size() > MAX_HISTORY) {
             history.pollFirst();
         }
+
+        // Wave 7A：历史环形缓冲挂点（契约指定：history.addLast 之后）。内部自带
+        // enabled 门控 / TPS 不可用跳过 / 采样间隔节流，此处无条件调用即可
+        historyStore.record(snap);
     }
 
     /**
@@ -270,6 +283,7 @@ public class MetricsCollector {
         cachedTotalEntities = tmp.totalEntities;
         cachedEntitiesByType = tmp.entitiesByType;
         cachedEntitiesByWorld = tmp.entitiesByWorld;
+        cachedEntityAlerts = tmp.alerts;
         cachedEntityWarnings = tmp.activeWarnings;
         cachedEntityCriticals = tmp.activeCriticals;
     }
@@ -282,6 +296,7 @@ public class MetricsCollector {
         snap.totalEntities = cachedTotalEntities;
         snap.entitiesByType = cachedEntitiesByType;
         snap.entitiesByWorld = cachedEntitiesByWorld;
+        snap.alerts.addAll(cachedEntityAlerts);
         snap.activeWarnings.addAll(cachedEntityWarnings);
         snap.activeCriticals.addAll(cachedEntityCriticals);
     }
@@ -311,6 +326,7 @@ public class MetricsCollector {
         cachedTotalForceLoadedChunks = tmp.totalForceLoadedChunks;
         cachedChunksByWorld = tmp.chunksByWorld;
         cachedForceLoadedChunksByWorld = tmp.forceLoadedChunksByWorld;
+        cachedChunkAlerts = tmp.alerts;
         cachedChunkWarnings = tmp.activeWarnings;
         cachedChunkCriticals = tmp.activeCriticals;
     }
@@ -324,6 +340,7 @@ public class MetricsCollector {
         snap.totalForceLoadedChunks = cachedTotalForceLoadedChunks;
         snap.chunksByWorld = cachedChunksByWorld;
         snap.forceLoadedChunksByWorld = cachedForceLoadedChunksByWorld;
+        snap.alerts.addAll(cachedChunkAlerts);
         snap.activeWarnings.addAll(cachedChunkWarnings);
         snap.activeCriticals.addAll(cachedChunkCriticals);
     }
@@ -401,8 +418,10 @@ public class MetricsCollector {
         // 服务器信息 - JVM 部分（运行时长 / 线程数）
         snap.uptimeSeconds = jvm.uptimeSeconds;
         snap.threadCount = jvm.threadCount;
-        // JVM 模块的不可用标记与告警一并并入当前快照（内存/CPU 的阈值告警在采集时已生成）
+        // JVM 模块的不可用标记与告警一并并入当前快照（内存/CPU 的阈值告警在采集时已生成；
+        // Wave 7B/7C：结构化 alerts 与派生字符串列表同步传递）
         snap.unavailable.addAll(jvm.unavailable);
+        snap.alerts.addAll(jvm.alerts);
         snap.activeWarnings.addAll(jvm.activeWarnings);
         snap.activeCriticals.addAll(jvm.activeCriticals);
     }
@@ -445,9 +464,11 @@ public class MetricsCollector {
         snap.tps15m = round2(tps[2]);
 
         if (snap.tps1m < cfg.tps_criticalThreshold) {
-            snap.activeCriticals.add("TPS 严重偏低: " + snap.tps1m);
+            addAlert(snap, Alert.of("tps:global", Alert.LEVEL_CRITICAL,
+                "TPS 严重偏低: " + snap.tps1m, MetricsSnapshot.MODULE_TPS, snap.timestamp));
         } else if (snap.tps1m < cfg.tps_warningThreshold) {
-            snap.activeWarnings.add("TPS 偏低: " + snap.tps1m);
+            addAlert(snap, Alert.of("tps:global", Alert.LEVEL_WARNING,
+                "TPS 偏低: " + snap.tps1m, MetricsSnapshot.MODULE_TPS, snap.timestamp));
         }
     }
 
@@ -470,9 +491,11 @@ public class MetricsCollector {
         }
 
         if (snap.msptAvg > 0 && snap.msptAvg > cfg.mspt_criticalThreshold) {
-            snap.activeCriticals.add("MSPT 严重偏高: " + snap.msptAvg + "ms");
+            addAlert(snap, Alert.of("mspt:global", Alert.LEVEL_CRITICAL,
+                "MSPT 严重偏高: " + snap.msptAvg + "ms", MetricsSnapshot.MODULE_MSPT, snap.timestamp));
         } else if (snap.msptAvg > 0 && snap.msptAvg > cfg.mspt_warningThreshold) {
-            snap.activeWarnings.add("MSPT 偏高: " + snap.msptAvg + "ms");
+            addAlert(snap, Alert.of("mspt:global", Alert.LEVEL_WARNING,
+                "MSPT 偏高: " + snap.msptAvg + "ms", MetricsSnapshot.MODULE_MSPT, snap.timestamp));
         }
     }
 
@@ -558,9 +581,13 @@ public class MetricsCollector {
         // P0-13：maxPlayers<=0（代理/精简端）时不做除法，避免 Infinity 强转为 Integer.MAX_VALUE 误报
         int pct = snap.maxPlayers > 0 ? (int) ((double) snap.playerCount / snap.maxPlayers * 100) : 0;
         if (pct >= cfg.players_criticalThreshold) {
-            snap.activeCriticals.add("玩家数接近上限: " + snap.playerCount + "/" + snap.maxPlayers);
+            addAlert(snap, Alert.of("players:global", Alert.LEVEL_CRITICAL,
+                "玩家数接近上限: " + snap.playerCount + "/" + snap.maxPlayers,
+                MetricsSnapshot.MODULE_PLAYERS, snap.timestamp));
         } else if (pct >= cfg.players_warningThreshold) {
-            snap.activeWarnings.add("玩家数较多: " + snap.playerCount + "/" + snap.maxPlayers);
+            addAlert(snap, Alert.of("players:global", Alert.LEVEL_WARNING,
+                "玩家数较多: " + snap.playerCount + "/" + snap.maxPlayers,
+                MetricsSnapshot.MODULE_PLAYERS, snap.timestamp));
         }
     }
 
@@ -597,17 +624,23 @@ public class MetricsCollector {
                 continue; // 无覆盖的世界不单独判定，由下方总数判定覆盖
             }
             if (entry.getValue() > ws.entities_totalCriticalThreshold) {
-                snap.activeCriticals.add("世界 " + entry.getKey() + " 实体数严重超标: " + entry.getValue());
+                addAlert(snap, Alert.of("entities:world:" + entry.getKey(), Alert.LEVEL_CRITICAL,
+                    "世界 " + entry.getKey() + " 实体数严重超标: " + entry.getValue(),
+                    MetricsSnapshot.MODULE_ENTITIES, snap.timestamp));
             } else if (entry.getValue() > ws.entities_totalWarningThreshold) {
-                snap.activeWarnings.add("世界 " + entry.getKey() + " 实体数较多: " + entry.getValue());
+                addAlert(snap, Alert.of("entities:world:" + entry.getKey(), Alert.LEVEL_WARNING,
+                    "世界 " + entry.getKey() + " 实体数较多: " + entry.getValue(),
+                    MetricsSnapshot.MODULE_ENTITIES, snap.timestamp));
             }
         }
 
         // 全服总数判定（与命令层 /ps entities 的总数口径一致）
         if (snap.totalEntities > cfg.entities_totalCriticalThreshold) {
-            snap.activeCriticals.add("实体总数严重超标: " + snap.totalEntities);
+            addAlert(snap, Alert.of("entities:global", Alert.LEVEL_CRITICAL,
+                "实体总数严重超标: " + snap.totalEntities, MetricsSnapshot.MODULE_ENTITIES, snap.timestamp));
         } else if (snap.totalEntities > cfg.entities_totalWarningThreshold) {
-            snap.activeWarnings.add("实体总数较多: " + snap.totalEntities);
+            addAlert(snap, Alert.of("entities:global", Alert.LEVEL_WARNING,
+                "实体总数较多: " + snap.totalEntities, MetricsSnapshot.MODULE_ENTITIES, snap.timestamp));
         }
     }
 
@@ -642,9 +675,13 @@ public class MetricsCollector {
 
         for (Map.Entry<String, Integer> entry : byWorld.entrySet()) {
             if (entry.getValue() > cfg.chunks_loadedCriticalThreshold) {
-                snap.activeCriticals.add("世界 " + entry.getKey() + " 加载区块数严重超标: " + entry.getValue());
+                addAlert(snap, Alert.of("chunks:world:" + entry.getKey(), Alert.LEVEL_CRITICAL,
+                    "世界 " + entry.getKey() + " 加载区块数严重超标: " + entry.getValue(),
+                    MetricsSnapshot.MODULE_CHUNKS, snap.timestamp));
             } else if (entry.getValue() > cfg.chunks_loadedWarningThreshold) {
-                snap.activeWarnings.add("世界 " + entry.getKey() + " 加载区块数较多: " + entry.getValue());
+                addAlert(snap, Alert.of("chunks:world:" + entry.getKey(), Alert.LEVEL_WARNING,
+                    "世界 " + entry.getKey() + " 加载区块数较多: " + entry.getValue(),
+                    MetricsSnapshot.MODULE_CHUNKS, snap.timestamp));
             }
         }
     }
@@ -664,9 +701,11 @@ public class MetricsCollector {
         snap.nonHeapMax = memoryMXBean.getNonHeapMemoryUsage().getMax();
 
         if (snap.heapUsagePercent >= cfg.memory_heapCriticalThreshold) {
-            snap.activeCriticals.add("堆内存使用率严重偏高: " + snap.heapUsagePercent + "%");
+            addAlert(snap, Alert.of("memory:global", Alert.LEVEL_CRITICAL,
+                "堆内存使用率严重偏高: " + snap.heapUsagePercent + "%", MetricsSnapshot.MODULE_MEMORY, snap.timestamp));
         } else if (snap.heapUsagePercent >= cfg.memory_heapWarningThreshold) {
-            snap.activeWarnings.add("堆内存使用率偏高: " + snap.heapUsagePercent + "%");
+            addAlert(snap, Alert.of("memory:global", Alert.LEVEL_WARNING,
+                "堆内存使用率偏高: " + snap.heapUsagePercent + "%", MetricsSnapshot.MODULE_MEMORY, snap.timestamp));
         }
     }
 
@@ -685,10 +724,12 @@ public class MetricsCollector {
 
             // 哨兵 -1 不参与告警判定
             if (snap.processCpuLoad > 0 && snap.processCpuLoad > cfg.cpu_processWarningThreshold) {
-                snap.activeWarnings.add("进程CPU使用率偏高: " + snap.processCpuLoad + "%");
+                addAlert(snap, Alert.of("cpu:process", Alert.LEVEL_WARNING,
+                    "进程CPU使用率偏高: " + snap.processCpuLoad + "%", MetricsSnapshot.MODULE_CPU, snap.timestamp));
             }
             if (snap.systemCpuLoad > 0 && snap.systemCpuLoad > cfg.cpu_systemWarningThreshold) {
-                snap.activeWarnings.add("系统CPU负载偏高: " + snap.systemCpuLoad + "%");
+                addAlert(snap, Alert.of("cpu:system", Alert.LEVEL_WARNING,
+                    "系统CPU负载偏高: " + snap.systemCpuLoad + "%", MetricsSnapshot.MODULE_CPU, snap.timestamp));
             }
         } else {
             // 非 sun.* MXBean：无 CPU 数据，显式置 -1（避免默认 0 误导）
@@ -803,6 +844,22 @@ public class MetricsCollector {
     }
 
     // ==================== 工具方法 ====================
+
+    /**
+     * Wave 7B/7C：结构化告警统一入口——同一条 {@link Alert} 同步写入 {@code snap.alerts}
+     * （结构化真相源）与对应级别的派生字符串列表（activeCriticals / activeWarnings，
+     * 命令层 /ps 活跃告警区、报告三格式、JSON alerts.* 零改动）。key/module/display 由
+     * {@link Alert#of} 构造时确定。⚠️ 所有告警生成点必须经此方法，禁止单独往字符串列表
+     * add（会漏掉结构化副本，告警服务将看不到该条）。
+     */
+    private void addAlert(MetricsSnapshot snap, Alert alert) {
+        snap.alerts.add(alert);
+        if (alert.critical()) {
+            snap.activeCriticals.add(alert.message());
+        } else {
+            snap.activeWarnings.add(alert.message());
+        }
+    }
 
     private double round2(double value) {
         return Math.round(value * 100.0) / 100.0;

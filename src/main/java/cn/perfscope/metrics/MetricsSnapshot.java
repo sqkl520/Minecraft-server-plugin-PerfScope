@@ -17,6 +17,8 @@
  */
 package cn.perfscope.metrics;
 
+import cn.perfscope.alert.Alert;
+
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -82,6 +84,10 @@ public class MetricsSnapshot {
     public int worldCount;
 
     // === 告警信息 ===
+    // Wave 7B/7C：alerts 为结构化真相源（key/level/message/display/module/timestamp）；
+    // activeWarnings/activeCriticals 保留但其为"派生"——由采集层经 addAlert(snap, alert) 在构造
+    // Alert 后同步 add 相同文案（命令层 /ps 活跃告警区、报告三格式、JSON alerts.* 全部零改动）。
+    public List<Alert> alerts = new ArrayList<>();
     public List<String> activeWarnings = new ArrayList<>();
     public List<String> activeCriticals = new ArrayList<>();
 
