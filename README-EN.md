@@ -22,6 +22,9 @@ A comprehensive performance monitoring plugin for Minecraft servers, focused on 
 - **Auto Report Generation** —— Configurable interval, async generation without blocking main thread, auto cleanup by retention days
 - **Per-World Independent Alerts** —— Override entity alert thresholds per world
 - **Threshold Alert Push** (new in v1.1, converged in v1.2) —— When an alert fires, pushes to the console + online players holding the `perfscope.alert` permission; by default an alert must stay over-threshold for 3 consecutive collection cycles before the first push (debounce, configurable); the same alert has a default 300-second cooldown to prevent spam; level upgrades (warning→critical) send a single "（级别升级）" message bypassing the cooldown; a recovery notice is sent when the issue clears; configurable in the `alerts` section of `config.yml`
+- **Webhook Push** (new in v1.2) —— Alerts / recoveries / daily summaries can be pushed to a Discord webhook or QQ OneBot, so the owner is reachable even when offline; sent fully asynchronously, failures are logged without blocking
+- **Daily Summary** (new in v1.2) —— A 3-line digest at a fixed time each day: lowest TPS (with time) / peak entities & heap / alert statistics; if the server happens to be down at the configured time, one catch-up summary is sent after startup
+- **History Summary** (new in v1.2) —— `/perfscope history` shows the last ~24 hours: coverage, lowest TPS with its timestamp, peak entities, peak heap — answering "when did it start getting worse"
 - **Color-Coded UI** —— Rendered via Paper Adventure API, key metrics colored by level (green/yellow/red) based on the `config.yml` alert thresholds; display and alerts share one source of truth, and colors follow immediately after a config reload
 
 ## Target Platform & Compatibility
@@ -49,6 +52,7 @@ Since v1.1, PerfScope focuses on the **Paper family** of servers and relies heav
 | `/perfscope redstone` | Redstone activity (discontinued in v1.1) |
 | `/perfscope tileentities` | Tile Entity statistics |
 | `/perfscope uptime` | Uptime + JVM info |
+| `/perfscope history` | History summary (last ~24h: lowest TPS / peak entities / peak heap) |
 | `/perfscope gc` | GC statistics (per-collector details) |
 | `/perfscope report [format]` | Export performance report (html/txt/json) |
 | `/perfscope monitor` | Toggle ActionBar live monitor |
@@ -156,6 +160,17 @@ alerts:
   cooldown-seconds: 300     # Cooldown per alert in seconds (0 = no cooldown, still throttled by the collection cycle)
   notify-recovery: true     # Recovery notice (sent when an alert clears)
   debounce-cycles: 3        # Debounce: N consecutive over-threshold cycles before the first push (1 = push immediately)
+  daily-summary:
+    enabled: false          # Daily summary switch
+    time: "08:00"           # Daily summary time (local HH:mm)
+  webhook:
+    enabled: false          # Webhook push switch (alerts/recoveries/daily summary)
+    type: discord           # discord | onebot (QQ)
+    url: ""                 # discord: https://discord.com/api/webhooks/... ; onebot: http://127.0.0.1:3000/send_private_msg?...
+
+history:
+  enabled: true
+  sample-interval-seconds: 60   # History sampling interval (s); ring covers about 24 hours
 
 # Per-world overrides
 worlds:
@@ -197,7 +212,7 @@ See `plugins/PerfScope/config.yml` for complete configuration details.
 An honest scope statement — the following are things this plugin does **not** do; pair it with other tools as needed:
 
 1. **No root-cause profiling** —— It narrows down *which* metric is abnormal (a suspect range), but does not produce method-level flame graphs; use `/spark profiler` to actually locate the cause of lag.
-2. **No historical persistence** —— The current version keeps only in-memory real-time snapshots and a limited sampling window; nothing is written to disk for trend analysis. Questions like "was the server laggy last night" or week-over-week trends cannot be answered.
+2. **No persistent history** —— History lives only in an in-memory ring buffer (~24 hours, queryable via `/perfscope history`) and **is cleared on restart**; nothing is written to disk, and there are no weekly/monthly trends. For long-term retention, export reports periodically or hook up an external monitoring stack.
 3. **Limited MSPT spike-detection window** —— Values come from Paper `getTickTimes()`, a rolling window (roughly the last 100 ticks); a spike that already scrolled out of the window may not be reflected, so "did it just lag?" is not always answerable.
 4. **No automatic remediation** —— The plugin only observes, alerts and exports reports; it never performs any intervention on its own (no restarts, no entity cleanup, no config changes).
 5. **Alerts are debounced** —— By default an alert needs 3 consecutive over-threshold collection cycles before it is pushed (`alerts.debounce-cycles`, configurable), adding up to ~3× the collection interval (about 3 seconds by default) of latency; a deliberate trade to suppress threshold-flicker noise — set `debounce-cycles` to 1 if you need instant delivery.

@@ -22,6 +22,9 @@
 - **自动报告生成** —— 可配置间隔，异步生成不阻塞主线程，旧报告自动按保留天数清理
 - **按世界独立告警** —— 各世界可覆盖实体告警阈值
 - **阈值告警主动推送**（v1.1 新增，v1.2 收敛） —— 告警触发时推送控制台 + 在线持有 `perfscope.alert` 权限的玩家；默认需连续 3 个采集周期超标才首次推送（防抖，可配）；同一告警默认 300 秒冷却防刷屏；级别升级（警告→严重）只推一条"（级别升级）"消息、不受冷却限制；故障恢复时发送恢复通知；可在 `config.yml` 的 `alerts` 段配置
+- **Webhook 推送**（v1.2 新增） —— 告警 / 恢复 / 每日摘要可推送到 Discord webhook 或 QQ OneBot，服主不在线也能收到；全异步发送，失败只记日志不阻塞
+- **每日摘要**（v1.2 新增） —— 每天固定时刻推送 3 行概况：最低 TPS（含时刻）/ 峰值实体与内存 / 告警统计；若配置时刻服务端恰好停机，启动后会自动补发当天一次
+- **历史摘要**（v1.2 新增） —— `/perfscope history` 查看近 24 小时概况：覆盖时长、最低 TPS 与发生时刻、峰值实体、峰值内存，回答"什么时候开始变差的"
 - **彩色 UI 面板** —— 使用 Paper Adventure API 渲染，关键指标按 `config.yml` 告警阈值分级着色（绿/黄/红）；显示与告警同一口径，改配置 reload 后颜色立即跟随
 
 ## 目标平台与兼容性
@@ -49,6 +52,7 @@ PerfScope 自 v1.1 起专注 **Paper 系**服务端，深度依赖 Paper 原生 
 | `/perfscope redstone` | 红石活动（v1.1 已下线） |
 | `/perfscope tileentities` | Tile Entity 统计 |
 | `/perfscope uptime` | 运行时间 + JVM 信息 |
+| `/perfscope history` | 历史摘要（近 24 小时：最低 TPS / 峰值实体 / 峰值内存） |
 | `/perfscope gc` | GC 统计（各收集器详情） |
 | `/perfscope report [格式]` | 导出性能报告（html/txt/json） |
 | `/perfscope monitor` | 切换 ActionBar 实时监测 |
@@ -156,6 +160,17 @@ alerts:
   cooldown-seconds: 300     # 同一告警的冷却秒数 (0 = 无冷却，仍受采集周期节流)
   notify-recovery: true     # 恢复通知 (告警消失时推送恢复消息)
   debounce-cycles: 3        # 防抖：连续 N 个采集周期超标才首次推送 (1 = 首次出现即推)
+  daily-summary:
+    enabled: false          # 每日摘要开关
+    time: "08:00"           # 每日摘要时刻 (本地时区 HH:mm)
+  webhook:
+    enabled: false          # webhook 推送开关 (告警/恢复/日摘要)
+    type: discord           # discord | onebot (QQ)
+    url: ""                 # discord: https://discord.com/api/webhooks/... ；onebot: http://127.0.0.1:3000/send_private_msg?...
+
+history:
+  enabled: true
+  sample-interval-seconds: 60   # 历史采样间隔 (秒)，环形容量约覆盖 24 小时
 
 # 各世界独立设置
 worlds:
@@ -197,7 +212,7 @@ worlds:
 诚实划界——以下事情本插件**不**做，请按需搭配其他工具：
 
 1. **不做根因定位** —— 本插件给出"哪块指标异常"的嫌疑范围，不做方法级火焰图剖析；真正定位卡顿根因请用 `/spark profiler`。
-2. **不做历史持久化** —— 当前版本只有内存内实时快照与有限采样窗口，不落盘趋势数据；因此回答不了"昨晚卡不卡""上周以来的趋势"这类回溯性问题。
+2. **不做历史持久化** —— 历史仅保存在内存环形缓冲中（约 24 小时窗口，`/perfscope history` 可查），**重启即清空**；不落盘、不做周级/月级趋势。需要长期留存请自行定时导出报告或接入外部监控。
 3. **MSPT 尖刺检测窗口有限** —— 底层取自 Paper `getTickTimes()` 的滚动窗口（约最近 100 tick）；若尖刺发生在窗口之外，"刚才卡了吗"不一定会如实反映。
 4. **不做任何自动处置** —— 本插件只观测、告警与出报告，不会自动执行任何干预动作（不重启、不清理实体、不改配置）。
 5. **告警有防抖延迟** —— 告警默认需连续 3 个采集周期超标才推送（`alerts.debounce-cycles` 可配），最长延迟约 3×采集间隔（默认约 3 秒）；这是为抑制阈值附近抖动噪音的有意取舍，要求秒级即时到达的场景可把 `debounce-cycles` 设为 1。

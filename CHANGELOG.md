@@ -3,9 +3,10 @@
 本项目：**PerfScope** —— Minecraft 服务器性能监测插件（Paper 1.20.4+ / Purpur / Pufferfish / Folia / Leaves，Java 17）。
 后台定时采集性能快照 → 游戏内 17 个子命令一屏诊断 → HTML/TXT/JSON 报告导出 → ActionBar 实时监测 → 阈值告警。
 
-> **仓库**：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope> ｜ **版本**：`1.1.0-SNAPSHOT`（开发中；pom.xml 尚未 bump，仍为 `1.0.0`）
+> **仓库**：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope> ｜ **版本**：`1.1.0`（2026-10-17 发布）
+> ｜ 下一个开发周期：`[Unreleased]`（v1.2 剩余项见 `docs/06-tasks/POST-CRITIQUE-FIX-PLAN.md` Wave 8）
 
-格式参照 [Keep a Changelog](https://keepachangelog.com/)。当前处于 **v1.1「止血与诚实」开发周期**，各段以 **Wave（开发波次）** 划分并标注对应提交哈希。
+格式参照 [Keep a Changelog](https://keepachangelog.com/)。v1.1「止血与诚实」开发周期已收尾，各段以 **Wave（开发波次）** 划分并标注对应提交哈希。
 
 > **★ 硬规则（项目约定）**：任何代码 / 配置 / 文档的更改，都必须记入本 CHANGELOG（在最上方按
 > Added / Changed / Fixed / Removed / Optimized / Refactored / Notes 分类追加）；**编译前先更新**。
@@ -17,6 +18,60 @@
 > `V1.3_ALERT_SPEC.md`（告警中心规格，30 个配置键）。
 > **审查报告**：`docs/01-reviews/`（15 份并行审查 + 总合成 `v11-review-SYNTHESIS.md`）。
 > **测试报告**：`docs/05-test-reports/`。
+
+---
+
+## [1.1.0] — 2026-10-17
+
+> **发布概要**（面向用户剪裁；逐波次开发流水见下方各段）：
+>
+> **本版是 v1.1 + v1.2 核心重构成果的合体发布**。要点：
+> - **致命修复**：v1.0.0 因 shade/relocate 破坏 Adventure 签名，**Paper 上任何命令都会 `NoSuchMethodError`**——已根治（发布门禁三重断言防止回归）。
+> - **从"看得见"到"找得到、记得住、喊得醒"**：MSPT 精确值、阈值配色读配置、`/perfscope history` 24 小时历史摘要、
+>   告警防抖与升级单通知、Discord / QQ OneBot webhook 推送、每日 3 行摘要（含补发语义）。
+> - **诚实化**：下线红石/网络假数据；不可用/预热/未知三态区分；「边界与不做什么」写入 README。
+> - **分发准备**：AGPL-3.0、CLA、bStats、发布冒烟门禁与 CI。
+> - **验证**：9 个 testharness 场景、**91 条真机断言全绿**（详见 `docs/07-guides/PERFSCOPE-TEST-REPORT.md`）。
+
+### Added
+
+- `/perfscope history`（别名 `hist`）：近 24 小时概况（覆盖时长 / 最低 TPS 与时刻 / 峰值实体 / 峰值内存）。
+- Discord / QQ OneBot webhook 推送（告警 / 恢复 / 每日摘要；全异步、失败仅记日志）。
+- 每日摘要：固定时刻 3 行概况，服务端停机错过也会在上线后补发一次。
+- 告警防抖（`alerts.debounce-cycles`，默认连续 3 周期）；级别升级只推一条"（级别升级）"通知。
+- 模块"预热中"状态（区别于真故障的"不可用"）；报告路径可点击复制。
+- CLA、贡献指南、PR 模板、发布检查清单、release-check 门禁脚本与 GitHub Actions 构建。
+- bStats 匿名统计接入（默认启用；当前 pluginId 占位 0，**不发送任何数据**）。
+
+### Changed
+
+- **行为变更·配色**：显示色阶改为读取 `config.yml` 告警阈值（原为内置常量），改配置 reload 后颜色立即跟随；
+  区块红界 1500→2500、CPU 不再有红档、报告内存界 70→80、MSPT 黄界 40→45。
+- **行为变更·默认阈值**：玩家数告警 80/95→**90/98**；堆内存告警 80/90→**85/95**（抑制"狼来了"式噪音）。
+- 调度层去除反射（编译期直连 Folia 调度 API），技术债务 `source/target` → `release`。
+- 双语 README 全面校准：monitor 定位为"诊断探针"、新增「边界与不做什么」、许可证表述修正。
+
+### Fixed
+
+- **P0-3**：Adventure relocate 导致所有命令 `NoSuchMethodError`（v1.0.0 起存在）。
+- **MC-1**：MSPT 精确采集反射链错误（探错类与方法名），Paper 上恒显示"(估算)"。
+- **A2**：monitor 假值（禁用模块显示绿色 0）、断线 NPE、无 try 边界。
+- **A3**：实体告警阈值三方语义错位（默认阈值实际永不触发）。
+- **A4**：reload 窗口误报"已恢复正常"（假恢复）。
+- **A5**：报告层禁用模块照显 0 / 趋势把不可用画成 TPS=0。
+- **A6**：`reports/` 清理会误删用户自建文件（数据安全）。
+- **A8**：阈值硬编码不读 config（19-21 处显示决策点与告警阈值两套口径）。
+- **A9**：reload 半途异常致采集停摆、interval≤0、阈值倒置零校验。
+- 世界参数大小写静默全 0、help 点击执行字面量、报告并发覆盖等 20+ 项。
+
+### Removed
+
+- 红石活动（空实现）与网络吞吐量（硬编码假数据）监测——`/perfscope redstone` 保留入口并提示已下线。
+
+### Notes
+
+- 见下方各 Wave 段的完整开发流水（含证据、验证与遗留项）。逐条溯源：`docs/01-reviews/`（15 份审查 +
+  4 份锐评 + 合成裁决）、`docs/06-tasks/`（路线图与修复计划）、`docs/07-guides/PERFSCOPE-TEST-REPORT.md`。
 
 ---
 
