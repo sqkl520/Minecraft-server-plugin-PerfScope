@@ -7,7 +7,9 @@
 
 | 版本 | 文件 | 说明 |
 |---|---|---|
-| **1.1.0** | `PerfScope-1.1.0.jar` | **推荐使用**。首个可用正式版（Wave 1–7：15 个 P0 修复 + 审查加固 + v1.2 核心重构）。
+| **1.2.0** | `PerfScope-1.2.0.jar` | **推荐使用**。智能诊断 + 热点定位 + 跨重启历史 + 消息层（Wave 8）。
+GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.2.0> |
+| 1.1.0 | `PerfScope-1.1.0.jar` | 上一版。v1.1 修复 + v1.2 核心重构（Wave 1–7）。
 GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.1.0> |
 | 1.0.0 | `PerfScope-1.0.0.jar` | ⚠️ **不可用**构建（见下），仅存档。 |
 
@@ -30,6 +32,7 @@ This directory holds **local** build artifacts; JARs are not tracked by git (exc
 `.gitignore`, with this `README.md` as the only exception). Use GitHub Releases for official
 downloads.
 
-- **1.1.0** (`PerfScope-1.1.0.jar`) — the first usable release; use this one.
+- **1.2.0** (`PerfScope-1.2.0.jar`) — smart diagnosis + hotspot localization + cross-restart history + messages; use this one.
+- 1.1.0 (`PerfScope-1.1.0.jar`) — previous release (v1.1 fixes + v1.2 core refactor).
 - 1.0.0 (`PerfScope-1.0.0.jar`) — **known 100% broken** (shade/relocate → `NoSuchMethodError`
   on every command); archived for history only, do not use.
