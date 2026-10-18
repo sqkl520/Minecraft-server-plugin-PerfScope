@@ -104,7 +104,7 @@ GC: 42 次 / 5.23 秒
 
 ## 安装
 
-> **下载**：[GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest)（最新正式版 **v1.1.0**，`PerfScope-1.1.0.jar`）
+> **下载**：[GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest)（最新正式版 **v1.2.0**，`PerfScope-1.2.0.jar`）
 
 1. 下载最新版本的 JAR 文件
 2. 放入服务器的 `plugins/` 目录

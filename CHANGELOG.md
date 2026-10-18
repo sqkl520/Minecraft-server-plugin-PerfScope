@@ -3,10 +3,9 @@
 本项目：**PerfScope** —— Minecraft 服务器性能监测插件（Paper 1.20.4+ / Purpur / Pufferfish / Folia / Leaves，Java 17）。
 后台定时采集性能快照 → 游戏内 17 个子命令一屏诊断 → HTML/TXT/JSON 报告导出 → ActionBar 实时监测 → 阈值告警。
 
-> **仓库**：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope> ｜ **版本**：`1.1.0`（2026-10-17 发布）
-> ｜ 下一个开发周期：`[Unreleased]`（v1.2 剩余项见 `docs/06-tasks/POST-CRITIQUE-FIX-PLAN.md` Wave 8）
+> **仓库**：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope> ｜ **版本**：`1.2.0`（2026-10-19 发布）
 
-格式参照 [Keep a Changelog](https://keepachangelog.com/)。v1.1「止血与诚实」开发周期已收尾，各段以 **Wave（开发波次）** 划分并标注对应提交哈希。
+格式参照 [Keep a Changelog](https://keepachangelog.com/)。v1.2「找得到」开发周期已收尾，各段以 **Wave（开发波次）** 划分并标注对应提交哈希。
 
 > **★ 硬规则（项目约定）**：任何代码 / 配置 / 文档的更改，都必须记入本 CHANGELOG（在最上方按
 > Added / Changed / Fixed / Removed / Optimized / Refactored / Notes 分类追加）；**编译前先更新**。
@@ -21,7 +20,43 @@
 
 ---
 
-## [Unreleased] — Wave 8D「消息层（i18n 基础）」- 2026-10-19
+## [1.2.0] — 2026-10-19
+
+> **发布概要**（面向用户剪裁；逐波次开发流水见下方各段）：
+>
+> **本版主题「找得到」**：从"看得见的数字"升级为"定位到根因与坐标 + 记得住历史 + 触达离线的人"。
+> - **智能诊断**：`/perfscope diagnose` 规则引擎（首批 5 条高置信规则）给出结论 + 参数级建议；
+>   每条都带"证据不足不结论"路径——宁可不结论，不给错结论。
+> - **热点定位**：`/perfscope hotspot` 全服实体密度 Top3 区块 + 可点击坐标（直接喂 `/tp`）。
+> - **跨重启历史**：按天 CSV 持久化 + `/perfscope trend [天数]`——"昨晚卡不卡 / 上周以来"有数据可查。
+> - **文案可配置**：`messages.yml` 覆盖层（"喵"变可配置彩蛋，专业部署一键换中性文案）。
+> - **兼容矩阵实机化**：Folia / Purpur / Leaf / Leaves 四分支真实服务端验证（各 49 断言）。
+> - **验证**：14 个 testharness 场景、**全量回归全绿**（详见 `docs/07-guides/PERFSCOPE-TEST-REPORT.md`）。
+
+### Added
+
+- `/perfscope diagnose`：诊断引擎（DIAG-MEM-LEAK / DIAG-ENT-HOTSPOT / DIAG-TPS-PERSIST /
+  DIAG-PLAYER-CAP / DIAG-MSPT-SPIKE），输出含 `[ID]`、依据与 `建议:` 参数级行动；末行能力边界声明。
+- `/perfscope hotspot`（别名 `hs`）：实体密度 Top3（含玩家）+ 坐标可点击复制 + 主导类型占比。
+- `/perfscope trend [天数]`：跨重启趋势摘要（范围/来源/平均与最低 TPS/峰值内存/覆盖时段）。
+- `HistoryFileStore`：按天 CSV 持久化（重启不清零；损坏行容错；过期自动清理；零新依赖）。
+- `Messages` + `messages.yml`：消息层三级回退（内置默认/资源/用户覆盖），`喵` 类文案全部可配置。
+- 配置：`history.persist` / `history.retention-days` / `hotspots.enabled` / `hotspots.sample-every-cycles`。
+
+### Changed
+
+- **`diagnose` 别名拆分**：`diagnose` 从 `all` 别名改为诊断引擎入口；`diag` 保持全量诊断（兼容保留）。
+
+### Notes
+
+- 四分支（Folia/Purpur/Leaf/Leaves）与 LuckPerms 权限矩阵实机验证报告：
+  `docs/07-guides/COMPAT-MATRIX-VERIFICATION.md`。
+- 本版为 v1.2 的"找得到"批；剩余 backlog（37 条规则全文校准 / 诊断包导出 / 完整 P99 压测 /
+  其余文案增量迁移）等真实用户信号后推进（`docs/06-tasks/POST-CRITIQUE-FIX-PLAN.md`）。
+
+---
+
+## [1.2.0] — Wave 8D「消息层（i18n 基础）」- 2026-10-19
 
 > **主题：文案可配置**——"喵"不是删掉而是**做成可配置**（锐评 D 的语气裁决：萌系服主与专业受众
 > 都是真实受众，配置化是唯一的桥）。
@@ -47,7 +82,7 @@
 
 ---
 
-## [Unreleased] — Wave 8B「历史文件持久化 + 趋势」- 2026-10-19
+## [1.2.0] — Wave 8B「历史文件持久化 + 趋势」- 2026-10-19
 
 > **主题：重启不清零**——"昨晚卡不卡 / 上周以来的趋势"有数据可查。
 > 方案取舍（锐评 B 论点 8）：**不用 SQLite**（首个重量级运行时依赖 = v1.0.0 shade 事故同类土壤），
@@ -86,7 +121,7 @@
 
 ---
 
-## [Unreleased] — Wave 8A「智能诊断引擎（首批 5 条规则）」- 2026-10-19
+## [1.2.0] — Wave 8A「智能诊断引擎（首批 5 条规则）」- 2026-10-19
 
 > **主题：从"看得见"到"找得到"** —— `/perfscope diagnose` 运行规则引擎给出**结论 + 参数级建议**
 > （V1.2 规则表 37 条按锐评 B 论点 7 缩编为首批 5 条高置信规则；"规则即对象注册表"实现）。
@@ -124,7 +159,7 @@
 
 ---
 
-## [Unreleased] — Wave 8C「热点区块定位」- 2026-10-18
+## [1.2.0] — Wave 8C「热点区块定位」- 2026-10-18
 
 > **主题：把"哪类实体多"下钻到"去哪个坐标看看"**（V1.2 规则表 D-ENT-04 / §5 + `WAVE8C-DESIGN.md` 契约）。
 > 锐评 C 证据：LagTrace（0★）做过同方向没做成——执行质量即差异化；Wave 8 中不依赖真实信号的首选项。
@@ -211,7 +246,7 @@
 
 ---
 
-## [Unreleased] — Wave 7「v1.2 核心重构」- 2026-10-17
+## [1.1.0] — Wave 7「v1.2 核心重构」- 2026-10-17
 
 > **主题：从"看得见"到"记得住、喊得醒"**（`critique-SYNTHESIS.md` 第 2 层 + `WAVE7-DESIGN.md` 设计契约）。
 > 严格串行三批（文件重叠不可并发）：7A 历史环形缓冲 → 7B+7C 结构化 Alert + 告警收敛 → 7D 日摘要 + webhook。
@@ -278,7 +313,7 @@
 
 ---
 
-## [Unreleased] — Wave 6「分发准备」- 2026-10-17
+## [1.1.0] — Wave 6「分发准备」- 2026-10-17
 
 > **主题：上架前的地基**（`critique-SYNTHESIS.md` 第 1 层 + `POST-CRITIQUE-FIX-PLAN.md` Wave 6）。
 > 3 agent 并行（许可/文档 / 上架材料 / bStats+门禁）+ 编排者对外信息修正，编排者统一收口。
@@ -334,7 +369,7 @@
 
 ---
 
-## [Unreleased] — Wave 5「发布前加固」- 2026-10-16 ～ 10-17
+## [1.1.0] — Wave 5「发布前加固」- 2026-10-16 ～ 10-17
 
 > **主题：四路对抗性锐评后的发布前加固**（`docs/01-reviews/critique-SYNTHESIS.md` 裁决的第 0 层：
 > 发布前不写新功能，先把"可发布状态"备好）。4 个 agent 并行（文件互斥：调度层 / 配置文档 /
@@ -428,7 +463,7 @@
 
 ---
 
-## [Unreleased] — v1.2 前置：A8 阈值读配置 - 2026-10-14
+## [1.1.0] — v1.2 前置：A8 阈值读配置 - 2026-10-14
 
 > **主题：阈值/配色硬编码清零（A8）**。Wave 4 审查遗留欠账之一——「A8 阈值硬编码不读 config」
 > （当时刻意押后，避免与 15 项 S 级修复打架）——在本波清理：新增统一阈值色阶工具类
@@ -463,7 +498,7 @@
 
 ---
 
-## [Unreleased] — Wave 4 - 2026-10-12 ～ 10-14
+## [1.1.0] — Wave 4 - 2026-10-12 ～ 10-14
 
 > **主题：审查后修复**。v1.1 三个开发波次完成后，用 **15 个并行审查 agent** 做了一次全量体检
 > （累计下载 34+ 份真实服务端工件做字节码级实证），产出了 **1 项 P1 功能缺陷 + 5 类"安静的 bug"**
@@ -628,7 +663,7 @@
 
 ---
 
-## [Unreleased] — Wave 3 - 2026-10-12
+## [1.1.0] — Wave 3 - 2026-10-12
 
 > v1.1 最后一个开发波次（prd.json 的 P0-2 / P0-4）。P0-4 的 AlertService 只做**基础版**
 > （控制台 + OP 游戏内 + 冷却 + 恢复通知）；完整的告警中心（webhook / QQ OneBot / 连续 N 次防抖 /
@@ -698,7 +733,7 @@
 
 ---
 
-## [Unreleased] — Wave 2 - 2026-10-11 ～ 10-12
+## [1.1.0] — Wave 2 - 2026-10-11 ～ 10-12
 
 > 「止血」第二波：先把采集自身的性能与调度做扎实（P0-1 / P0-8），再用**反编译实证**修掉构建层的
 > 致命 bug 并顺势清理历史包袱（P0-3 / P0-15）。分两批开发、两批验收。
@@ -769,7 +804,7 @@
 
 ---
 
-## [Unreleased] — Wave 1 - 2026-10-11
+## [1.1.0] — Wave 1 - 2026-10-11
 
 > v1.1 第一波（prd.json 的 P0-5/6/7/9/10/11/12/13/14）。目标：**不崩、不假、不卡** —— 零新功能。
 > 流程：4 路并行开发（文件集互斥）→ 统一编译 → build/code/arch 三维测试 → 修复循环 → 提交 `d0aac58`。
@@ -830,7 +865,7 @@
 
 ---
 
-## [Unreleased] — 仓库整理与许可证迁移 - 2026-10-11
+## [1.1.0] — 仓库整理与许可证迁移 - 2026-10-11
 
 > 对齐 Hilltop Village 的两层工作区结构（**上级 = 管理目录，不入 git；内层 = 源码目录，入 git**），
 > 把仓库从"什么都往里塞"整理为干净的入库清单；同期完成 GPL-3.0 → AGPL-3.0 迁移。
