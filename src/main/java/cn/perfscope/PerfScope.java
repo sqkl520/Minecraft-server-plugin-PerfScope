@@ -29,6 +29,7 @@ import cn.perfscope.history.HistoryFileStore;
 import cn.perfscope.history.HistoryStore;
 import cn.perfscope.metrics.MetricsCollector;
 import cn.perfscope.report.ReportGenerator;
+import cn.perfscope.util.Messages;
 import org.bstats.bukkit.Metrics;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -66,6 +67,10 @@ public final class PerfScope extends JavaPlugin {
         // 初始化配置
         this.configManager = new ConfigManager(this);
         configManager.load();
+
+        // Wave 8D：消息层（messages.yml 覆盖 + 内置默认回退）
+        Messages.saveDefault(this);
+        Messages.load(this);
 
         // 初始化历史环形缓冲（Wave 7A）：由本类持有（非采集器），reload/采集重启不丢历史；
         // 采集器构造时注入引用，collectSync 末尾按节流间隔入环
@@ -131,7 +136,7 @@ public final class PerfScope extends JavaPlugin {
         startBstats();
 
         getLogger().info("========================================");
-        getLogger().info("  PerfScope 启动完成喵~");
+        getLogger().info(Messages.get("startup-done"));
         getLogger().info("========================================");
     }
 
@@ -147,7 +152,7 @@ public final class PerfScope extends JavaPlugin {
         // P0-4：先停告警服务，再停采集（避免告警定时器读到已停采集的旧快照）
         stopAlertService();
         stopCollectionTasks();
-        getLogger().info("PerfScope 已关闭，再见喵~");
+        getLogger().info(Messages.get("shutdown-bye"));
         instance = null;
     }
 
@@ -288,6 +293,8 @@ public final class PerfScope extends JavaPlugin {
             getLogger().severe("[PerfScope] 配置加载失败，将按旧配置继续运行: " + e.getMessage());
             getLogger().log(java.util.logging.Level.SEVERE, "[PerfScope] 配置加载异常堆栈", e);
         }
+        Messages.load(this); // Wave 8D：消息层随 reload 刷新（缺失/损坏自动回退默认）
+
         // 无论 load 成败，任务必须重建：绝不允许"采集停了不重建"的半途冻结态
         startCollectionTasks();
         startAlertService();

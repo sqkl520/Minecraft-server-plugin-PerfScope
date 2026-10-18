@@ -1,0 +1,31 @@
+# ==========================================
+# PerfScope - 消息文案（Wave 8D）
+# ==========================================
+#
+# 本文件可覆盖插件的用户可见文案。缺键自动回退内置默认，无需保留全部键。
+#
+# 用法示例（专业部署可去除口癖）：
+#   no-permission: "You do not have permission to use this command"
+#   reloaded: "Configuration reloaded"
+#   monitor-on: "Live monitor enabled (use /perfscope monitor to stop)"
+#
+# 改动后执行 /perfscope reload 生效。
+
+# 权限与守卫
+no-permission: "你没有权限使用此指令喵"
+no-permission-export: "没有导出报告权限喵"
+no-permission-reload: "没有重载配置权限喵"
+player-only: "此功能仅玩家可用喵"
+monitor-needs-paper: "实时监测功能需要 Paper 服务端支持 ActionBar 喵"
+
+# 操作反馈
+reloaded: "配置已重载喵~"
+reload-failed-old-config: "PerfScope 配置重载未完成（已按旧配置重启采集/告警）"
+report-generated: "报告已生成: "
+report-failed: "报告生成失败喵"
+monitor-on: "实时监测已开启喵~ 使用 /perfscope monitor 关闭"
+monitor-off: "实时监测已关闭喵~"
+
+# 启动/关闭横幅（控制台日志）
+startup-done: "  PerfScope 启动完成喵~"
+shutdown-bye: "PerfScope 已关闭，再见喵~"

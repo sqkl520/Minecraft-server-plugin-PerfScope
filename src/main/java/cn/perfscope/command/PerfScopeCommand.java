@@ -29,6 +29,7 @@ import cn.perfscope.metrics.ChunkHotspot;
 import cn.perfscope.metrics.MetricsCollector;
 import cn.perfscope.metrics.MetricsSnapshot;
 import cn.perfscope.report.ReportGenerator;
+import cn.perfscope.util.Messages;
 import cn.perfscope.util.ThresholdColors;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
@@ -101,7 +102,7 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
     public boolean onCommand(@NotNull CommandSender sender, @NotNull Command cmd,
                              @NotNull String label, @NotNull String[] args) {
         if (!sender.hasPermission("perfscope.use")) {
-            sender.sendMessage(Component.text("你没有权限使用此指令喵", RED));
+            sender.sendMessage(Component.text(Messages.get("no-permission"), RED));
             return true;
         }
 
@@ -1103,7 +1104,7 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
     private void handleReport(CommandSender sender, String[] args) {
         // P0-10：admin || 专项（children 兜底 + 显式检查，双保险）
         if (!sender.hasPermission("perfscope.admin") && !sender.hasPermission("perfscope.export")) {
-            sender.sendMessage(Component.text("没有导出报告权限喵", RED));
+            sender.sendMessage(Component.text(Messages.get("no-permission-export"), RED));
             return;
         }
         String path = args.length > 1 ? reportGen.generateSpecific(args[1]) : reportGen.generateAndSave();
@@ -1120,7 +1121,7 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 sender.sendMessage(Component.text("报告已生成: " + path, GREEN));
             }
         } else {
-            sender.sendMessage(Component.text("报告生成失败喵", RED));
+            sender.sendMessage(Component.text(Messages.get("report-failed"), RED));
         }
     }
 
@@ -1129,36 +1130,36 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
     private void handleReload(CommandSender sender) {
         // P0-10：admin || 专项
         if (!sender.hasPermission("perfscope.admin") && !sender.hasPermission("perfscope.reload")) {
-            sender.sendMessage(Component.text("没有重载配置权限喵", RED));
+            sender.sendMessage(Component.text(Messages.get("no-permission-reload"), RED));
             return;
         }
         plugin.reload();
-        sender.sendMessage(Component.text("配置已重载喵~", GREEN));
+        sender.sendMessage(Component.text(Messages.get("reloaded"), GREEN));
     }
 
     // ==================== 实时监测 ====================
 
     private void toggleMonitor(CommandSender sender) {
         if (!(sender instanceof Player player)) {
-            sender.sendMessage(Component.text("此功能仅玩家可用喵", YELLOW));
+            sender.sendMessage(Component.text(Messages.get("player-only"), YELLOW));
             return;
         }
 
         if (!ServerCompat.PAPER_ACTION_BAR_AVAILABLE) {
-            player.sendMessage(Component.text("实时监测功能需要 Paper 服务端支持 ActionBar 喵", YELLOW));
+            player.sendMessage(Component.text(Messages.get("monitor-needs-paper"), YELLOW));
             return;
         }
 
         if (monitoringPlayers.contains(player.getUniqueId())) {
             monitoringPlayers.remove(player.getUniqueId());
-            player.sendMessage(Component.text("实时监测已关闭喵~", GREEN));
+            player.sendMessage(Component.text(Messages.get("monitor-off"), GREEN));
             if (monitoringPlayers.isEmpty() && monitorTask != null) {
                 monitorTask.cancel();
                 monitorTask = null;
             }
         } else {
             monitoringPlayers.add(player.getUniqueId());
-            player.sendMessage(Component.text("实时监测已开启喵~ 使用 /perfscope monitor 关闭", GREEN));
+            player.sendMessage(Component.text(Messages.get("monitor-on"), GREEN));
             if (monitorTask == null) {
                 startMonitorTask();
             }
