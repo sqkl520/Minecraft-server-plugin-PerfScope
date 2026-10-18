@@ -68,6 +68,9 @@ public final class HistoryStore {
     /** 环形缓冲，迭代序旧→新（ArrayDeque）；全部访问经 this 锁。 */
     private final Deque<HistorySample> ring = new ArrayDeque<>();
 
+    /** Wave 8B：文件持久化出口（可空 = 不持久化；由 PerfScope 装配）。 */
+    private volatile HistoryFileStore fileStore;
+
     /** 上次实际入环时刻（节流基准）；0 = 从未采样（epoch ms 运行时恒 &gt; 0，首次 record 必然放行；
      *  不可用 Long.MIN_VALUE 作哨兵——{@code now - Long.MIN_VALUE} 溢出为负会令首次采样被误节流）。 */
     private long lastRecordMs = 0L;
@@ -115,6 +118,17 @@ public final class HistoryStore {
                 ring.pollFirst();
             }
         }
+        // Wave 8B：文件持久化（锁外执行——IO 不占环锁；HistoryFileStore 内部自兜底限频，
+        // 失败绝不影响内存环与采集主流程；persist=false 时 append 内部直接返回）
+        HistoryFileStore fs = fileStore;
+        if (fs != null) {
+            fs.append(sample);
+        }
+    }
+
+    /** Wave 8B：装配文件持久化出口（PerfScope 在构造时/装配期调用；null 安全）。 */
+    public void setFileStore(HistoryFileStore fileStore) {
+        this.fileStore = fileStore;
     }
 
     /** 全部样本（旧→新，不可变副本）；history.enabled=false 时返回空列表。 */

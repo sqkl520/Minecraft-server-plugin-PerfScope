@@ -122,6 +122,9 @@ public class ConfigManager {
         // === 历史采样（Wave 7A：24h 环形缓冲；重启清零，文件持久化规划于 Wave 8B） ===
         fresh.history_enabled = yaml.getBoolean("history.enabled", true);
         fresh.history_sampleIntervalSeconds = yaml.getInt("history.sample-interval-seconds", 60);
+        // Wave 8B：文件持久化（按天 CSV；重启不清零）
+        fresh.history_persistEnabled = yaml.getBoolean("history.persist", true);
+        fresh.history_persistRetentionDays = yaml.getInt("history.retention-days", 7);
 
         // === 热点区块（Wave 8C：全服实体密度 Top5 的坐标定位；全遍历按周期节流） ===
         fresh.hotspots_enabled = yaml.getBoolean("hotspots.enabled", true);
@@ -261,6 +264,13 @@ public class ConfigManager {
             plugin.getLogger().warning("[PerfScope] 配置校验：history.sample-interval-seconds="
                 + cfg.history_sampleIntervalSeconds + " 非法（需 ≥1），已按 60 秒处理");
             cfg.history_sampleIntervalSeconds = 60;
+        }
+
+        // === history.retention-days：非法值（≤0）钳到 7 并 warning（Wave 8B，与全仓 clamp 口径一致） ===
+        if (cfg.history_persistRetentionDays <= 0) {
+            plugin.getLogger().warning("[PerfScope] 配置校验：history.retention-days="
+                + cfg.history_persistRetentionDays + " 非法（需 ≥1），已按 7 天处理");
+            cfg.history_persistRetentionDays = 7;
         }
 
         // === hotspots.sample-every-cycles：非法值（≤0）钳到 30 并 warning（Wave 8C，与全仓 clamp 口径一致） ===
@@ -406,6 +416,10 @@ public class ConfigManager {
         public boolean history_enabled;
         /** 历史采样节流间隔秒数（history.sample-interval-seconds，缺键默认 60；非法值 ≤0 钳到 60）。 */
         public int history_sampleIntervalSeconds;
+        /** Wave 8B：历史文件持久化开关（history.persist，缺键默认 true；false 时仅内存环、不落盘）。 */
+        public boolean history_persistEnabled;
+        /** Wave 8B：历史文件保留天数（history.retention-days，缺键默认 7；非法值 ≤0 钳到 7）。 */
+        public int history_persistRetentionDays;
 
         // 热点区块（Wave 8C）
         /** 热点区块总开关（hotspots.enabled，缺键默认 true；false 时模块标记不可用、命令显示"暂无热点数据"）。 */

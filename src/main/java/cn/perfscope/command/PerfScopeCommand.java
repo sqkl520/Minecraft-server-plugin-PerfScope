@@ -156,6 +156,10 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             case "history": case "hist":
                 showHistory(sender);
                 break;
+            case "trend":
+                // Wave 8B：跨重启历史趋势（读文件持久化，含内存环）
+                showTrend(sender, args);
+                break;
             case "hotspot": case "hs":
                 showHotspots(sender);
                 break;
@@ -925,6 +929,94 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             + " 条高置信规则，方法级深挖请用 /spark profiler", GRAY));
     }
 
+    // ==================== Wave 8B：趋势（跨重启历史） ====================
+
+    /**
+     * 历史趋势（Wave 8B）：读文件持久化 + 内存环的合并样本，输出跨重启可查的统计。
+     *
+     * <p>用法：{@code /perfscope trend [天数]}（默认 1 天，钳 1..配置保留天数）。
+     * 输出锚点（harness 依赖）：标题 {@code === 趋势摘要 ===}；行含 {@code 样本}、
+     * {@code 最低 TPS: }、{@code 峰值内存: }；空态 {@code 暂无趋势数据}。
+     * 与 /perfscope history 的区别：history 只看内存环（近 24h 且重启清零），
+     * trend 合并文件持久化样本（可跨重启、可查多日）。</p>
+     */
+    private void showTrend(CommandSender sender, String[] args) {
+        var fileStore = plugin.getHistoryFileStore();
+        int maxDays = configManager.get().history_persistRetentionDays;
+        int days = 1;
+        if (args.length > 1) {
+            try {
+                days = Integer.parseInt(args[1].trim());
+            } catch (NumberFormatException e) {
+                sender.sendMessage(Component.text("天数需为整数（1-" + maxDays + "），已按 1 天处理", YELLOW));
+            }
+        }
+        days = Math.max(1, Math.min(maxDays, days));
+
+        long sinceMs = System.currentTimeMillis() - days * 24L * 60L * 60L * 1000L;
+        // 合并单一事实源：优先文件持久化（跨重启）；不可用/空时回退内存环（本进程会话）
+        List<HistorySample> samples = fileStore == null ? List.of() : fileStore.loadRecentDays(days, sinceMs);
+        boolean fromFile = !samples.isEmpty();
+        if (!fromFile) {
+            samples = historyStore.since(sinceMs);
+        }
+
+        sender.sendMessage(Component.text("=== 趋势摘要 ===", GOLD, TextDecoration.BOLD));
+        if (samples.isEmpty()) {
+            sender.sendMessage(Component.text("暂无趋势数据（历史持久化启用后需积累采样；本进程会话亦无样本）", YELLOW));
+            return;
+        }
+        String source = fromFile ? "文件持久化" : "内存环（本进程会话）";
+        sender.sendMessage(goldLabel("范围: ")
+            .append(Component.text("近 " + days + " 天（" + samples.size() + " 个样本，来源: " + source + "）", WHITE)));
+
+        HistorySample oldest = samples.get(0);
+        HistorySample latest = samples.get(samples.size() - 1);
+        double minTps = Double.MAX_VALUE;
+        HistorySample minTpsAt = null;
+        int peakHeap = -1;
+        HistorySample peakHeapAt = null;
+        double sumTps = 0;
+        int tpsCount = 0;
+        for (HistorySample s : samples) {
+            if (s.tps1m() > 0 && s.tps1m() <= 20.5) {
+                sumTps += s.tps1m();
+                tpsCount++;
+                if (s.tps1m() < minTps) {
+                    minTps = s.tps1m();
+                    minTpsAt = s;
+                }
+            }
+            if (s.heapUsagePercent() > 0 && s.heapUsagePercent() > peakHeap) {
+                peakHeap = s.heapUsagePercent();
+                peakHeapAt = s;
+            }
+        }
+        if (tpsCount > 0) {
+            sender.sendMessage(goldLabel("平均 TPS: ")
+                .append(Component.text(String.format(java.util.Locale.ROOT, "%.2f", sumTps / tpsCount), WHITE))
+                .append(Component.text("（" + tpsCount + " 个有效样本）", GRAY)));
+            sender.sendMessage(goldLabel("最低 TPS: ")
+                .append(Component.text(String.format(java.util.Locale.ROOT, "%.2f", minTps), WHITE))
+                .append(Component.text("（" + formatTrendTime(minTpsAt.timestamp()) + "）", GRAY)));
+        } else {
+            sender.sendMessage(goldLabel("最低 TPS: ").append(Component.text("无有效样本", GRAY)));
+        }
+        if (peakHeapAt != null) {
+            sender.sendMessage(goldLabel("峰值内存: ")
+                .append(Component.text(peakHeap + "%", WHITE))
+                .append(Component.text("（" + formatTrendTime(peakHeapAt.timestamp()) + "）", GRAY)));
+        }
+        sender.sendMessage(Component.text("覆盖: " + formatTrendTime(oldest.timestamp())
+            + " ～ " + formatTrendTime(latest.timestamp()) + "（本地时区）", GRAY));
+    }
+
+    /** Wave 8B：趋势时间戳 → "MM-dd HH:mm"（跨天查询需带日期）。 */
+    private String formatTrendTime(long epochMs) {
+        return DateTimeFormatter.ofPattern("MM-dd HH:mm").withZone(ZoneId.systemDefault())
+            .format(Instant.ofEpochMilli(epochMs));
+    }
+
     /** Wave 7A：历史时间戳 → "HH:mm"（本地时区，与 showAll 采集时间行同口径）。 */
     private String formatHistoryTime(long epochMs) {
         return DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault())
@@ -1183,6 +1275,8 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         sendHelpLine(sender, "/perfscope hotspot", "热点区块定位（实体密度 Top3 + 坐标）");
         // Wave 8A：智能诊断引擎（diagnose 不再是 all 的别名；diag 保持全量诊断）
         sendHelpLine(sender, "/perfscope diagnose", "智能诊断（规则引擎：结论 + 参数级建议）");
+        // Wave 8B：跨重启趋势
+        sendHelpLine(sender, "/perfscope trend [天数]", "/perfscope trend", "趋势摘要（跨重启历史，默认 1 天）");
         sendHelpLine(sender, "/perfscope gc", "GC 统计");
         sendHelpLine(sender, "/perfscope report [格式]", "/perfscope report html", "导出性能报告");
         sendHelpLine(sender, "/perfscope monitor", "切换 ActionBar 实时监测");
@@ -1207,7 +1301,7 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
 
         if (args.length == 1) {
             String[] subs = {"all", "tps", "mspt", "entities", "chunks", "memory", "cpu",
-                "players", "world", "redstone", "tileentities", "uptime", "history", "hotspot", "diagnose", "gc",
+                "players", "world", "redstone", "tileentities", "uptime", "history", "hotspot", "diagnose", "trend", "gc",
                 "report", "monitor", "reload", "help"};
             boolean canExport = sender.hasPermission("perfscope.admin") || sender.hasPermission("perfscope.export");
             boolean canReload = sender.hasPermission("perfscope.admin") || sender.hasPermission("perfscope.reload");

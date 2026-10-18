@@ -21,6 +21,45 @@
 
 ---
 
+## [Unreleased] — Wave 8B「历史文件持久化 + 趋势」- 2026-10-19
+
+> **主题：重启不清零**——"昨晚卡不卡 / 上周以来的趋势"有数据可查。
+> 方案取舍（锐评 B 论点 8）：**不用 SQLite**（首个重量级运行时依赖 = v1.0.0 shade 事故同类土壤），
+> 改用**按天 CSV 文件**（纯 JDK NIO）：本场景（1 样本/分钟、7 天保留、单机）获得全部价值、零依赖风险。
+> **状态：全部落地；编译 BUILD SUCCESS；实机验证见下。**
+
+### Added
+- **`cn.perfscope.history.HistoryFileStore`**（新类）：按天 CSV 追加写 +
+  跨重启加载 + 过期清理。设计要点：
+  - 文件布局 `plugins/PerfScope/history/history-yyyy-MM-dd.csv`（7 列 = HistorySample 字段序，RAW 值）；
+  - **写入走锁外**（不占环形缓冲的对象锁，IO 不阻塞内存读方）；失败日志 5 分钟限频 + 静默降级
+    （持久化失败绝不影响内存环与采集主流程）；
+  - **读取容错**：损坏行/写一半的最后一行自动跳过；跨天自动滚动；清理只删本插件命名的文件
+    （`history-*.csv`，不碰用户文件——A6 教训）；
+  - 零新依赖（契约延续）。
+- **`/perfscope trend [天数]`**（新命令）：合并文件持久化 + 内存环的样本，输出跨重启可查的
+  `=== 趋势摘要 ===`（范围与样本数/来源、平均 TPS、最低 TPS 与时刻、峰值内存与时刻、覆盖时段）；
+  天数参数 1..保留天数（非法输入容错回退 1 天）；空态"暂无趋势数据"。help/Tab 同步。
+- 配置：`history.persist`（默认 true；false = 仅内存环）、`history.retention-days`
+  （默认 7，≤0 钳制 + warning）；启动/reload 时清理超期文件。
+
+### Changed
+- `HistoryStore`：新增 `setFileStore` 装配口；`record` 在入环后（锁外）追加持久化。
+- README/README-EN「不做历史持久化」边界条目更新为准确描述（按天文件 + 保留期 + 与 /ps trend 的分工）。
+
+### Notes
+- **与 /perfscope history 的分工**：history 读内存环（近 24h、重启清零、零 IO）；
+  trend 读文件持久化（跨重启、多日、按需加载）。两者共用同一采样节流与污染防护。
+- **实机验证**（`perfscope-trend.json`，10 checks）：`sample-interval-seconds=5` 快速积累
+  → 断言 `文件持久化` 来源行、最低 TPS/峰值内存行、样本计数、天数参数（近 7 天）、
+  CSV 文件落盘（file check）、help 收录、reload 存活。运行记录 `perfscope-20261019-011224-zptu`（10/10）。
+- **跨重启铁证（专项探针）**：进程 A 采样 225 条 → 停服 → 进程 B 重启后 `/perfscope trend`
+  显示 **364 样本、覆盖 01:27～02:02**——覆盖起点 **01:27 是进程 A 的采样时刻**，新进程读到了
+  旧进程写的数据。"重启不清零"从设计承诺变为实测事实。
+- 场景记录：测试服配置早于 8B（无 persist 键）——沿用"备份→删除→重生成→恢复"净零手法。
+
+---
+
 ## [Unreleased] — Wave 8A「智能诊断引擎（首批 5 条规则）」- 2026-10-19
 
 > **主题：从"看得见"到"找得到"** —— `/perfscope diagnose` 运行规则引擎给出**结论 + 参数级建议**

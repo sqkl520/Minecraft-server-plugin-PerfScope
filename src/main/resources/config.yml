@@ -121,11 +121,15 @@ alerts:
     type: discord             # discord | onebot (QQ)
     url: ""                   # discord: https://discord.com/api/webhooks/... ；onebot: http://127.0.0.1:3000/send_private_msg?user_id=...
 
-# 历史采样（v1.2：24h 环形缓冲；重启清零，文件持久化规划于后续版本）
+# 历史采样（v1.2：24h 环形缓冲 + 按天 CSV 文件持久化；重启不清零）
 history:
   enabled: true
   # 采样间隔（秒）；环形容量自动 = 86400/间隔（约 24 小时窗口）
   sample-interval-seconds: 60
+  # 文件持久化（plugins/PerfScope/history/history-<日期>.csv；重启后 /perfscope trend 可查）
+  persist: true
+  # 历史文件保留天数（超期文件在启动/重载时清理）
+  retention-days: 7
 
 # 热点区块定位（Wave 8C：实体密度最高的区块坐标，/perfscope hotspot 查看）
 hotspots:
