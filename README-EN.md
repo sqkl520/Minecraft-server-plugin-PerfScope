@@ -25,6 +25,7 @@ A comprehensive performance monitoring plugin for Minecraft servers, focused on 
 - **Webhook Push** (new in v1.2) —— Alerts / recoveries / daily summaries can be pushed to a Discord webhook or QQ OneBot, so the owner is reachable even when offline; sent fully asynchronously, failures are logged without blocking
 - **Daily Summary** (new in v1.2) —— A 3-line digest at a fixed time each day: lowest TPS (with time) / peak entities & heap / alert statistics; if the server happens to be down at the configured time, one catch-up summary is sent after startup
 - **History Summary** (new in v1.2) —— `/perfscope history` shows the last ~24 hours: coverage, lowest TPS with its timestamp, peak entities, peak heap — answering "when did it start getting worse"
+- **Hotspot Localization** (new in v1.2) —— `/perfscope hotspot` lists the top-3 entity-density chunks server-wide with coordinates (and dominant type share), drilling from "many entities" down to "go look at this spot"; coordinates are click-to-copy
 - **Color-Coded UI** —— Rendered via Paper Adventure API, key metrics colored by level (green/yellow/red) based on the `config.yml` alert thresholds; display and alerts share one source of truth, and colors follow immediately after a config reload
 
 ## Target Platform & Compatibility
@@ -54,6 +55,7 @@ Since v1.1, PerfScope focuses on the **Paper family** of servers and relies heav
 | `/perfscope tileentities` | Tile Entity statistics |
 | `/perfscope uptime` | Uptime + JVM info |
 | `/perfscope history` | History summary (last ~24h: lowest TPS / peak entities / peak heap) |
+| `/perfscope hotspot` | Hotspot localization (entity-density top-3 chunks with coordinates) |
 | `/perfscope gc` | GC statistics (per-collector details) |
 | `/perfscope report [format]` | Export performance report (html/txt/json) |
 | `/perfscope monitor` | Toggle ActionBar live monitor |
@@ -175,6 +177,10 @@ history:
   enabled: true
   sample-interval-seconds: 60   # History sampling interval (s); ring covers about 24 hours
 
+hotspots:
+  enabled: true
+  sample-every-cycles: 30       # Hotspot full-sweep throttle (every N collection cycles, ~30s)
+
 # Per-world overrides
 worlds:
   world:
@@ -209,6 +215,26 @@ See `plugins/PerfScope/config.yml` for complete configuration details.
 | Server | uptime/threads/plugins/worlds/JVM | Server basic info |
 
 > Note: **Redstone activity** and **network throughput** monitoring were discontinued in v1.1 (redstone was a stub implementation; network was hardcoded fake data); these metrics and features are no longer provided. The `/perfscope redstone` subcommand is kept as an entry point but only returns a discontinued notice.
+
+## Performance & Overhead (Self-Reported)
+
+A performance plugin that cannot explain its own overhead is self-contradictory. The design principle here is **keep heavy work off the main thread**:
+
+- **Async JVM metrics** — memory/CPU/GC/runtime info is read from MXBeans on an async thread and published as a whole snapshot for the main thread to reuse; zero main-thread blocking;
+- **Main thread does lightweight Bukkit reads only** — TPS/MSPT/players every cycle; entities/chunks every 5 cycles, tile entities every 10, hotspot chunks every 30 (all configurable), reusing caches in between;
+- **Guarded player-layer pushes** — the per-second ActionBar push only runs while a player has monitor on, and skipped (not crashed) the moment they disconnect.
+
+**Measured (JDK Flight Recorder, `settings=profile`, 90-second window, Paper 1.21.4, monitor active + normal collection cadence)**:
+
+| Metric | Measured |
+|---|---|
+| Samples containing a `cn.perfscope` frame | **~2.5%** |
+| Of those, on async threads (JVM metrics) | 36/110 frames |
+| Main-thread chunk sweeps hit | 1 sample in 90s |
+
+Reproduce (JFR-sample a running server and count frames): `tools/perfscope-jfr-overhead.ps1`
+
+> Caveat: the numbers above are a **magnitude reference** from one shared dev machine (light load, 90-second window), not a performance guarantee. A full high-load baseline (P99 at 5000 entities / 2000 chunks) is still being built. If you observe abnormal overhead, report it with a spark profiler link.
 
 ## Boundaries & What This Plugin Does Not Do
 

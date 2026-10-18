@@ -25,6 +25,7 @@
 - **Webhook 推送**（v1.2 新增） —— 告警 / 恢复 / 每日摘要可推送到 Discord webhook 或 QQ OneBot，服主不在线也能收到；全异步发送，失败只记日志不阻塞
 - **每日摘要**（v1.2 新增） —— 每天固定时刻推送 3 行概况：最低 TPS（含时刻）/ 峰值实体与内存 / 告警统计；若配置时刻服务端恰好停机，启动后会自动补发当天一次
 - **历史摘要**（v1.2 新增） —— `/perfscope history` 查看近 24 小时概况：覆盖时长、最低 TPS 与发生时刻、峰值实体、峰值内存，回答"什么时候开始变差的"
+- **热点区块定位**（v1.2 新增） —— `/perfscope hotspot` 列出全服实体密度 Top3 区块与坐标（含主导类型占比），把"实体多"下钻到"去哪个坐标看看"；坐标可点击复制
 - **彩色 UI 面板** —— 使用 Paper Adventure API 渲染，关键指标按 `config.yml` 告警阈值分级着色（绿/黄/红）；显示与告警同一口径，改配置 reload 后颜色立即跟随
 
 ## 目标平台与兼容性
@@ -54,6 +55,7 @@ PerfScope 自 v1.1 起专注 **Paper 系**服务端，深度依赖 Paper 原生 
 | `/perfscope tileentities` | Tile Entity 统计 |
 | `/perfscope uptime` | 运行时间 + JVM 信息 |
 | `/perfscope history` | 历史摘要（近 24 小时：最低 TPS / 峰值实体 / 峰值内存） |
+| `/perfscope hotspot` | 热点区块定位（实体密度 Top3 + 坐标，含主导类型） |
 | `/perfscope gc` | GC 统计（各收集器详情） |
 | `/perfscope report [格式]` | 导出性能报告（html/txt/json） |
 | `/perfscope monitor` | 切换 ActionBar 实时监测 |
@@ -175,6 +177,10 @@ history:
   enabled: true
   sample-interval-seconds: 60   # 历史采样间隔 (秒)，环形容量约覆盖 24 小时
 
+hotspots:
+  enabled: true
+  sample-every-cycles: 30       # 热点区块全遍历节流 (每 N 个采集周期 ≈ 30 秒)
+
 # 各世界独立设置
 worlds:
   world:
@@ -209,6 +215,29 @@ worlds:
 | 服务器 | uptime/线程数/插件数/世界数/JVM | 服务器基本信息 |
 
 > 注：**红石活动**与**网络吞吐量**监测已于 v1.1 下线（红石为空实现、网络为硬编码假数据），相关指标与功能不再提供；`/perfscope redstone` 子命令保留入口但仅返回下线提示。
+
+## 性能与开销（自证）
+
+性能插件若说不清自身开销就是自相矛盾。本插件的设计取向是**重活远离主线程**：
+
+- **JVM 指标异步采集**——内存/CPU/GC/运行时信息在异步线程读取 MXBean，整体快照发布给主线程复用，主线程零阻塞；
+- **主线程只做轻量 Bukkit 读取**——TPS/MSPT/玩家每周期采；实体/区块每 5 周期、方块实体每 10 周期、
+  热点区块每 30 周期（均可配）才全遍历一次，其余周期复用缓存；
+- **玩家层推送自带守卫**——ActionBar 每秒推送仅在玩家开启 monitor 时运行，断线瞬间跳过而非报错。
+
+**实测（JDK Flight Recorder，`settings=profile`，90 秒窗口，Paper 1.21.4，monitor 活跃 + 常规采集节奏）**：
+
+| 指标 | 实测值 |
+|---|---|
+| 含 `cn.perfscope` 栈帧的采样占比 | **约 2.5%** |
+| 其中落在异步线程（JVM 指标采集） | 36/110 帧 |
+| 主线程区块全遍历命中 | 90 秒内 1 个样本 |
+
+复现方式（对运行中的服务器做 JFR 采样并统计）：`tools/perfscope-jfr-overhead.ps1`
+
+> 局限声明：上表为本机（共享开发机、轻载场景、90 秒窗口）的**量级参考**，非性能保证；
+> 高负载下的完整基线（5000 实体 / 2000 区块的 P99）仍在建设中。若你观察到异常开销，
+> 请带 spark profiler 链接反馈。
 
 ## 边界与不做什么
 
