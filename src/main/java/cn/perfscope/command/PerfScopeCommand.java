@@ -21,6 +21,8 @@ import cn.perfscope.PerfScope;
 import cn.perfscope.compat.SchedulerAdapter;
 import cn.perfscope.compat.ServerCompat;
 import cn.perfscope.config.ConfigManager;
+import cn.perfscope.diagnose.Diagnosis;
+import cn.perfscope.diagnose.DiagnosticEngine;
 import cn.perfscope.history.HistorySample;
 import cn.perfscope.history.HistoryStore;
 import cn.perfscope.metrics.ChunkHotspot;
@@ -110,8 +112,13 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         }
 
         switch (args[0].toLowerCase()) {
-            case "all": case "diagnose": case "diag":
+            case "all": case "diag":
                 showAll(sender);
+                break;
+            case "diagnose":
+                // Wave 8A（V1.2 规格 §6.1 既定变更）：diagnose 从 all 的别名改为智能诊断引擎入口；
+                // diag 保持指向全量诊断（老用户肌肉记忆 + harness 断言依赖）
+                showDiagnose(sender);
                 break;
             case "tps":
                 showTPS(sender);
@@ -884,6 +891,40 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             .append(Component.text("（" + formatHistoryTime(sample.timestamp()) + "）", GRAY)));
     }
 
+    // ==================== Wave 8A：智能诊断（规则引擎） ====================
+
+    /**
+     * 智能诊断（Wave 8A）：运行规则引擎并输出结论 + 参数级建议。
+     *
+     * <p>输出锚点（harness 依赖）：标题 {@code === 智能诊断 ===}；无命中时 {@code 未发现已知问题}；
+     * 每条命中含 {@code [ID] 标题} 行与 {@code 建议: } 行。能力边界声明逐字保留
+     * （诚实划界——"本引擎只覆盖 N 条高置信规则"，防止被当成 spark 的替代品）。</p>
+     */
+    private void showDiagnose(CommandSender sender) {
+        MetricsSnapshot snap = collector.getLatest();
+        if (snap == null) {
+            noData(sender);
+            return;
+        }
+        sender.sendMessage(Component.text("=== 智能诊断 ===", GOLD, TextDecoration.BOLD));
+        List<Diagnosis> hits = plugin.getDiagnosticEngine().run();
+        if (hits.isEmpty()) {
+            sender.sendMessage(Component.text("未发现已知问题（已检查 " + DiagnosticEngine.ruleCount()
+                + " 条高置信规则）", GREEN));
+        } else {
+            for (Diagnosis d : hits) {
+                TextColor color = d.critical() ? RED : YELLOW;
+                sender.sendMessage(Component.text(" [" + d.ruleId() + "] ", color)
+                    .append(Component.text(d.title(), color, TextDecoration.BOLD)));
+                sender.sendMessage(Component.text("  " + d.detail(), WHITE));
+                sender.sendMessage(Component.text("  建议: ", GRAY)
+                    .append(Component.text(d.suggestion(), AQUA)));
+            }
+        }
+        sender.sendMessage(Component.text("提示: 本引擎覆盖 " + DiagnosticEngine.ruleCount()
+            + " 条高置信规则，方法级深挖请用 /spark profiler", GRAY));
+    }
+
     /** Wave 7A：历史时间戳 → "HH:mm"（本地时区，与 showAll 采集时间行同口径）。 */
     private String formatHistoryTime(long epochMs) {
         return DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault())
@@ -1140,6 +1181,8 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         sendHelpLine(sender, "/perfscope history", "查看历史摘要（近 24 小时）");
         // Wave 8C：热点区块定位
         sendHelpLine(sender, "/perfscope hotspot", "热点区块定位（实体密度 Top3 + 坐标）");
+        // Wave 8A：智能诊断引擎（diagnose 不再是 all 的别名；diag 保持全量诊断）
+        sendHelpLine(sender, "/perfscope diagnose", "智能诊断（规则引擎：结论 + 参数级建议）");
         sendHelpLine(sender, "/perfscope gc", "GC 统计");
         sendHelpLine(sender, "/perfscope report [格式]", "/perfscope report html", "导出性能报告");
         sendHelpLine(sender, "/perfscope monitor", "切换 ActionBar 实时监测");
@@ -1164,7 +1207,7 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
 
         if (args.length == 1) {
             String[] subs = {"all", "tps", "mspt", "entities", "chunks", "memory", "cpu",
-                "players", "world", "redstone", "tileentities", "uptime", "history", "hotspot", "gc",
+                "players", "world", "redstone", "tileentities", "uptime", "history", "hotspot", "diagnose", "gc",
                 "report", "monitor", "reload", "help"};
             boolean canExport = sender.hasPermission("perfscope.admin") || sender.hasPermission("perfscope.export");
             boolean canReload = sender.hasPermission("perfscope.admin") || sender.hasPermission("perfscope.reload");

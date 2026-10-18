@@ -21,6 +21,44 @@
 
 ---
 
+## [Unreleased] — Wave 8A「智能诊断引擎（首批 5 条规则）」- 2026-10-19
+
+> **主题：从"看得见"到"找得到"** —— `/perfscope diagnose` 运行规则引擎给出**结论 + 参数级建议**
+> （V1.2 规则表 37 条按锐评 B 论点 7 缩编为首批 5 条高置信规则；"规则即对象注册表"实现）。
+> **状态：全部落地；编译 BUILD SUCCESS；实机 9/9 全绿。**
+
+### Added
+- 新包 `cn.perfscope.diagnose`：
+  - `DiagnosticRule`（接口：id/evaluate，规则即对象；ID 一经发布不得复用）、
+    `Diagnosis`（结论 record：规则ID/标题/依据/参数级建议/级别）、
+    `DiagnosticEngine`（注册表执行器：逐条评估 + 单条异常隔离 + critical 优先排序）。
+  - `CoreRules` 首批 5 条高置信规则（全部带"证据不足不结论"路径）：
+    **DIAG-MEM-LEAK**（堆占用持续抬升 + 后半窗谷值不回落 → 疑似泄漏，建议 jmap+MAT 留证）、
+    **DIAG-ENT-HOTSPOT**（Top1 热点区块超世界阈值一半且 ≥200 → 给出 /tp 坐标与定点清理命令）、
+    **DIAG-TPS-PERSIST**（10 分钟窗均值 < 阈值 → 持续低位而非抖动，给排查顺序）、
+    **DIAG-PLAYER-CAP**（当前超阈值且窗口低位也在阈值-10 以上 → 持续接近上限而非活动峰值）、
+    **DIAG-MSPT-SPIKE**（max > avg×3 且 > 100ms → 单 tick 冻结，建议 autosave 调优 + spark 定点抓取）。
+- `/perfscope diagnose` 子命令（智能诊断输出：`=== 智能诊断 ===` 头、`[ID] 标题` 行、
+  `建议: ` 参数级行动行、无命中时 `未发现已知问题`）+ help/Tab 同步。
+- **能力边界声明**（每次输出末行）：`本引擎覆盖 N 条高置信规则，方法级深挖请用 /spark profiler`
+  ——诚实划界，引擎永不假装自己是 profiler。
+
+### Changed
+- **`diagnose` 别名拆分**（V1.2 规格 §6.1 既定变更）：`diagnose` 从 `all` 的别名改为诊断引擎入口；
+  **`diag` 保持指向全量诊断**（老用户肌肉记忆 + harness 断言依赖，回归已验；help 文案同步）。
+
+### Notes
+- **为什么缩编为 5 条**（锐评 B 论点 7）：其余 32 条要么依赖未采集数据（磁盘/网络字节/插件耗时），
+  要么与既有告警/报告高度重叠；错误归因的信任成本不可修复——宁可 5 条高置信，"宁可不结论，不给错结论"
+  （全部规则带证据不足路径：样本覆盖不足/模块不可用/估算模式一律返回 null）。
+- **实机验证**（`perfscope-diagnose.json`，9 checks）：可构造事实法——`tps.warning_threshold=20.5`
+  （TPS 恒 ≤20，条件必真）+ `history.sample-interval-seconds=5`（约 25 秒攒够 5 样本）
+  → 断言引擎命中 `DIAG-TPS-PERSIST` 且输出含 `建议:` 与依据数值；含边界声明、diag 兼容、reload 存活。
+  运行记录 `perfscope-20261019-000558-bxsf`（9/9）。
+- **List.of 注册表**：规则顺序 = 评估顺序；互斥机制暂不引入（首批语义正交），加规则时按需。
+
+---
+
 ## [Unreleased] — Wave 8C「热点区块定位」- 2026-10-18
 
 > **主题：把"哪类实体多"下钻到"去哪个坐标看看"**（V1.2 规则表 D-ENT-04 / §5 + `WAVE8C-DESIGN.md` 契约）。

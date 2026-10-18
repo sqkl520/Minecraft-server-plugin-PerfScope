@@ -24,6 +24,7 @@ import cn.perfscope.command.PerfScopeCommand;
 import cn.perfscope.compat.SchedulerAdapter;
 import cn.perfscope.compat.ServerCompat;
 import cn.perfscope.config.ConfigManager;
+import cn.perfscope.diagnose.DiagnosticEngine;
 import cn.perfscope.history.HistoryStore;
 import cn.perfscope.metrics.MetricsCollector;
 import cn.perfscope.report.ReportGenerator;
@@ -40,6 +41,8 @@ public final class PerfScope extends JavaPlugin {
 
     private ConfigManager configManager;
     private HistoryStore historyStore;
+    /** Wave 8A：诊断引擎（规则即对象注册表；由命令层 /perfscope diagnose 消费）。 */
+    private DiagnosticEngine diagnosticEngine;
     private MetricsCollector metricsCollector;
     private ReportGenerator reportGenerator;
     private PerfScopeCommand command;
@@ -64,6 +67,9 @@ public final class PerfScope extends JavaPlugin {
         // 初始化历史环形缓冲（Wave 7A）：由本类持有（非采集器），reload/采集重启不丢历史；
         // 采集器构造时注入引用，collectSync 末尾按节流间隔入环
         this.historyStore = new HistoryStore(configManager);
+
+        // Wave 8A：诊断引擎（无状态构造；规则只读快照与历史，由命令层按需调用）
+        this.diagnosticEngine = new DiagnosticEngine(this, historyStore);
 
         // 初始化性能采集器
         this.metricsCollector = new MetricsCollector(this, historyStore);
@@ -308,6 +314,11 @@ public final class PerfScope extends JavaPlugin {
     /** Wave 7A：历史环形缓冲（24h 窗口）。命令层经此读取；实例生命周期 = 插件生命周期。 */
     public HistoryStore getHistoryStore() {
         return historyStore;
+    }
+
+    /** Wave 8A：诊断引擎（规则即对象注册表）。命令层 /perfscope diagnose 经此运行。 */
+    public DiagnosticEngine getDiagnosticEngine() {
+        return diagnosticEngine;
     }
 
     public MetricsCollector getMetricsCollector() {
