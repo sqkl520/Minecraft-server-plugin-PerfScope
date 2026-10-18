@@ -60,6 +60,8 @@ Since v1.1, PerfScope focuses on the **Paper family** of servers and relies heav
 | `/perfscope uptime` | Uptime + JVM info |
 | `/perfscope history` | History summary (last ~24h: lowest TPS / peak entities / peak heap) |
 | `/perfscope hotspot` | Hotspot localization (entity-density top-3 chunks with coordinates) |
+| `/perfscope diagnose` | Smart diagnosis (rule engine: conclusions + parameter-level advice; `diag` stays the full-diagnostics alias) |
+| `/perfscope trend [days]` | Trend summary (cross-restart persistent history, default 1 day) |
 | `/perfscope gc` | GC statistics (per-collector details) |
 | `/perfscope report [format]` | Export performance report (html/txt/json) |
 | `/perfscope monitor` | Toggle ActionBar live monitor |
@@ -180,6 +182,8 @@ alerts:
 history:
   enabled: true
   sample-interval-seconds: 60   # History sampling interval (s); ring covers about 24 hours
+  persist: true                 # File persistence (daily CSV; /perfscope trend survives restarts)
+  retention-days: 7             # History file retention (days)
 
 hotspots:
   enabled: true

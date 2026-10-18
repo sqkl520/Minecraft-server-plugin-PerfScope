@@ -60,6 +60,8 @@ PerfScope 自 v1.1 起专注 **Paper 系**服务端，深度依赖 Paper 原生 
 | `/perfscope uptime` | 运行时间 + JVM 信息 |
 | `/perfscope history` | 历史摘要（近 24 小时：最低 TPS / 峰值实体 / 峰值内存） |
 | `/perfscope hotspot` | 热点区块定位（实体密度 Top3 + 坐标，含主导类型） |
+| `/perfscope diagnose` | 智能诊断（规则引擎：结论 + 参数级建议；`diag` 仍是全量诊断别名） |
+| `/perfscope trend [天数]` | 趋势摘要（跨重启历史持久化，默认 1 天） |
 | `/perfscope gc` | GC 统计（各收集器详情） |
 | `/perfscope report [格式]` | 导出性能报告（html/txt/json） |
 | `/perfscope monitor` | 切换 ActionBar 实时监测 |
@@ -180,6 +182,8 @@ alerts:
 history:
   enabled: true
   sample-interval-seconds: 60   # 历史采样间隔 (秒)，环形容量约覆盖 24 小时
+  persist: true                 # 文件持久化（按天 CSV；/perfscope trend 跨重启可查）
+  retention-days: 7             # 历史文件保留天数
 
 hotspots:
   enabled: true
