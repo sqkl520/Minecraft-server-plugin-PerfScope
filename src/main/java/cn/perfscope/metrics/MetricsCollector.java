@@ -103,6 +103,12 @@ public class MetricsCollector {
     private int cachedTileEntityCount = 0;
     private Map<String, Integer> cachedTileEntitiesByWorld = new LinkedHashMap<>();
 
+    // ==================== Wave 8C 热点区块缓存（仅主线程 collectSync 访问，无需同步） ====================
+    // 复用语义与实体/区块缓存一致：命中采样倍数时全遍历刷新，其余周期复用缓存值（含 unavailable 标记）
+    private boolean hotspotsCacheReady = false;
+    private boolean hotspotsCacheUnavailable = false;
+    private List<ChunkHotspot> cachedHotspots = new ArrayList<>();
+
     // ==================== P0-1 JVM 异步缓存（volatile 跨线程发布） ====================
     // collectJvmAsync（异步线程）整体构造后发布，collectSync（主线程）读取填入快照；
     // 启动初期为 null 表示异步尚未产出，相关模块按 unavailable 处理，避免 0 值误导或 NPE
@@ -177,6 +183,7 @@ public class MetricsCollector {
         entitiesCacheReady = false;
         chunksCacheReady = false;
         teCacheReady = false;
+        hotspotsCacheReady = false;
         jvmCache = null;
         startedAtMs = System.currentTimeMillis(); // W5-D #1：reload 后重新进入预热窗口（与 jvmCache 置空同步）
 
@@ -223,6 +230,7 @@ public class MetricsCollector {
         collectEntitiesThrottled(snap, cfg);
         collectChunksThrottled(snap, cfg);
         collectTileEntitiesThrottled(snap, cfg);
+        collectHotspotsThrottled(snap, cfg);
 
         // 服务器信息 Bukkit 部分（世界数/插件数）：主线程采集
         safeCollect(MetricsSnapshot.MODULE_SERVER, snap, () -> collectServerInfoBukkit(snap));
@@ -377,6 +385,92 @@ public class MetricsCollector {
         }
         snap.tileEntityCount = cachedTileEntityCount;
         snap.tileEntitiesByWorld = cachedTileEntitiesByWorld;
+    }
+
+    // ==================== Wave 8C 热点区块（Top5 实体密度，含玩家） ====================
+
+    /**
+     * 热点区块节流入口（Wave 8C）：每 {@code hotspots.sample-every-cycles} 个采集周期全遍历一次，
+     * 其余周期复用缓存（与实体/区块缓存同范式）。全遍历成本高（全部世界全部已加载区块），
+     * 节流是主线程保护的第一要务。
+     */
+    private void collectHotspotsThrottled(MetricsSnapshot snap, ConfigManager.ConfigData cfg) {
+        long every = Math.max(1, cfg.hotspots_sampleEveryCycles);
+        if (!hotspotsCacheReady || tickCounter % every == 0) {
+            refreshHotspotsCache(cfg);
+        }
+        applyHotspotsCache(snap);
+    }
+
+    private void refreshHotspotsCache(ConfigManager.ConfigData cfg) {
+        hotspotsCacheReady = true;
+        if (!cfg.hotspots_enabled) {
+            hotspotsCacheUnavailable = true;
+            return;
+        }
+        MetricsSnapshot tmp = new MetricsSnapshot();
+        safeCollect(MetricsSnapshot.MODULE_HOTSPOTS, tmp, () -> collectHotspots(tmp));
+        if (tmp.unavailable.contains(MetricsSnapshot.MODULE_HOTSPOTS)) {
+            hotspotsCacheUnavailable = true;
+            return;
+        }
+        hotspotsCacheUnavailable = false;
+        cachedHotspots = tmp.topEntityChunks;
+    }
+
+    private void applyHotspotsCache(MetricsSnapshot snap) {
+        if (!hotspotsCacheReady || hotspotsCacheUnavailable) {
+            snap.unavailable.add(MetricsSnapshot.MODULE_HOTSPOTS);
+            return;
+        }
+        snap.topEntityChunks = cachedHotspots;
+    }
+
+    /**
+     * 全量热点扫描（Wave 8C，运行在采样周期的主线程）：遍历全部世界全部已加载区块，
+     * 统计每区块实体数（{@code chunk.getEntities()}，含玩家——V1.2 §5 口径）并取全服 Top5；
+     * 同时统计各区块主导实体类型（众数，平票取字典序最小者保证输出稳定）。
+     *
+     * <p>性能：单次全遍历的区块数与实体数成正比；由调用方按 sample-every-cycles 节流
+     * （默认 30 周期 ≈ 30 秒），异常由 safeCollect 兜底（模块级 unavailable）。</p>
+     */
+    private void collectHotspots(MetricsSnapshot snap) {
+        List<ChunkHotspot> all = new ArrayList<>();
+        for (World world : Bukkit.getWorlds()) {
+            String worldName = world.getName();
+            for (Chunk chunk : world.getLoadedChunks()) {
+                Entity[] entities = chunk.getEntities(); // 单次取得，长度即计数（含玩家）
+                if (entities.length == 0) {
+                    continue; // 空区块不进候选
+                }
+                // 主导类型：单遍统计（实体数通常很小，HashMap 开销可忽略）
+                Map<String, Integer> byType = new HashMap<>();
+                for (Entity entity : entities) {
+                    byType.merge(entity.getType().name(), 1, Integer::sum);
+                }
+                String dominant = "UNKNOWN";
+                int dominantCount = 0;
+                for (Map.Entry<String, Integer> typeEntry : byType.entrySet()) {
+                    // 众数；平票取字典序最小（compareTo < 0 才替换，保证确定性）
+                    if (typeEntry.getValue() > dominantCount
+                        || (typeEntry.getValue() == dominantCount && typeEntry.getKey().compareTo(dominant) < 0)) {
+                        dominant = typeEntry.getKey();
+                        dominantCount = typeEntry.getValue();
+                    }
+                }
+                all.add(new ChunkHotspot(worldName, chunk.getX(), chunk.getZ(),
+                    entities.length, dominant, dominantCount));
+            }
+        }
+        // 全服 Top5（降序）；平票按世界名+坐标排序保证输出稳定
+        all.sort(Comparator.comparingInt(ChunkHotspot::entityCount).reversed()
+            .thenComparing(ChunkHotspot::world)
+            .thenComparingInt(ChunkHotspot::chunkX)
+            .thenComparingInt(ChunkHotspot::chunkZ));
+        if (all.size() > 5) {
+            all = new ArrayList<>(all.subList(0, 5));
+        }
+        snap.topEntityChunks = all;
     }
 
     // ==================== P0-1 JVM 异步缓存读取 ====================

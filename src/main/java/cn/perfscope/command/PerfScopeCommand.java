@@ -23,6 +23,7 @@ import cn.perfscope.compat.ServerCompat;
 import cn.perfscope.config.ConfigManager;
 import cn.perfscope.history.HistorySample;
 import cn.perfscope.history.HistoryStore;
+import cn.perfscope.metrics.ChunkHotspot;
 import cn.perfscope.metrics.MetricsCollector;
 import cn.perfscope.metrics.MetricsSnapshot;
 import cn.perfscope.report.ReportGenerator;
@@ -147,6 +148,9 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 break;
             case "history": case "hist":
                 showHistory(sender);
+                break;
+            case "hotspot": case "hs":
+                showHotspots(sender);
                 break;
             case "gc":
                 showGC(sender);
@@ -886,6 +890,53 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             .format(Instant.ofEpochMilli(epochMs));
     }
 
+    // ==================== Wave 8C：热点区块定位 ====================
+
+    /**
+     * 热点区块 Top3（Wave 8C）：全服实体密度最高的区块坐标（含玩家）。
+     * 输出锚点（harness 依赖，逐字稳定）：标题 {@code === 热点区块 Top3}、
+     * 行内 {@code （方块 } 与 {@code ，主导 }、头部 {@code 采样于 HH:mm:ss，含玩家）}。
+     * 玩家视角：坐标 {@code [x,z]} 可点击复制（copyToClipboard，"x z" 形态可直接喂给 /tp）；
+     * 控制台/RCON 保持纯文本（Wave 5D 报告路径同款口径）。
+     */
+    private void showHotspots(CommandSender sender) {
+        MetricsSnapshot snap = collector.getLatest();
+        if (snap == null) {
+            noData(sender);
+            return;
+        }
+        String stamp = DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault())
+            .format(Instant.ofEpochMilli(snap.timestamp));
+        sender.sendMessage(Component.text("=== 热点区块 Top3（采样于 " + stamp + "，含玩家）===", GOLD, TextDecoration.BOLD));
+        // P0-5/Wave 8C：模块被禁用或采集异常、或首采样未到 → 空态（头部同款渲染，便于断言）
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_HOTSPOTS) || snap.topEntityChunks.isEmpty()) {
+            sender.sendMessage(Component.text("暂无热点数据（首轮采样未到或模块不可用，稍后再试）", YELLOW));
+            return;
+        }
+        List<ChunkHotspot> top = snap.topEntityChunks;
+        int shown = Math.min(3, top.size());
+        for (int i = 0; i < shown; i++) {
+            ChunkHotspot hs = top.get(i);
+            Component coord = Component.text("[" + hs.chunkX() + "," + hs.chunkZ() + "]", AQUA);
+            if (sender instanceof Player) {
+                String tpArg = hs.blockX() + " " + hs.blockZ(); // 区块中心（可直接喂 /tp）
+                coord = coord.decorate(TextDecoration.UNDERLINED)
+                    .clickEvent(ClickEvent.copyToClipboard(tpArg))
+                    .hoverEvent(HoverEvent.showText(Component.text("点击复制区块中心坐标 (" + tpArg + ")", AQUA)));
+            }
+            sender.sendMessage(Component.text(" " + (i + 1) + ". ", GRAY)
+                .append(Component.text(hs.world() + " ", WHITE))
+                .append(coord)
+                .append(Component.text("（方块 " + hs.blockX() + ",~," + hs.blockZ() + "）", GRAY))
+                .append(Component.text("实体 ", WHITE))
+                .append(Component.text(hs.entityCount() + " 个", thresholdColors.colorOf(
+                    thresholdColors.levelOf(ThresholdColors.Metric.ENTITIES, hs.entityCount(), hs.world()))))
+                .append(Component.text("，主导 ", GRAY))
+                .append(Component.text(hs.dominantType(), WHITE))
+                .append(Component.text(" " + hs.dominantPercent() + "%", GRAY)));
+        }
+    }
+
     // ==================== 专项检测: GC ====================
 
     private void showGC(CommandSender sender) {
@@ -1087,6 +1138,8 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         sendHelpLine(sender, "/perfscope uptime", "运行时间");
         // Wave 7A：历史摘要（24h 环形缓冲）
         sendHelpLine(sender, "/perfscope history", "查看历史摘要（近 24 小时）");
+        // Wave 8C：热点区块定位
+        sendHelpLine(sender, "/perfscope hotspot", "热点区块定位（实体密度 Top3 + 坐标）");
         sendHelpLine(sender, "/perfscope gc", "GC 统计");
         sendHelpLine(sender, "/perfscope report [格式]", "/perfscope report html", "导出性能报告");
         sendHelpLine(sender, "/perfscope monitor", "切换 ActionBar 实时监测");
@@ -1111,7 +1164,7 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
 
         if (args.length == 1) {
             String[] subs = {"all", "tps", "mspt", "entities", "chunks", "memory", "cpu",
-                "players", "world", "redstone", "tileentities", "uptime", "history", "gc",
+                "players", "world", "redstone", "tileentities", "uptime", "history", "hotspot", "gc",
                 "report", "monitor", "reload", "help"};
             boolean canExport = sender.hasPermission("perfscope.admin") || sender.hasPermission("perfscope.export");
             boolean canReload = sender.hasPermission("perfscope.admin") || sender.hasPermission("perfscope.reload");

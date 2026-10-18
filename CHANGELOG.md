@@ -21,6 +21,39 @@
 
 ---
 
+## [Unreleased] — Wave 8C「热点区块定位」- 2026-10-18
+
+> **主题：把"哪类实体多"下钻到"去哪个坐标看看"**（V1.2 规则表 D-ENT-04 / §5 + `WAVE8C-DESIGN.md` 契约）。
+> 锐评 C 证据：LagTrace（0★）做过同方向没做成——执行质量即差异化；Wave 8 中不依赖真实信号的首选项。
+> **状态：全部落地；编译 BUILD SUCCESS；实机 9/9 全绿（含回归核对）。**
+
+### Added
+- **`cn.perfscope.metrics.ChunkHotspot`**（新 record）：区块坐标/实体数/主导类型与数量；
+  `dominantPercent()` / `blockX()`（chunkX*16+8）/ `blockZ()` 换算方法（V1.2 §5.2 口径）。
+- **`/perfscope hotspot`（别名 `hs`）**：全服实体密度 Top3（含玩家）——
+  每行 `世界 [区块x,z]（方块 X,~,Z）实体 N 个，主导 TYPE P%`；玩家视角坐标可点击复制
+  （copyToClipboard "X Z" 形态可直接喂 /tp；控制台纯文本）；空态"暂无热点数据"；
+  help 面板 + Tab 补全同步。
+- 采集侧：`collectHotspotsThrottled`（entities 缓存三件套同范式）——
+  每 `hotspots.sample-every-cycles` 个采集周期全遍历一次（默认 30 ≈ 30 秒；主线程保护），
+  其余周期复用缓存；Top5 排序确定性（实体数降序 + 世界名/坐标排序）；众数平票取字典序最小；
+  走 `safeCollect`（新 `MODULE_HOTSPOTS` 隔离）。
+- 配置：`hotspots.enabled`（默认 true）、`hotspots.sample-every-cycles`（默认 30；≤0 钳制 + warning）。
+- 快照字段：`MetricsSnapshot.topEntityChunks`（Top5；空列表 = 未采样/不可用）。
+
+### Notes
+- **本波不做**：`chunk_entity_warning/critical` 阈值与告警（规格 D-ENT-04 的告警部分留给 Wave 8A 规则引擎）；
+  报告三格式输出（留后续，避免与渲染复杂度叠加）。
+- **实机验证**（`perfscope-hotspot.json`，9 checks）：可构造事实法——`forceload add 0 0` 保区块加载
+  + 15 只 NoAI 猪入 (0,0) → 断言 Top3 列出 `[0,0]` 且 `主导 PIG`；含头部锚点/方块坐标/
+  时间戳含玩家注记/help 收录/reload 存活。**首轮暴露的场景设计缺陷**：summon 到未加载区块的
+  实体会随区块卸载消失（forceload 修正后全绿）——已固化进场景描述。
+- Wave 8C 实施说明：原派 agent 因基础设施 502 中断且未落盘，**由编排者按契约亲手实现**
+  （ChunkHotspot + 采集三件套 + 命令层，单次编译通过）。
+- 回归核对：surface 场景（36 checks）复跑通过（W8C 未破坏既有命令面）。
+
+---
+
 ## [1.1.0] — 2026-10-17
 
 > **发布概要**（面向用户剪裁；逐波次开发流水见下方各段）：

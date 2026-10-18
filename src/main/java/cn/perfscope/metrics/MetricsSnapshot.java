@@ -91,6 +91,11 @@ public class MetricsSnapshot {
     public List<String> activeWarnings = new ArrayList<>();
     public List<String> activeCriticals = new ArrayList<>();
 
+    // === 热点区块（Wave 8C）===
+    // 全服实体数 Top5 区块（含玩家；每 hotspots.sample-every-cycles 个采集周期刷新一次，非采样周期复用缓存）。
+    // 空列表 = 尚未采样/模块不可用——展示层据此渲染"暂无热点数据"。
+    public List<ChunkHotspot> topEntityChunks = new ArrayList<>();
+
     // === 模块可用性（P0-5）：采集失败或被配置禁用的模块名集合 ===
     // 展示层约定：命中本集合的模块显示"不可用"（灰色），而非 0/空值
     public static final String MODULE_TPS = "tps";
@@ -103,6 +108,8 @@ public class MetricsSnapshot {
     public static final String MODULE_GC = "gc";
     public static final String MODULE_TILE_ENTITIES = "tile_entities";
     public static final String MODULE_SERVER = "server";
+    /** Wave 8C：热点区块定位模块（采集禁用/失败时进 unavailable，展示层渲染"不可用"）。 */
+    public static final String MODULE_HOTSPOTS = "hotspots";
 
     public Set<String> unavailable = ConcurrentHashMap.newKeySet();
 

@@ -123,6 +123,10 @@ public class ConfigManager {
         fresh.history_enabled = yaml.getBoolean("history.enabled", true);
         fresh.history_sampleIntervalSeconds = yaml.getInt("history.sample-interval-seconds", 60);
 
+        // === 热点区块（Wave 8C：全服实体密度 Top5 的坐标定位；全遍历按周期节流） ===
+        fresh.hotspots_enabled = yaml.getBoolean("hotspots.enabled", true);
+        fresh.hotspots_sampleEveryCycles = yaml.getInt("hotspots.sample-every-cycles", 30);
+
         // === 各世界设置 ===
         fresh.worldSettings = new HashMap<>();
         ConfigurationSection worldsSection = yaml.getConfigurationSection("worlds");
@@ -257,6 +261,13 @@ public class ConfigManager {
             plugin.getLogger().warning("[PerfScope] 配置校验：history.sample-interval-seconds="
                 + cfg.history_sampleIntervalSeconds + " 非法（需 ≥1），已按 60 秒处理");
             cfg.history_sampleIntervalSeconds = 60;
+        }
+
+        // === hotspots.sample-every-cycles：非法值（≤0）钳到 30 并 warning（Wave 8C，与全仓 clamp 口径一致） ===
+        if (cfg.hotspots_sampleEveryCycles <= 0) {
+            plugin.getLogger().warning("[PerfScope] 配置校验：hotspots.sample-every-cycles="
+                + cfg.hotspots_sampleEveryCycles + " 非法（需 ≥1），已按 30 周期处理");
+            cfg.hotspots_sampleEveryCycles = 30;
         }
     }
 
@@ -395,6 +406,12 @@ public class ConfigManager {
         public boolean history_enabled;
         /** 历史采样节流间隔秒数（history.sample-interval-seconds，缺键默认 60；非法值 ≤0 钳到 60）。 */
         public int history_sampleIntervalSeconds;
+
+        // 热点区块（Wave 8C）
+        /** 热点区块总开关（hotspots.enabled，缺键默认 true；false 时模块标记不可用、命令显示"暂无热点数据"）。 */
+        public boolean hotspots_enabled;
+        /** 热点采样节流（hotspots.sample-every-cycles，缺键默认 30 ≈ 30 秒；非法值 ≤0 钳到 30）。 */
+        public int hotspots_sampleEveryCycles;
 
         // 各世界设置
         public Map<String, WorldSettings> worldSettings;
