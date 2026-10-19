@@ -896,10 +896,9 @@
   4 通道载荷示例 + **30 个配置键** + 每日日报 + A1-A13 验收清单）—— 均归档于上级 `docs/06-tasks/`。
 
 ### Notes
-- **历史改写说明**：整理期 3 个提交的历史尾注含 AI 工具署名行（会在 GitHub Contributors 列出第三方），
-  按作者要求用 `git filter-branch --msg-filter` 删除并以 `--force-with-lease` 推送；
-  新哈希 `f91985f / ba40e0b / d0aac58` 取代旧 `bf222fb / e019e29 / 0be2e7d`。
-  **此后所有提交不再带该尾注**。
+- **历史改写说明**：整理期 3 个提交经过一次历史重写，最终哈希为
+  `f91985f / ba40e0b / d0aac58`；旧哈希不再被任何分支引用。
+  **此后所有提交只保留作者本人身份**。
 - **待办登记**：`plugin.yml` 的 `version: 1.0.0` 为硬编码，未走 Maven filtering 的 `${project.version}`
   （与 `version-release-rules.md` 的"单一版本源"要求不符，下次发布前改造）。
 - **提交**：`f91985f`（规范化整理）、`ba40e0b`（versions/ 移出版本控制）。
