@@ -7,9 +7,11 @@
 
 | 版本 | 文件 | 说明 |
 |---|---|---|
-| **1.2.0** | `PerfScope-1.2.0.jar` | **推荐使用**。智能诊断 + 热点定位 + 跨重启历史 + 消息层（Wave 8）。
+| **1.2.1** | `PerfScope-1.2.1.jar` | **推荐使用**。「说真话」：不新增功能，修正 v1.2.0 中说错/说假/静默失败之处（MSPT 极值捏造、Folia 假精确、诊断三态、告警生命周期、webhook 泄露、配置静默回退、历史异步写、性能自证纠错）。新增 `/status`、`/alerts`。
+GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.2.1> |
+| 1.2.0 | `PerfScope-1.2.0.jar` | 智能诊断 + 热点定位 + 跨重启历史 + 消息层（Wave 8）。
 GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.2.0> |
-| 1.1.0 | `PerfScope-1.1.0.jar` | 上一版。v1.1 修复 + v1.2 核心重构（Wave 1–7）。
+| 1.1.0 | `PerfScope-1.1.0.jar` | v1.1 修复 + v1.2 核心重构（Wave 1–7）。
 GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.1.0> |
 | 1.0.0 | `PerfScope-1.0.0.jar` | ⚠️ **不可用**构建（见下），仅存档。 |
 
