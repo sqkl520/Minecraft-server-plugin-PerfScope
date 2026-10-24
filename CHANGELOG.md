@@ -20,6 +20,289 @@
 
 ---
 
+## [1.2.1] — 2026-10-25
+
+> **本版主题「说真话」**：不新增功能（仅 `/status`、`/alerts` 两个"让插件自己可见"的命令），
+> 全部改动是把 v1.2.0 里**说错/说假/静默失败**的地方改对。
+> 来源：第二轮 14 路对抗锐评（`docs/01-reviews/critique-round2-SYNTHESIS.md`）+
+> 重写执行计划（`docs/06-tasks/EXECUTION-PLAN.md`、`WAVE9A-REMAINING-PLAN.md`）。
+
+**给升级者的一句话**：如果你之前觉得「这插件报的数和实际对不上」「配了不生效」「诊断结论像模板」，
+这一版基本都是在修这些。**升级前请备份 `plugins/PerfScope/` 目录**（配置会自动补 `config-version` 并备份旧文件）。
+
+**批次总览（16 项全部完成，实机 12 场景全绿）**
+
+| 项 | 主题 | 结果 |
+|---|---|---|
+| 9A-0 | MSPT 极值捏造（三数永远相等） | 降级路径 min/max 置 -1，展示"未采集" |
+| 9A-1 | Folia MSPT 假精确 | 能力位拆"方法存在/实测可用"，Folia 直标不可用 |
+| 9A-2 | Folia TPS 是 region 局部值 | 命令/报告层统一标注 `(global region)` |
+| 9A-3 | `/diagnose` 谎报"已检查 5 条" | 三态契约（命中/干净/无法评估+原因） |
+| 9A-4 / 9A-12 | README 与代码相反 + 性能数字算错 | 全部改为如实描述；2.5% → 0.84% |
+| 9A-6 | 8 条静默错误结论 | trend 漏昨天、TPS=0 Infinity、负阈值、三套百分比… |
+| 9A-8 | 诊断引擎可信度 | 覆盖率判据、热点阈值量纲、建议文案全部实机校验 |
+| 9A-10 | 并发与生命周期 | generation 令牌、报告执行器、防御性拷贝 |
+| 9A-11 | 配置面 48 处静默回退 | 类型校验 + config-version + 未知键检测 |
+| 9A-14 | 告警决策层 | 降级/恢复防抖/状态持久化/历史/摘要/服名前缀 |
+| 9A-16 | webhook token 泄露 + SSRF | 异常只记类型；host 黑名单；mention 防护 |
+| 9A-18 | 历史持久化工程纪律 | 容量解耦、异步写队列、缓存、schema 版本、缺口 |
+| 9A-20 | 插件自身不可运维 | `isStale()`、`/status`、模块四态、Error supervisor |
+| 9A-22 | 性能自证 | 脚本按样本计数、README 写明 5 条限定 |
+| 9A-23 / 9A-24 | 对外材料 + i18n | LISTING-KIT 升 v1.2；2 个死键接线、两级回退如实 |
+
+**实机验证**：`release-check -WithServer` **12/12**；场景 boot 6/6、surface 37/37、config 11/11、
+alert 9/9、alertv2 6/6、diagnose 9/9、trend 10/10、history 7/7、hotspot 9/9、i18n 7/7、report 10/10 全绿。
+
+---
+
+### Changed
+
+- **9A-1 Folia MSPT 假精确**（`compat/ServerCompat.java`、`PerfScope.java`、`command/PerfScopeCommand.java`）：
+  Folia 的 `CraftServer.getTickTimes()` / `getAverageTickTime()` **方法存在但恒返回全零**
+  （jar 内 `TickTimes.add` 零调用点），而旧实现的能力探测只看方法存在性 → 能力位 true →
+  启动日志打"`MSPT精确采集: Paper API`"、README 写"精确"、兼容矩阵 196 条断言也全是标签子串
+  （无一条断言数值）——四层一起说假话，线上 MSPT 永远只能显示"未知"。
+  现改为"静态探测 + 运行期实测"两级：
+  - `TICK_TIMES_METHOD_PRESENT` / `AVG_TICK_METHOD_PRESENT` 保留静态结果（只用于展示"方法在不在"）；
+    功能门控位 `PAPER_MSPT_AVAILABLE` / `PAPER_AVG_TICK_AVAILABLE` 由 `final` 改为 `volatile`，
+    Folia 在类初始化即置 false。
+  - 新增 `probeRuntimeAvailability(Logger, boolean)` + `armRuntimeProbe(Plugin)`：插件启用后
+    **首周期之后**（100 tick ≈ 5 秒）经 `SchedulerAdapter` 延迟执行一次，实测调用两个 API；
+    全零/空数组/异常 → 能力位下调为 false 并记 INFO「Folia 无全局 tick 时间（getTickTimes 恒空），
+    MSPT 标记为不可用」。探针幂等且**只降不升**。
+  - 新增 `isMsptTrustworthy()` 作为唯一功能门控入口；`msptUnavailableReason()` 提供唯一文案出处。
+  - 命令层 `showAll` / `showMSPT` 在不可信时直接渲染"不可用（原因）"，**不再走 TPS 反推**。
+- **9A-2 Folia TPS 是 region 局部值**（`compat/ServerCompat.java`、`command/PerfScopeCommand.java`）：
+  `Bukkit.getTPS()` 在 Folia 上只反映 **global region** 的 tick 吞吐（不含各 region 的实体/区块逻辑），
+  却被当成全服 TPS 展示并驱动告警。现新增 `isTpsGlobalScope()` / `tpsScopeLabel()`，
+  命令层 `showAll` 的 TPS 行、`showTPS`、「服务端:」行在 Folia 上统一追加 `(global region)` 标注，
+  `showTPS` 额外输出一行口径说明。
+
+- **9A-3 诊断引擎三态化**（`diagnose/` 全部重写）：
+  旧实现用 `return null` 表示"不结论"，展示层无法区分「评估了且干净」与「因前置条件不成立从未评估」，
+  于是输出"未发现已知问题（已检查 5 条）"——而 3/5 条规则根本没运行。现改为显式三态：
+  `Evaluation.of()` 命中 / `Evaluation.clean()` 干净 / `Evaluation.skip(ruleId, reason)` 无法评估。
+  `DiagnosticEngine.run()` 返回 `Result{hits, skipped, total}`，命令层如实输出
+  "已评估 X/Y 条"，有跳过时降级为黄色"未发现问题，但结论不完整"并逐条列出跳过原因与"还缺什么"。
+  契约违约（返回 null 的规则）不再被当作"干净"，而是记为未评估。
+- **9A-8 诊断规则可信度**（`CoreRules` 五条规则）：
+  - **覆盖率取代样本数**：`MIN_SAMPLES` 只保证条数，不保证覆盖时长（默认 60 秒间隔下 10 条
+    仅覆盖 9 分钟却断言"30 分钟趋势"）。改为「条数 + 样本自身时间密度」双判据
+    （中位间隔 ×（n-1）× 0.8，并有窗口 10% 的绝对下界）。实测调优：首版用"窗口×60%"过严，
+    导致重启后长时间无法诊断，已改为按样本密度自适应。
+  - **DIAG-ENT-HOTSPOT 阈值量纲修复**（dead rule）：原用**全服**阈值（默认 2000/2500）除以 2
+    去卡**单个区块**，要求单区块 1000+ 实体才报警 → 默认配置下**永不触发**（v1.2.0 带着一条
+    死规则发布）。新增独立配置键 `hotspots.chunk-warning-threshold`（默认 200，单区块口径）。
+  - **DIAG-PLAYER-CAP 不再跳过 0 人样本**：原 `if (s.playerCount() > 0)` 过滤掉真实低谷，
+    文案却写死"近 15 分钟低位也在 X% 以上"——凌晨 0 人 + 早上 9 人上线会得出反结论。
+    现 0 人参与统计，覆盖时长按实际首尾计算。
+  - **DIAG-MEM-LEAK 措辞纠偏**：原 detail 声称"GC 后水位未回落"，但代码从未做过 GC 后测量
+    （`HistorySample` 无 gcCount 字段）。现只陈述观测事实（窗口内最低点仍高于起点），
+    建议由 `jmap/MAT` 改为 Paper 内置的 `/spark heapdump`。
+  - **DIAG-MSPT-SPIKE 建议修正**：`paper.yml` 自 Paper 1.19 起已拆分为
+    `config/paper-global.yml` 与 `config/paper-world-defaults.yml`（本机 4 个真实服 `find`
+    零命中），照抄会打开不存在的文件；spark 命令补全为 `/spark profiler start --only-ticks-over 200`。
+  - **DIAG-TPS-PERSIST 改用 15 分钟均值**：快照自带 `tps15m`（服务端滚动均值，天然平滑）作为
+    "持续"的主判据，`tps1m` 窗口均值降为辅助——原实现用 1 分钟指标 + 4 分钟样本断言"持续负载"。
+
+### Fixed
+
+- **9A-14 告警决策层（`alert/AlertService.java` 重写）**：投递管道没问题，决策层曾是"阈值复读机"。
+  - **降级曾是黑洞**：`critical → warning` 走"占位注释：故意留空"分支，既不推送也不更新记录，
+    恢复时仍用旧记录输出"严重偏高 已恢复正常"——一句从未发生过的严重事故。现降级刷新
+    level/display/value 全量记录，并按 `alerts.notify-mitigation` 推一条「已缓解（问题仍在，未恢复）」。
+  - **恢复一次干净采样就宣布**：现需连续 `alerts.recovery-debounce-cycles`（默认 3，与防抖同值）
+    个检查周期不越界才发恢复。
+  - **复燃被冷却静默 5 分钟**：现恢复时清除该 key 的冷却条目并记恢复时刻；冷却窗口内再次越界
+    直接推「问题再次出现」（绕过防抖与冷却），持续时长沿用该问题最初的 `firstSeen` 连续累计。
+  - **状态重启即失忆**：新增 `plugins/PerfScope/alerts.state`（`key|level|firstSeen|lastSeen|value|display|module|state`，
+    原子替换写入，仅状态变化时落盘）。启动 rehydrate 的记录标记 `restored`：首个周期仍越界则
+    **静默接管（不防抖、不推送）**，已恢复则走正常（防抖后的）恢复流程——崩溃重启循环不再把老问题当新事故。
+    修掉自测中发现的"`start()` 首行 `stop()` 会用空状态覆盖磁盘旧记录"这一回写竞态（`stateLoaded` 前禁止写盘）。
+  - **没有告警历史**：新增 `plugins/PerfScope/alerts.jsonl`（追加写，2 MB 自动轮转一次），
+    事件 `open/upgrade/downgrade/resolve/refire/restore/suspend/resolved_by_disable`，
+    每行 `ts/type/key/level/value/display`；新增 `public List<AlertEvent> recent(int limit)`（内存镜像 + 首访从文件播种）。
+  - **模块禁用 → 告警永久活跃**：所属模块连续不可用超过 `alerts.unknown-after-minutes`（默认 5）后，
+    该 key 转入 unknown（`getSuspendedCount()` 单列，不再算活跃）；模块恢复后仍在则静默接管，
+    已消失则**静默解决**（只记 `resolved_by_disable`，不发"已恢复正常"）。
+  - **告警风暴**：`alerts.digest-mode=true` 时同一检查周期内的新增告警合并为一条（按指标分组，
+    最多列 5 条 + "等 N 条"）；升级/复燃仍即时单独发。
+  - **文案零可行动性 / 无服务器标识**：推送前缀统一为 `[告警][级别][服名] 消息`，
+    详情追加 `key + 值 + 阈值 + 持续时长 + 下一步`（runbook）。服名取 `server.properties` 的 motd 首行
+    （去 § 色码、截断 16 字），取不到退化为端口号。**未改 `MetricsCollector` 的告警文案**。
+  - **投递成败分开统计**：`getPushOkTodayCount()` / `getPushFailTodayCount()` / `getWebhookQueuedTodayCount()`。
+    `WebhookNotifier.send()` 无返回值（fire-and-forget 异步），故 webhook 只报"已排队 N 条"，不谎称送达。
+- **9A-14 每日摘要（`alert/DailySummaryService.java`）**：
+  - **时区显式化**：新增键 `alerts.daily-summary.timezone`（IANA 名，空 = 系统时区），
+    日期/时刻/格式化全部走该时区；与系统时区不同时启动日志点名。构造与 `start()` 各解析一次，
+    每分钟节拍零 IO（reload 生效）。
+  - **覆盖不足不再冒充每日**：样本跨度 < 60 分钟或不足开机时长 50% 时，标题改为
+    「自 HH:mm 重启以来（数据不足）」，并附"覆盖 N 分钟，不足 X 的 50%——重启前数据已丢失"。
+  - **补 p95 与超阈分钟数**：p95 用线性插值（仅 `tps1m > 0`），超阈分钟数按相邻样本真实时间差加权
+    （跳过 >10 分钟的异常间隔，末样本按中位间隔补齐）——不依赖 HistoryStore 新 API，零新依赖。
+  - **推送成败分开报**：「推送 N 条（成功 M / 失败 K）」，webhook 单列"已排队 W 条"；unknown 数单列。
+  - 控制台输出补 `=== 每日摘要 ===` 首行锚点（此前只有 `[PerfScope] 每日摘要` 行）。
+- **9A-14 `config.yml` alerts 段**：`debounce-cycles` 注释修正为"单位是检查周期
+  （≈ `general.update_interval`，默认 1 秒），3 周期 ≈ 3 秒，不是 3 分钟"；新增
+  `recovery-debounce-cycles`(3)、`digest-mode`(false)、`notify-mitigation`(true)、
+  `unknown-after-minutes`(5)、`daily-summary.timezone`("")。
+- **9A-6 静默错误结论（8 条）**：
+  - **`/trend` 默认漏掉昨天**：`HistoryFileStore` 的 `minusDays(maxDays - 1)` 使 `days=1` 时
+    cutoff=今天，昨天 CSV 整文件被跳过——凌晨问"昨晚卡不卡"只能看到今天数据，输出却写"近 1 天"。
+    改为 `minusDays(maxDays)`（多读一天由 sinceMs 精确裁剪）。
+  - **TPS=0 输出 `Infinityms`**：`PerfScopeCommand` 的 `if (tps1m < 20) 1000.0/tps1m` 缺 `>0` 守卫，
+    而 TPS=0（主线程完全阻塞）是合法读数——恰在最需要读数的事故现场打印无穷大。
+    现单独渲染"服务器无响应（TPS=0，主线程可能已完全阻塞）"。
+  - **负阈值/超大阈值不被钳制**：`sanitizeIntPair` 只查 `w <= c`，`-5` 与 `999999` 均放行 →
+    前者使告警恒真且恢复不可达（永久告警），后者使告警永久静默。现要求 `0 ≤ 阈值 ≤ 10,000,000`，
+    `sanitizePair`（double）同步补下界；回退日志按"越界/倒置/非有限"三类分开措辞（原来一律说"倒置"）。
+  - **玩家占比三种算法并存**：命令层 int 截断、采集层 double 截断、诊断规则 `Math.round` →
+    179/200 时三方分别显示 89 / 89 / 90，可能直接触发 DIAG-PLAYER-CAP 而界面仍是绿色。
+    新增 `MetricsSnapshot.playerPercent()` / `playerPercentOf()` 作为唯一入口，三处全部改为调用。
+  - **每日摘要每天重启 N 次收 N 份**：`lastSentDate` 只在进程内存。现落盘到
+    `plugins/PerfScope/daily-summary.state`，发送成功后立即写入，重启后同日不再重发
+    （实机验证：场景跑完后文件内容为当日日期）。
+  - **告警重复消费同一快照**：`AlertService.onSnapshot` 无快照身份判重，检查周期比重启后采集周期更密时，
+    同一个 snapshot 被反复喂入，"连续 N 个周期观测"退化为"同一观测看了 N 次"。新增
+    `lastConsumedSnapshotTs` 按快照时间戳判重。
+  - **`catch (Exception ignored) {}` 静默吞异常**：`/perfscope entities <world>` 的世界扫描失败时
+    用户在游戏内只看到"读取失败"、控制台无任何根因。现记 FINE 级（含堆栈）+ debug 模式下 WARNING。
+  - **MEM-LEAK 的 `0` 哨兵**（已在 9A-8 同批修复）：`if (h > 0)` 跳过 0 而非判无效，
+    窗口后半段全 0 时会被判成"水位未回落"。现 `h <= 0` 直接 skip。
+
+- **9A-0 MSPT 极值捏造**（`MetricsCollector` 二级/三级降级路径）：原实现
+  `snap.msptMin = snap.msptAvg; snap.msptMax = snap.msptAvg;` 把平均值复制给 min/max，
+  报告层原样输出"最小: X | 最大: X"——三个数永远相等，是纯捏造的极值区间。
+  现改为：降级路径 min/max 置 `-1` 哨兵，展示层渲染"未采集"，HTML/TXT/JSON 三格式同步；
+  JSON `mspt` 段新增 `source` 字段（`tick_times` / `avg_tick` / `tps_fallback`）。
+- **9A-0 "(估算)"标签口径**（`PerfScopeCommand`）：原判定依据是静态能力位
+  （`PAPER_MSPT_AVAILABLE || PAPER_AVG_TICK_AVAILABLE`），只回答"这台服务端理论上支持什么"；
+  实际 invoke 失败降级到 TPS 反推时，会把估算值当精确值展示且不打标签。
+  现改为按**本快照实际采集路径**（`MetricsSnapshot.msptSource`）判定。
+  连带修正：`/diagnose` 的 DIAG-MSPT-SPIKE 规则此前因 min==max==avg 而**永不触发**，现在可正常判定。
+
+### Changed
+
+- **9A-12 README 三处自我打脸**（中英双语共 6 处）：
+  1. 「不做历史持久化……重启即清空；不落盘」与同页 `persist: true`、`/trend` 跨重启宣传直接矛盾
+     → 改为如实描述"内存 ~24h 环形缓冲 + 按天 CSV 落盘、默认保留 7 天、跨重启可查"，
+     并把真正的边界收窄为"不做周级/月级趋势、不做多服聚合、不替代外部监控"。
+  2. 「采集间隔均可配」—— 实为三个内置常量（实体/区块每 5 周期、方块实体每 10 周期），
+     只有热点区块可配 → 文案与事实对齐。
+  3. 「显示与告警同一口径」—— 实际显示用闭区间、部分告警用严格大于（`ThresholdColors` 类注释自认），
+     → 改为"同配置、同判定入口"，并明说"恰好等于阈值时颜色先变、告警随后"是有意的早预警语义。
+- **9A-12 性能自证数字纠正**：原写"约 2.5% 的采样含 `cn.perfscope` 栈帧"，
+  实为把**帧行数 110** 当**样本数**（真实 37/4394 = **0.84%**，单样本内栈帧横跨 3 行）。
+  同时补上原表隐去的限定：该测量基于 2026-10-18 构建，**早于 v1.2 的热点扫描与 CSV 持久化提交**；
+  分母 96.75% 来自 8 个空闲 I/O 线程的原生阻塞；主线程仅 19 个样本（n=1，95% CI 约 1%–25%）。
+  README 明确写出"采样份额 ≠ CPU 占用 ≠ TPS 影响"。
+- 「主线程零阻塞」→ "无长时阻塞，但每 60 秒有一次历史 CSV 追加写"（如实披露）。
+- **9A-10 并发与生命周期**（`MetricsCollector` / `ReportGenerator` / `PerfScope`）：
+  - **reload 把 cancel 当 join 用**：`TaskHandle.cancel()` 只阻止下一次执行，不中断也不 join。
+    旧任务跑完仍回写 `tickCounter` / 四个 `cacheReady` / `jvmCache` 等**非 volatile 裸字段**，
+    reload 后旧异步任务把**旧配置**算出的 JVM 快照写进新一代码。现引入
+    `volatile long generation`：`start()` 捕获当前代进任务闭包，`stop()` 与 `start()` 各自增一次；
+    任务体在**发布任何状态之前**（`jvmCache` / 四个 `refreshXxxCache` 的缓存字段 / `history.addLast` /
+    `onCycleSuccess` / `onCycleFailure`）比对代际，不符即整轮丢弃。
+  - **一份快照混用两代配置**：`collectSync` 持有 `cfg` 局部量，却在 `collectEntities` 里经
+    `configManager.getWorldSettings()` 回读**当前**配置；`applyJvmCache` 也二次 `configManager.get()`。
+    reload 时前半段用旧阈值、后半段用新阈值。现全部改为只读传入的 `cfg`，
+    新增私有 `worldSettingsFrom(cfg, worldName)`（不改 `ConfigManager`）。
+  - **快照"不可变"只是注释**：节流缓存把**同一个 Map 引用**塞进最多 300 份历史快照，一次误改全史污染。
+    现缓存刷新时存不可变副本，`applyXxxCache` 每次再拷一份独立 `LinkedHashMap`，快照入 `history` 前
+    统一 `freezeCollections`（Map 保留插入序、List 用 `List.copyOf`、Set 用 unmodifiable）。
+    `MetricsSnapshot` 类本身未改。
+  - **自动报告与 `/ps report` 写同一路径**：`exists()` 与 `Files.write(TRUNCATE)` 之间无原子性，
+    整分钟同时触发会互相截断。现 `ReportGenerator` 内置单线程守护执行器 `perfscope-report`
+    串行化全部生成+写盘，改用 `CREATE_NEW`（O_EXCL）原子创建，`FileAlreadyExistsException`
+    换名重试最多 10 次；新增 `shutdown()` 供 `onDisable()` 调用。
+  - **onDisable 顺序**改为「先停产生者（采集 → 自动报告）→ 再停消费者（日报 → 告警）→ 最后关输出
+    （报告执行器）」；看门狗提前到采集停止之前摘除（否则关服日志会报假过期）。
+
+### Fixed
+
+- **9A-20 可运维性（"对内全瞎"）—— 采集死亡后继续输出冻结快照**（`MetricsCollector`）：
+  `getLatest()` 永远返回 `history.peekLast()`，采集任务被静默取消后 `/perfscope` 仍渲染一屏"正常"数据，
+  唯一线索是需要人工比对的 `HH:mm:ss`。现新增采集健康三件套：
+  - `lastCollectAtMs`（每次 `collectSync` 成功末尾更新）+ `lastJvmCollectAtMs`（异步 JVM 节拍独立计时）；
+  - `isStale()`：`now - lastCollectAtMs > 3 × update_interval`（默认 20 tick → 3 秒；从未成功过则以
+    `start()` 时刻为基准、宽限 10 秒，与 `noData` 文案同一口径）；
+  - `staleForMs()` / `staleThresholdMs()` / `consecutiveCollectFailures()` / `isCollectorDead()` /
+    `lastCollectError()` / `firstFailureAtMs()` 访问器；`isJvmStale()` 单独覆盖异步节拍
+    （主线程正常 ≠ 内存/CPU/GC 是新的）。
+  状态放在 Collector（`MetricsSnapshot` 是 per-sample 的，不加字段）。
+- **9A-20 Error 逃逸让周期任务被静默取消**（`MetricsCollector` / `PerfScope`）：
+  `collectSync` 整个方法体无 try → 任何未捕获异常都会让 Bukkit **cancel 该 repeating task**，采集永久死亡且无 supervisor。
+  现任务体抽出为 `collectSyncOnce()`，外层 `try { ... } catch (Throwable t)`：`onCycleFailure` 累加
+  `consecutiveCollectFailures`、置 `collectorDead`、限频记 SEVERE；连续 10 次打 SEVERE 并提示
+  "`/perfscope reload` 或重启服务器"；成功一次即清零并补 INFO「采集已恢复」。
+  `OutOfMemoryError` / `ThreadDeath` **先发布死亡标志再原样抛回**（不吞 JVM 级故障）。
+  `collectJvmAsync` 同款任务边界（异步 repeating task 此前同样会被静默取消）。
+  **新增 supervisor**：`PerfScope` 每 10 秒（200 tick）异步看门狗，只在 `isStale()` / `isJvmStale()`
+  的**边沿**各记一条日志（不刷屏），覆盖"任务根本没跑起来"（Folia 调度失败返回 noop 句柄等）的盲区。
+- **9A-20 `safeCollect` 每周期一条 WARNING 无限频**（`MetricsCollector`）：
+  默认 1 秒一周期 = 单模块持续失败 **86400 条/天**，刷屏到看不见其他插件报错。现与
+  `WebhookNotifier`（60s）/ `HistoryFileStore`（300s）同款范式：**首次立即记，之后每 5 分钟一条**，
+  消息带「已连续失败 N 次」「首次失败 HH:mm」；模块恢复时补一条 INFO「模块 X 已恢复」
+  （恢复日志同样 5 分钟限频，抑制失败/恢复交替的抖动）。
+- **9A-20 "被配置禁用"与"采集失败"不可区分**（`MetricsSnapshot` / `MetricsCollector`）：
+  两者都塞进 `unavailable`，40 处判断统一渲染"不可用"——服主关掉 memory 后以为插件坏了。
+  新增 `MetricsSnapshot.disabledModules`（契约 `disabledModules ⊆ unavailable`，**`unavailable` 语义不变**，
+  既有 40 处判断零改动）；采集侧在「配置禁用」分支填 `disabledModules`，在「采集失败」分支只填 `unavailable`；
+  重模块（entities/chunks/tile_entities/hotspots）经 `*CacheDisabled` 标记在复用周期一并回放；
+  JVM 缓存里的禁用标记随 `applyJvmCache` 透传；`enabled=false` 的 memory/cpu 不再被误标"预热中"。
+- **9A-20 无 status 入口**（`PerfScopeCommand`）：新增 `/perfscope status`（help 一行，Tab 补全同步），
+  输出锚点 `=== 插件状态 ===`。内容：采集存活（`isStale` / 最后采集时刻 / 连续失败 / 周期健康 / 最近错误）、
+  JVM 异步节拍新鲜度、11 个模块的四态（正常 / 已禁用（config xxx.enabled=false）/ 采集失败（连续 N 次）/ 预热中）、
+  历史（`getHistorySize()` + `HistoryStore.size()` + 持久化可用性与目录）、当前告警（直接读
+  `activeWarnings`/`activeCriticals`，**不依赖 AlertService**）、调度器积压（按需现算）。
+  快照已过期时明确提示"其它子命令显示的仍是旧数据"。
+- **9A-20 采集任务自身健康**：
+  - `MetricsCollector.getHistorySize()` 此前零调用 → 已在 `/perfscope status` 接入（连带 `HistoryStore.size()`）；
+  - `MetricsSnapshot.pendingTasks` 全仓零读取且 `Bukkit.getScheduler().getPendingTasks()` 每周期构造完整列表 →
+    **字段与赋值一并删除**（诊断需要时在 status 里按需现算，不进采集热路径）；
+  - 顺手修：`MODULE_SERVER` 被主线程与 JVM 异步线程双路采集，共用健康槽位会互相清零失败计数 →
+    异步侧改用独立槽位 `server(jvm)`（`failingModules()` 合并回 `server`，status 展示不失真）；
+  - 顺手修：异步 JVM 节拍被静默取消时主线程仍每秒产快照，`isStale()` 看不出来 → 新增
+    `isJvmStale()` / `jvmSnapshotTimestamp()` 并在 status 与看门狗中单独判定。
+
+### Fixed（9A-23 / 9A-24：对外材料 + i18n 四处真问题）
+
+- **9A-24-1 两个死键接线**（`messages.yml` 的 `report-generated` / `reload-failed-old-config`
+  此前全仓零调用，改了也没用）：
+  - `PerfScopeCommand.handleReport` 的 `Component.text("报告已生成: ", GREEN)` → `Messages.get("report-generated")`；
+  - `PerfScope.reload` 的 `getLogger().warning("PerfScope 配置重载未完成（已按旧配置重启采集/告警）")`
+    → `Messages.get("reload-failed-old-config")`。两处默认值与改造前硬编码**逐字一致**（harness 断言不变）。
+- **9A-24-2 控制台 reload 日志硬编码**（`PerfScope.reload` 的 `"PerfScope 配置已重载喵~"`）：
+  新增键 `reloaded-console`（默认值逐字等于原硬编码，保留 `PerfScope ` 前缀），控制台改走 `Messages.get`。
+  选择独立键而非复用聊天侧 `reloaded`：专业部署常只想中性化聊天回复、不想改控制台日志；且复用会让
+  "聊天侧改了、控制台没改"的旧分裂反转为"改一处两处一起变"，两种行为都不是管理员显式要求。
+- **9A-24-3 plugin.yml 的 permission-message 第三份副本**（方案 A，已实机验证）：
+  新增 `Messages#applyCommandPermissionMessage(plugin)`，在 `load()` 末尾（启动 + 每次 reload）
+  用 `PluginCommand#permissionMessage(Component)` 把 `no-permission` 的实际值回写为指令权限拒绝文案。
+  验证：临时 harness 场景（已删除）在真实 Paper 1.21.4 上证明——messages.yml 写
+  `no-permission: "9A24-BASELINE-DENY"` 后，非 OP 玩家服务端侧分发 `/perfscope` 收到的拒绝文案是
+  该标记（而非 plugin.yml 的 `你没有权限使用此指令喵`）；reload 改成第二个标记后再分发，聊天里
+  跟着变成新标记（7/7 checks passed）。plugin.yml 的值保留为"消息层加载前首帧兜底"并加注释说明。
+- **9A-24-4 "三级回退"实为两级**（`Messages.load`）：删除对最终 `get()` 结果零影响的
+  `yaml.setDefaults(jar 资源)` 段（`overrides` 只从用户文件 `getKeys(true)` 填充），类注释与
+  `get()` 注释统一改为如实的两级"用户覆盖 → 内置 DEFAULTS"，并注明"若确需资源层，必须在
+  `get()` 里加真正的回退分支"。
+- **9A-24-5 类注释里的错误计数**（`Messages`）：删掉"12 个键，含全部 9 处喵"这类会漂移的数字，
+  改为指向 `keys()` / `messages.yml` 的权威清单。
+- **9A-24-6 清理游离 plugin.yml 副本**：删除未跟踪的 `./plugin.yml` 与
+  `src/main/java/cn/perfscope/plugin.yml`（version 硬编码 `1.2.0`，与 `${project.version}` 过滤会漂移）。
+
+- **9A-23 上架材料包从 v1.1 升到 v1.2 口径**（`docs/07-guides/PERFSCOPE-LISTING-KIT.md`）：
+  版本占位全部改 v1.2.0；三处"不做历史持久化 / 回答不了昨晚卡不卡"改为如实描述
+  （内存 24h 环 + 按天 CSV + 默认保留 7 天 + `/trend` 跨重启可查）；子命令数 18 → **23**
+  （按 `PerfScopeCommand` switch 分支去重计数，Tab 补全同步 23 项）；新增
+  `/diagnose`（5 规则 + 三态评估）、`/hotspot`（Top3 区块坐标）、`/trend`、`/status`、`/alerts`
+  五项功能段落；新增 §0.1 `diag` vs `diagnose` 别名说明（上架文案只用 `diagnose`）；
+  §1.4 重写诚实边界五条，新增"Folia 上 MSPT 不可用"与"Paper 1.20.4+ 仅编译期兼容"。
+
+---
+
 ## [1.2.0] — 2026-10-19
 
 > **发布概要**（面向用户剪裁；逐波次开发流水见下方各段）：
@@ -40,7 +323,8 @@
 - `/perfscope hotspot`（别名 `hs`）：实体密度 Top3（含玩家）+ 坐标可点击复制 + 主导类型占比。
 - `/perfscope trend [天数]`：跨重启趋势摘要（范围/来源/平均与最低 TPS/峰值内存/覆盖时段）。
 - `HistoryFileStore`：按天 CSV 持久化（重启不清零；损坏行容错；过期自动清理；零新依赖）。
-- `Messages` + `messages.yml`：消息层三级回退（内置默认/资源/用户覆盖），`喵` 类文案全部可配置。
+- `Messages` + `messages.yml`：消息层两级回退（内置默认 / 用户覆盖；原文误记为"三级"，
+  9A-24 已更正），`喵` 类文案全部可配置。
 - 配置：`history.persist` / `history.retention-days` / `hotspots.enabled` / `hotspots.sample-every-cycles`。
 
 ### Changed
@@ -64,11 +348,12 @@
 
 ### Added
 - **`cn.perfscope.util.Messages`**（新类）：消息层单一出口——
-  内置默认（与迁移前文案**逐字一致**，默认行为零变更）→ jar 资源 `messages.yml` → 数据目录
-  `messages.yml`（管理员覆盖）三级回退；空值/缺失键回退默认、文件损坏回退全默认（永不抛异常）；
-  reload 时随 `/perfscope reload` 刷新（缺失/损坏自动回退）。
+  内置默认（与迁移前文案**逐字一致**，默认行为零变更）→ 数据目录 `messages.yml`（管理员覆盖）
+  两级回退（9A-24 更正：原文写"三级"，中间的 jar 资源层实为空转，已删除）；空值/缺失键回退默认、
+  文件损坏回退全默认（永不抛异常）；reload 时随 `/perfscope reload` 刷新（缺失/损坏自动回退）。
 - **`src/main/resources/messages.yml`**（新资源）：首次运行生成到数据目录，
-  13 个键（含全部用户可见的 9 处"喵"），注释含"专业部署可去除口癖"用法示例。
+  覆盖全部用户可见的"喵"类文案（键数以 `Messages.keys()` 为准，不在文档里维护会漂移的数字），
+  注释含"专业部署可去除口癖"用法示例。
 - 迁移首批 12 个最高可见度键：权限拒绝×3 / 玩家限定 / monitor 开关×3 / 重载成功失败 /
   报告生成失败 / 启动关闭横幅×2——命令层 9 处 + PerfScope 2 处调用点全部改走 `Messages.get`。
 

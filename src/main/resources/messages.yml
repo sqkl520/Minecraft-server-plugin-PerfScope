@@ -4,6 +4,15 @@
 #
 # 本文件可覆盖插件的用户可见文案。缺键自动回退内置默认，无需保留全部键。
 #
+# 回退顺序（9A-24：实为两级，不存在"jar 资源"中间层）：
+#   本文件的同名键 → 代码内置默认（Messages.DEFAULTS）→ 键名本身（仅用于排查）
+# 键的权威清单：代码里的 Messages.DEFAULTS 与本文件（两边应保持一致）。
+#
+# 说明：no-permission 用于"整条指令被拒"（Bukkit 权限门 + 执行器兜底）。
+#      子命令的专项拒绝有各自的键：no-permission-export / no-permission-reload。
+#      插件启动/重载时会把 no-permission 的值回写为 /perfscope 的 permission-message，
+#      因此改这里即可，不必再改 plugin.yml。
+#
 # 用法示例（专业部署可去除口癖）：
 #   no-permission: "You do not have permission to use this command"
 #   reloaded: "Configuration reloaded"
@@ -20,6 +29,8 @@ monitor-needs-paper: "实时监测功能需要 Paper 服务端支持 ActionBar �
 
 # 操作反馈
 reloaded: "配置已重载喵~"
+# 控制台 reload 日志（9A-24：与聊天侧 reloaded 分开；默认值与历史硬编码逐字一致）
+reloaded-console: "PerfScope 配置已重载喵~"
 reload-failed-old-config: "PerfScope 配置重载未完成（已按旧配置重启采集/告警）"
 report-generated: "报告已生成: "
 report-failed: "报告生成失败喵"

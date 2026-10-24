@@ -24,17 +24,28 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
+import java.util.logging.Logger;
 
 /**
  * 历史环形缓冲（Wave 7A；来源：docs/06-tasks/WAVE7-DESIGN.md「7A」节锁定契约）。
  *
  * <p>因果背景：v1.1 的最长记忆只有 300 个采集快照（默认约 5 分钟），事故复盘中"什么时候开始的"
- * 无法回答；本类提供约 24 小时的固定窗口历史内存缓冲（重启清零，文件持久化规划于 Wave 8B）。</p>
+ * 无法回答；本类提供约 24 小时的固定窗口历史内存缓冲（重启清零，文件持久化见
+ * {@link HistoryFileStore}）。</p>
  *
- * <p><b>容量与节流</b>：采样间隔来自配置 {@code history.sample-interval-seconds}，容量 =
- * max(1, 86400 / 间隔秒数)（覆盖约 24h）；二者在每次 {@link #record} 时按当前配置读取/重算——
- * reload 改间隔后容量随之伸缩（变小则淘汰最旧、变大则保留既有样本），绝不整体清空
- * （契约 7A-5：reload 不清空）。实例由 PerfScope 持有（非采集器持有），reload/采集重启不丢历史。</p>
+ * <p><b>容量与节流（9A-18 重做）</b>：采样间隔来自配置 {@code history.sample-interval-seconds}，
+ * 但<b>容量不再由间隔反推</b>——旧实现 {@code capacity = 86400 / intervalSec} 让"把间隔调大"
+ * 等价于"把历史容量调小"：设 3600 秒 → 容量 24 条，reload 时还会把已有 1440 条瞬时削到 24 条；
+ * 同时 24 条样本在 30 分钟诊断窗口里最多 1 条，{@code CoreRules} 的 {@code MIN_SAMPLES} 判据
+ * 永久不满足（两条趋势规则静默失效）。现在：</p>
+ * <ul>
+ *   <li>容量固定 {@value #CAPACITY} 条（内存上界，与 interval 解耦）；</li>
+ *   <li>淘汰按<b>时间窗</b>：丢弃 {@code timestamp < now - 24h} 的样本，再以容量兜底；</li>
+ *   <li>reload 改 interval（含变大/变小）都不会整体清空或瞬间缩容（契约 7A-5）。</li>
+ * </ul>
+ * <p>注意：容量解耦只解决"历史被削掉"，<b>不解决</b>"间隔大到诊断窗口里没有样本"——
+ * 间隔 &gt; {@value #DIAGNOSIS_MAX_INTERVAL_SEC} 秒时本类会打一条 WARNING（每个取值只打一次），
+ * 说明趋势规则会因样本不足长期 skip。真正的上限应落在 ConfigManager 的配置钳制里。</p>
  *
  * <p><b>污染防护（契约 7A-2）</b>：{@code snap.unavailable} 含 {@code MODULE_TPS} 时整条跳过不记
  * （TPS 是锚指标，不可用期的假 0 会毒化最低 TPS）；其余字段按 RAW 存、不消毒（-1 等哨兵原样存）。</p>
@@ -60,10 +71,22 @@ import java.util.List;
  */
 public final class HistoryStore {
 
-    /** 一日秒数：容量公式基数（契约 7A：覆盖约 24h）。 */
-    private static final int SECONDS_PER_DAY = 86400;
+    /** 9A-18：固定容量（内存上界）。默认 60 秒间隔下恰好覆盖 24h；更快的间隔覆盖时间更短，但内存可控。 */
+    private static final int CAPACITY = 1440;
+
+    /** 9A-18：时间窗淘汰口径（24 小时）。 */
+    private static final long WINDOW_MS = 24L * 60L * 60L * 1000L;
+
+    /**
+     * 9A-18：超过该间隔就提示"趋势规则会因样本不足长期 skip"。
+     * 最紧的诊断窗口是 10 分钟 / 5 条，30 分钟窗要 10 条 → 3 分钟间隔已是极限；取 180 秒。
+     */
+    private static final long DIAGNOSIS_MAX_INTERVAL_SEC = 180L;
 
     private final ConfigManager configManager;
+
+    /** 9A-18：日志出口（PerfScope 的插件 logger；无参构造时回退同名 JDK logger）。 */
+    private final Logger logger;
 
     /** 环形缓冲，迭代序旧→新（ArrayDeque）；全部访问经 this 锁。 */
     private final Deque<HistorySample> ring = new ArrayDeque<>();
@@ -75,13 +98,25 @@ public final class HistoryStore {
      *  不可用 Long.MIN_VALUE 作哨兵——{@code now - Long.MIN_VALUE} 溢出为负会令首次采样被误节流）。 */
     private long lastRecordMs = 0L;
 
+    /** 9A-18：已经提示过"间隔过大"的取值（同一个值只提示一次，reload 改值后可再次提示）。 */
+    private volatile long warnedIntervalSec = -1L;
+
     public HistoryStore(ConfigManager configManager) {
+        this(configManager, null);
+    }
+
+    /**
+     * 9A-18：带 logger 的构造（推荐）。PerfScope 尚未改调用点前，无参构造回退到
+     * {@code Logger.getLogger("PerfScope")}（Bukkit 插件 logger 即插件名，输出落同一控制台）。
+     */
+    public HistoryStore(ConfigManager configManager, Logger logger) {
         this.configManager = configManager;
+        this.logger = logger != null ? logger : Logger.getLogger("PerfScope");
     }
 
     /**
      * 记录一条历史采样（由采集主线程在 collectSync 末尾调用）。
-     * 门控顺序：history.enabled → TPS 锚指标可用性 → 节流间隔 → 入环 + 按当前配置容量淘汰最旧。
+     * 门控顺序：history.enabled → TPS 锚指标可用性 → 节流间隔 → 入环 + 时间窗/容量淘汰。
      * 因不可用/节流跳过的调用不更新节流基准（恢复后下一周期即可立即补记）。
      */
     public void record(MetricsSnapshot snap) {
@@ -98,6 +133,7 @@ public final class HistoryStore {
         // 防御性下限（ConfigManager 已在 load 时钳制非法值，此处零成本兜底）
         long intervalSec = Math.max(1, cfg.history_sampleIntervalSeconds);
         long now = System.currentTimeMillis();
+        warnIfIntervalTooLarge(intervalSec);
         HistorySample sample = new HistorySample(
             snap.timestamp,   // 采样时刻取快照自身时间戳（数据时点），而非入环时刻
             snap.tps1m,
@@ -108,27 +144,83 @@ public final class HistoryStore {
             snap.totalLoadedChunks
         );
         synchronized (this) {
+            // 9A-6 / 9A-18：NTP 回拨（now 小于 lastRecordMs）时旧值会让节流永久卡死——
+            // 差值恒为负、永远 < 间隔。检测到回拨即重置基准，本条立即放行。
+            if (lastRecordMs != 0L && now < lastRecordMs) {
+                lastRecordMs = 0L;
+            }
             if (lastRecordMs != 0L && now - lastRecordMs < intervalSec * 1000L) {
                 return; // 节流：距上次采样不足间隔，直接返回（lastRecordMs==0 为首次采样，放行）
             }
             lastRecordMs = now;
+            // 9A-18：乱序判定（NTP 回拨/快照时间戳回退）——见 evictLocked 注释
+            HistorySample tail = ring.peekLast();
+            boolean outOfOrder = tail != null && sample.timestamp() < tail.timestamp();
             ring.addLast(sample);
-            long capacity = Math.max(1L, SECONDS_PER_DAY / intervalSec);
-            while (ring.size() > capacity) {
-                ring.pollFirst();
-            }
+            // 9A-18：先按 24h 时间窗淘汰（与 interval 无关），再以固定容量兜底。
+            evictLocked(now, outOfOrder);
         }
-        // Wave 8B：文件持久化（锁外执行——IO 不占环锁；HistoryFileStore 内部自兜底限频，
-        // 失败绝不影响内存环与采集主流程；persist=false 时 append 内部直接返回）
+        // Wave 8B / 9A-18：文件持久化（锁外执行；9A-18 起 append 只做非阻塞入队，
+        // 真正的写盘在 perfscope-history-writer 守护线程上批量完成，主线程零 IO）
         HistoryFileStore fs = fileStore;
         if (fs != null) {
             fs.append(sample);
         }
     }
 
+    /**
+     * 9A-18：按时间窗 + 容量淘汰（调用方须持锁）。
+     *
+     * <p>常规路径 O(1/条)：头部过期就删、超容量就删最旧。但 NTP 回拨会让新样本的时间戳小于
+     * 环尾，此时"只删头"不够——过期样本可能不在头部，且 {@link #samples()} 承诺的"旧→新"
+     * 迭代序也被破坏（{@link #gaps} 等消费方依赖该序）。因此乱序一旦发生就整体重排一次
+     * （1440 条的一次性排序，异常场景才触发），之后恢复单调、淘汰重新精确。</p>
+     */
+    private void evictLocked(long now, boolean outOfOrder) {
+        if (outOfOrder) {
+            List<HistorySample> sorted = new ArrayList<>(ring);
+            sorted.sort((x, y) -> Long.compare(x.timestamp(), y.timestamp()));
+            ring.clear();
+            ring.addAll(sorted);
+        }
+        long cutoff = now - WINDOW_MS;
+        while (!ring.isEmpty()) {
+            HistorySample head = ring.peekFirst();
+            if (head.timestamp() >= cutoff && ring.size() <= CAPACITY) {
+                break;
+            }
+            ring.pollFirst();
+        }
+    }
+
+    /**
+     * 9A-18：间隔过大时的可见提示。容量与间隔解耦后，历史不会再被削掉，但"30 分钟窗口 10 条样本"
+     * 在 3600 秒间隔下仍不可能满足；旧行为是静默 skip，新行为至少让服主在控制台看到原因。
+     */
+    private void warnIfIntervalTooLarge(long intervalSec) {
+        if (intervalSec <= DIAGNOSIS_MAX_INTERVAL_SEC || warnedIntervalSec == intervalSec) {
+            return;
+        }
+        warnedIntervalSec = intervalSec;
+        logger.warning("[历史] history.sample-interval-seconds=" + intervalSec
+            + " 过大：30 分钟诊断窗口内最多只有 " + Math.max(1L, 1800L / intervalSec)
+            + " 条样本，DIAG-MEM-LEAK / DIAG-TPS-PERSIST 等趋势规则会因样本不足（MIN_SAMPLES=10）长期跳过。"
+            + "建议保持 ≤60 秒。");
+    }
+
     /** Wave 8B：装配文件持久化出口（PerfScope 在构造时/装配期调用；null 安全）。 */
     public void setFileStore(HistoryFileStore fileStore) {
         this.fileStore = fileStore;
+    }
+
+    /** 9A-18：环形容量上界（固定 1440 条，与采样间隔无关）。 */
+    public int capacity() {
+        return CAPACITY;
+    }
+
+    /** 9A-18：时间窗淘汰口径（24h，毫秒）。 */
+    public long windowMs() {
+        return WINDOW_MS;
     }
 
     /** 全部样本（旧→新，不可变副本）；history.enabled=false 时返回空列表。 */
@@ -145,6 +237,48 @@ public final class HistoryStore {
             }
         }
         return List.copyOf(result);
+    }
+
+    /**
+     * 9A-18：重启/采集中断造成的数据缺口——相邻样本间隔 &gt; 2× 期望间隔即记为一段缺口。
+     *
+     * <p>用于 /perfscope trend 输出"数据缺口 N 处，共 M 小时"，把"没有数据"与"数据正常"
+     * 区分开（旧实现两者都表现为一条平线）。缺口语义为<b>开区间</b>：{@code startMs} 是缺口前
+     * 最后一个样本时刻，{@code endMs} 是缺口后第一个样本时刻。</p>
+     *
+     * @param sinceMs            只统计该时刻（含）之后的样本
+     * @param expectedIntervalMs 期望采样间隔（通常为 history.sample-interval-seconds × 1000）
+     * @return 缺口列表（按时间升序，不可变）；参数非法时返回空列表
+     */
+    public List<Gap> gaps(long sinceMs, long expectedIntervalMs) {
+        if (expectedIntervalMs <= 0L) {
+            return List.of();
+        }
+        long threshold = expectedIntervalMs > Long.MAX_VALUE / 2L
+            ? Long.MAX_VALUE : expectedIntervalMs * 2L;
+        List<Gap> result = new ArrayList<>();
+        HistorySample prev = null;
+        for (HistorySample s : snapshotAll()) {
+            if (s.timestamp() < sinceMs) {
+                continue;
+            }
+            if (prev != null) {
+                long delta = s.timestamp() - prev.timestamp();
+                if (delta > threshold) {
+                    result.add(new Gap(prev.timestamp(), s.timestamp()));
+                }
+            }
+            prev = s;
+        }
+        return List.copyOf(result);
+    }
+
+    /** 9A-18：一段数据缺口（左开右闭语义见 {@link #gaps}）。 */
+    public record Gap(long startMs, long endMs) {
+        /** 缺口时长（毫秒，恒 ≥ 0）。 */
+        public long durationMs() {
+            return Math.max(0L, endMs - startMs);
+        }
     }
 
     /** 窗口内 tps1m 最高的样本（"最好的时刻"）；无有效样本返回 null。过滤规则见类注释。 */

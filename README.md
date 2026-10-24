@@ -20,7 +20,7 @@
 - **CPU 诊断** —— 进程 CPU 使用率/系统 CPU 负载/可用处理器数/活跃线程数
 - **Tile Entity 统计** —— 总数/按世界分布
 - **服务器运行信息** —— uptime/线程数/已加载插件数/已加载世界数/JVM 版本
-- **高度自定义配置** —— 所有模块的告警阈值、采集间隔均可配置
+- **高度自定义配置** —— 所有模块的告警阈值均可配置
 - **ActionBar 实时监测** —— `/perfscope monitor` 切换，每秒刷新核心指标到 ActionBar（动作栏，屏幕底部物品栏上方）。定位为**诊断探针**：排查卡顿或事故处置时开启几十秒观察实时波动，看完即关；并非设计为 7×24 常驻监测面板
 - **性能报告导出** —— 支持 HTML/TXT/JSON 三种格式，HTML 报告含 TPS 趋势图、实体分布表、内存进度条、告警高亮
 - **自动报告生成** —— 可配置间隔，异步生成不阻塞主线程，旧报告自动按保留天数清理
@@ -30,16 +30,36 @@
 - **每日摘要**（v1.2 新增） —— 每天固定时刻推送 3 行概况：最低 TPS（含时刻）/ 峰值实体与内存 / 告警统计；若配置时刻服务端恰好停机，启动后会自动补发当天一次
 - **历史摘要**（v1.2 新增） —— `/perfscope history` 查看近 24 小时概况：覆盖时长、最低 TPS 与发生时刻、峰值实体、峰值内存，回答"什么时候开始变差的"
 - **热点区块定位**（v1.2 新增） —— `/perfscope hotspot` 列出全服实体密度 Top3 区块与坐标（含主导类型占比），把"实体多"下钻到"去哪个坐标看看"；坐标可点击复制
-- **彩色 UI 面板** —— 使用 Paper Adventure API 渲染，关键指标按 `config.yml` 告警阈值分级着色（绿/黄/红）；显示与告警同一口径，改配置 reload 后颜色立即跟随
+- **彩色 UI 面板** —— 使用 Paper Adventure API 渲染，关键指标按 `config.yml` 告警阈值分级着色（绿/黄/红）；阈值来源与告警**同配置、同判定入口**，改配置 reload 后颜色立即跟随。注意：显示用闭区间（达到阈值即变色），部分指标告警用严格大于，因此**恰好等于阈值的那一瞬颜色会先变、告警随后到达**（有意的早预警语义）
 
 ## 目标平台与兼容性
 
-PerfScope 自 v1.1 起专注 **Paper 系**服务端，深度依赖 Paper 原生 Adventure API 等特性：
+PerfScope 自 v1.1 起专注 **Paper 系**服务端，深度依赖 Paper 原生 Adventure API 等特性。
 
-- **支持**：Paper 1.20.4+ 及其下游分支（Purpur / Pufferfish / Leaves 等）
-  —— **Folia / Purpur / Leaf / Leaves 已实机验证**（1.21.4 真实服务端跑通全部命令面与历史功能，各 49 条断言）
-- **Folia**：自 v1.1 起支持——通过调度适配层经 `GlobalRegionScheduler` / `AsyncScheduler` 适配，`plugin.yml` 已声明 `folia-supported: true`（全局与 JVM 级指标完整，实体/区块指标为尽力而为）
-- **不支持**：纯 Spigot / CraftBukkit
+> 先说结论：**"能加载 / 命令有响应" ≠ "数值正确"**。下表区分这两件事，请按下表理解验证强度。
+
+| 平台 | 验证强度 | 说明 |
+|------|----------|------|
+| **Paper 1.21.x** | **已实机验证** | 全部命令面 + 阈值告警 + 历史持久化 + 诊断引擎在真实服务端跑通 |
+| **Paper 1.20.4+** | **编译期兼容** | 以 `paper-api 1.20.4` 编译（`pom.xml`），**尚未在 1.20.x 实机启动验证**；1.20.4 以下无保证 |
+| **Purpur / Leaf / Leaves** | **可加载验证** | 同一份 Paper 代码路径能启动、命令可响应；**分支私有优化（AI 限速、实体合并、区块缓存等）未覆盖**，可能影响实体/区块计数的绝对准确性 |
+| **Folia** | **可加载，指标受限** | 能启动并响应命令，但 **MSPT 不可用**（无全局 tick 时间），**TPS 为 global region 局部值**（不是全服吞吐）；实体/区块/热点在跨 region 场景下可能显示"不可用" |
+| **纯 Spigot / CraftBukkit** | 不支持 | 依赖 Adventure 渲染，无法在无 Paper API 的服务端运行 |
+
+补充说明：
+
+- **兼容矩阵的边界**：项目内的 196 条兼容断言验证的是**加载与命令可达性**（命令能执行、输出含预期标题/字段），
+  **不是数值正确性**——断言均为标签子串匹配，不校验读到的 TPS/MSPT/实体数是否真值。
+- **Paper 1.21.x 上的 MSPT 口径**：走 Paper `getTickTimes()`（一次拿到 avg/min/max）；
+  若该实现异常返回全零，插件会在启用后约 5–10 秒（连续两次实测确认，避免瞬态误判）自动降级为
+  "不可用"，**不会输出假精确值**。
+- **Folia 的 TPS 标注**：所有 TPS 输出追加 `(global region)` 标注。global region 只跑全局逻辑与
+  不归属任何 region 的区块，因此该数值**低于**玩家实际体感的全服吞吐属正常现象；空服启动初期
+  global region 报表存在空窗期，短时接近 0 的读数同样不代表服务器卡死。
+- **Folia 的 MSPT**：`getTickTimes()` 在该平台上方法存在但恒返回全零，插件在启用后即判定
+  MSPT 不可用（无需等待实测），`/perfscope mspt` 显示"不可用（Folia 无全局 tick 时间）"。
+- **Folia 的调度**：经 `GlobalRegionScheduler` / `AsyncScheduler` 适配，`plugin.yml` 已声明
+  `folia-supported: true`；JVM 级指标（内存/CPU/GC/线程）完整可用。
 
 ## 命令
 
@@ -65,6 +85,7 @@ PerfScope 自 v1.1 起专注 **Paper 系**服务端，深度依赖 Paper 原生 
 | `/perfscope gc` | GC 统计（各收集器详情） |
 | `/perfscope report [格式]` | 导出性能报告（html/txt/json） |
 | `/perfscope monitor` | 切换 ActionBar 实时监测 |
+| `/perfscope status` | 插件自身状态（采集是否存活/模块三态/历史/告警） |
 | `/perfscope reload` | 重载配置文件 |
 | `/perfscope help` | 查看命令帮助 |
 
@@ -104,7 +125,7 @@ GC: 42 次 / 5.23 秒
 
 ## 安装
 
-> **下载**：[GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest)（最新正式版 **v1.2.0**，`PerfScope-1.2.0.jar`）
+> **下载**：[GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest)（最新正式版 **v1.2.1**，`PerfScope-1.2.1.jar`）
 
 1. 下载最新版本的 JAR 文件
 2. 放入服务器的 `plugins/` 目录
@@ -224,35 +245,53 @@ worlds:
 
 > 注：**红石活动**与**网络吞吐量**监测已于 v1.1 下线（红石为空实现、网络为硬编码假数据），相关指标与功能不再提供；`/perfscope redstone` 子命令保留入口但仅返回下线提示。
 
-## 性能与开销（自证）
+## 性能与开销（自测，非保证）
 
 性能插件若说不清自身开销就是自相矛盾。本插件的设计取向是**重活远离主线程**：
 
-- **JVM 指标异步采集**——内存/CPU/GC/运行时信息在异步线程读取 MXBean，整体快照发布给主线程复用，主线程零阻塞；
-- **主线程只做轻量 Bukkit 读取**——TPS/MSPT/玩家每周期采；实体/区块每 5 周期、方块实体每 10 周期、
-  热点区块每 30 周期（均可配）才全遍历一次，其余周期复用缓存；
+- **JVM 指标异步采集**——内存/CPU/GC/运行时信息在异步线程读取 MXBean，整体快照发布给主线程复用；主线程不做长时阻塞。唯一与磁盘相关的主线程动作是每 60 秒一次历史 CSV **入队**（非阻塞 `offer`，队列满则丢弃并计数），真正的写盘在 `perfscope-history-writer` 守护线程上批量完成；
+- **主线程只做轻量 Bukkit 读取**——TPS/MSPT/玩家每周期采；实体/区块每 5 周期、方块实体每 10 周期
+  为内置常量，热点区块每 30 周期（`hotspots.sample-every-cycles` 可配）才全遍历一次，其余周期复用缓存；
 - **玩家层推送自带守卫**——ActionBar 每秒推送仅在玩家开启 monitor 时运行，断线瞬间跳过而非报错。
 
-**实测（JDK Flight Recorder，`settings=profile`，90 秒窗口，Paper 1.21.4，monitor 活跃 + 常规采集节奏）**：
+**实测（JFR，90 秒窗口，被测构建：2026-10-18 的 master 快照，非 v1.2 发布构建；空服 + 1 bot / `view-distance=5` / 约 121 个已加载区块）**：
 
-| 指标 | 实测值 |
+| 口径 | 数值 |
 |---|---|
-| 含 `cn.perfscope` 栈帧的采样占比 | **约 2.5%** |
-| 其中落在异步线程（JVM 指标采集） | 36/110 帧 |
-| 主线程区块全遍历命中 | 90 秒内 1 个样本 |
+| 采样**样本**中含 `cn.perfscope` 帧 | 37 / 4394 = **0.84%** |
+| 其中异步线程（JVM 指标采集） | 36 / 37 |
+| 主线程（Server thread） | 19 个样本中 1 个命中（Wilson 95% CI 约 0.9%–24.6%） |
 
-复现方式（对运行中的服务器做 JFR 采样并统计）：`tools/perfscope-jfr-overhead.ps1`
+**这个数字是什么、不是什么**（每一条都重要）：
 
-> 局限声明：上表为本机（共享开发机、轻载场景、90 秒窗口）的**量级参考**，非性能保证；
-> 高负载下的完整基线（5000 实体 / 2000 区块的 P99）仍在建设中。若你观察到异常开销，
-> 请带 spark profiler 链接反馈。
+- 它是"线程时间构成里的**采样份额**"，**不是 CPU 百分比**——分母是 JFR 的样本数，不是 CPU 时间。
+- 它**不等于**对 TPS 或 tick 延迟的影响。没有做 A/B、没有 tick 耗时对比，就不能从 0.84% 推出"掉多少 TPS"。
+- 该窗口 **96.75% 的样本（4251 / 4394）来自 8 个空闲 I/O 线程的原生阻塞采样**——`HttpClient-SelectorManager`×2、`FileSystemWatchService`、`HTTP-Dispatcher`、`RCON Listener`、`Netty Server IO #0/#1/#2`，各约 531 个。它们几乎不耗 CPU（阻塞在 `WEPoll.wait` / `GetQueuedCompletionStatus`），所以样本总数反映的主要是"空闲线程被采样了多少次"，而不是"谁在干活"；0.84% 是在这样一个被空闲线程主导的分母下算出来的。
+- 主线程只有 **19 个样本、命中 1 个**。Wilson 95% 区间约 0.9%–24.6%，**样本量不足以支撑任何结论**——既不能证明它低，也不能证明它高。
+- 测的是 **2026-10-18 05:14 的构建**，早于热点全服扫描提交（同日 21:39）与 CSV 写盘提交（次日 02:17），即**测的不是 v1.2 发布构建**。栈帧里的 `MetricsCollector.java:656` 是当时那份代码的行号（`collectChunks` 方法体里的 `world.getLoadedChunks()`），而当前源码里该方法已在不同的行——**这本身就说明被测二进制与仓库 HEAD 不是同一份代码**；本表因此不覆盖 v1.2 新增的主线程路径。
+- 早期草稿曾按"帧行数"报告 110 帧 ≈ 2.5%，那是**把帧行当样本**：一个样本内 `getProcessCpuLoad0 → getProcessCpuLoad() → collectCPU → lambda$collectJvmAsync$5 → safeCollect` 横跨 3 行 `cn.perfscope`，按行数会把结果放大 3 倍。本文所有数字都已改为**按样本块**计数。
+
+**已知的主线程开销点**（如实列出，未做量化）：
+
+- 每 5 个周期（默认 5 秒）一次 `world.getLoadedChunks()`，为每个世界分配一次区块数组；上表里主线程**唯一**的命中样本正好落在它上面（`CraftWorld.getLoadedChunks ← collectChunks`）。2000–5000 区块下这个数组的分配成本**尚未测量**；
+- 每 30 周期（默认 30 秒）一次**全服区块全遍历**（热点定位）：对每个非空区块取 `getEntities()` 并建一张 `HashMap` 统计主导类型。这是本插件在主线程上最重的一段，**尚未测量**；
+- 每采集周期一次 `history.size()` 判上限（`ConcurrentLinkedDeque.size()` 是 O(n) 遍历，默认环长 300，即每秒约 300 次节点遍历）；
+- 每 60 秒一次历史采样入队（非阻塞）＋主线程侧的环形缓冲写入。
+- **告警状态落盘**：历史上是主线程同步 IO（`AlertService.persistState()` 用 `Files.write` + 原子 `Files.move` 写临时文件再替换）。2026-10-25 的忙载采样里，22 个主线程命中中有 **5 个**落在这条路径上（`checkCycle ← persistState ← Files.write`），是仅次于区块/实体遍历的单项。**该路径已改为投递到单写者守护线程**（状态快照仍在主线程做，只有 open/write/move 移到 `perfscope-alert-state-writer` 守护线程）；上面那个 5/22 是**修复前**构建的数据，新构建尚未复测。
+
+**尚未测量的**：high-load P99（5000 实体 / 2000 区块）、GC 次数与停顿影响、堆驻留、启动开销、A/B 对照。
+
+复现：`tools/perfscope-jfr-overhead.ps1`（按样本块计数、同时请求 `jdk.ExecutionSample` 与 `jdk.NativeMethodSample`、单列 Server thread 并给出 Wilson 区间、打印被测 jar 的版本与 SHA-256）。
+完整、可执行的最小实测集（三档负载、A/B 基线、产物格式）见 `docs/07-guides/PERF-BASELINE-PLAN.md`。
+
+> 局限声明：上表是本机（共享开发机、空服 + 1 名 bot、`view-distance 5`、约 121 个已加载区块、90 秒窗口）的**量级参考**，不是性能保证，也不代表你的服务器。测试负载只有 2000–5000 区块目标的 **2%–5%**（121 区块 vs 2000–5000，相差 16–41 倍）。若你观察到异常开销，请带 `/spark profiler` 链接反馈。
 
 ## 边界与不做什么
 
 诚实划界——以下事情本插件**不**做，请按需搭配其他工具：
 
 1. **不做根因定位** —— 本插件给出"哪块指标异常"的嫌疑范围，不做方法级火焰图剖析；真正定位卡顿根因请用 `/spark profiler`。
-2. **不做历史持久化** —— 历史仅保存在内存环形缓冲中（约 24 小时窗口，`/perfscope history` 可查），**重启即清空**；不落盘、不做周级/月级趋势。需要长期留存请自行定时导出报告或接入外部监控。
+2. **不做长期时序分析平台** —— 历史**会落盘**（默认开启，见 `history.persist`）：内存环形缓冲保留约 24 小时（`/perfscope history`），同时按天写入 `plugins/PerfScope/history/history-<日期>.csv`，默认保留 7 天（`history.retention-days`），`/perfscope trend` 可跨重启回查。但本插件**不做**周级/月级趋势分析、不做多服务器聚合、不替代外部监控（Prometheus/Grafana）；需要长期留存或跨服对比请自行接入外部监控。
 3. **MSPT 尖刺检测窗口有限** —— 底层取自 Paper `getTickTimes()` 的滚动窗口（约最近 100 tick）；若尖刺发生在窗口之外，"刚才卡了吗"不一定会如实反映。
 4. **不做任何自动处置** —— 本插件只观测、告警与出报告，不会自动执行任何干预动作（不重启、不清理实体、不改配置）。
 5. **告警有防抖延迟** —— 告警默认需连续 3 个采集周期超标才推送（`alerts.debounce-cycles` 可配），最长延迟约 3×采集间隔（默认约 3 秒）；这是为抑制阈值附近抖动噪音的有意取舍，要求秒级即时到达的场景可把 `debounce-cycles` 设为 1。

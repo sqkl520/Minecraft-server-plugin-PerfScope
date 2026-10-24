@@ -176,6 +176,14 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             case "reload": case "rl":
                 handleReload(sender);
                 break;
+            // 9A-20 #5：插件自身健康（采集存活/模块三态/历史/告警）——此前对内全瞎，只能全量 reload
+            case "status":
+                showStatus(sender);
+                break;
+            // 9A-14 #4：告警历史（此前只有"当前活跃"，没有"何时开始/持续多久/恢复了吗"）
+            case "alerts": case "alarm":
+                showAlerts(sender, args);
+                break;
             case "help": case "h": case "?":
                 showHelp(sender);
                 break;
@@ -198,12 +206,19 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
 
         // === 头部 ===
         sender.sendMessage(Component.text("=== PerfScope 诊断 ===", GOLD, TextDecoration.BOLD));
-        sender.sendMessage(Component.text("服务端: " + ServerCompat.getServerName(), GRAY));
+        // 9A-2：Folia 上"服务端"行必须自带口径说明——Bukkit.getTPS() 是 global region 局部值、
+        // MSPT 无全局 tick 时间，否则读者会把下面 TPS/MSPT 两行当成全服读数。
+        Component serverLine = Component.text("服务端: " + ServerCompat.getServerName(), GRAY);
+        if (ServerCompat.isFolia()) {
+            serverLine = serverLine.append(Component.text("  [TPS=global region 局部值"
+                + (ServerCompat.isMsptTrustworthy() ? "" : "；MSPT 不可用") + "]", GRAY));
+        }
+        sender.sendMessage(serverLine);
         sender.sendMessage(Component.text("采集时间: "
             + DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault())
                 .format(Instant.ofEpochMilli(snap.timestamp)), GRAY));
 
-        // TPS（P0-5：模块不可用显示"不可用"）
+        // TPS（P0-5：模块不可用显示"不可用"；9A-2：Folia 追加 global region 口径标注）
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_TPS)) {
             sender.sendMessage(yellowLabel("TPS (1m/5m/15m): ")
                 .append(Component.text("不可用", GRAY)));
@@ -213,21 +228,26 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 .append(Component.text(" / ", WHITE))
                 .append(formatTpsComponent(snap.tps5m))
                 .append(Component.text(" / ", WHITE))
-                .append(formatTpsComponent(snap.tps15m)));
+                .append(formatTpsComponent(snap.tps15m))
+                .append(tpsScopeTag()));
         }
 
         // MSPT（P0-5：先判模块级"不可用"；P0-13：再判 -1 哨兵显示"未知"）
-        if (snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT)) {
+        // 9A-1：Folia 上 MSPT 能力位恒 false（无全局 tick 时间）——此时既不能出数、也不能用
+        // region 局部 TPS 反推，直接按"不可用"渲染并说明原因。
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT) || !ServerCompat.isMsptTrustworthy()) {
             sender.sendMessage(yellowLabel("MSPT (avg/min/max): ")
-                .append(Component.text("不可用", GRAY)));
+                .append(Component.text("不可用", GRAY))
+                .append(msptUnavailableTag()));
         } else {
-            // A1（命令侧）：仅当一级 TickTimes 与二级 getAverageTickTime 都不可用（走 TPS 反推）才标"(估算)"；
-            // 二级是 Paper 平均 tick 真实数据、不是估算——判定与采集侧三级降级链口径一致（MC-1 修复后）
-            Component msptSource = !(ServerCompat.PAPER_MSPT_AVAILABLE || ServerCompat.PAPER_AVG_TICK_AVAILABLE)
+            // A1（命令侧，9A-0 修正）："(估算)"按**本快照实际采集路径**标注，不再用静态能力位推断。
+            // 静态位只回答"这台服务端理论上支持什么"；实际 invoke 可能失败并降级，那种情况下
+            // 旧实现会把 TPS 反推值当精确值展示，且不显示"(估算)"。
+            Component msptSource = snap.msptSource == MetricsSnapshot.MSPT_SOURCE_TPS_FALLBACK
                 ? Component.text(" (估算)", GRAY) : Component.empty();
-            Component msptMinAll = snap.msptMin <= 0 ? Component.text("未知", GRAY)
+            Component msptMinAll = snap.msptMin <= 0 ? Component.text("未采集", GRAY)
                 : Component.text(String.format("%.2f", snap.msptMin) + "ms", WHITE);
-            Component msptMaxAll = snap.msptMax <= 0 ? Component.text("未知", GRAY)
+            Component msptMaxAll = snap.msptMax <= 0 ? Component.text("未采集", GRAY)
                 : Component.text(String.format("%.2f", snap.msptMax) + "ms", WHITE);
             sender.sendMessage(yellowLabel("MSPT (avg/min/max): ")
                 .append(formatMSPTComponent(snap.msptAvg))
@@ -386,12 +406,19 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             sender.sendMessage(yellowLabel("TPS: ").append(Component.text("不可用", GRAY)));
             return;
         }
+        // 9A-2：Folia 上 Bukkit.getTPS() 是 global region 局部值（只覆盖 global region 的 tick 吞吐，
+        // 不含各 region 的实体/区块逻辑），不是全服 TPS。此处如实标注口径，
+        // 并在下方额外说明"为什么这不是全服读数"，避免管理员拿它跟 /tps 对比后误判。
+        if (!ServerCompat.isTpsGlobalScope()) {
+            sender.sendMessage(Component.text("口径: TPS 为 global region 局部值，非全服吞吐", YELLOW));
+        }
         sender.sendMessage(yellowLabel("TPS (1m/5m/15m): ")
             .append(formatTpsComponent(snap.tps1m))
             .append(Component.text(" / ", WHITE))
             .append(formatTpsComponent(snap.tps5m))
             .append(Component.text(" / ", WHITE))
-            .append(formatTpsComponent(snap.tps15m)));
+            .append(formatTpsComponent(snap.tps15m))
+            .append(tpsScopeTag()));
 
         // TPS 趋势图
         List<MetricsSnapshot> history = collector.getHistory();
@@ -421,10 +448,13 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             sender.sendMessage(Component.text("  ").append(trend));
         }
 
-        // 对应 MSPT 推算
-        if (snap.tps1m < 20) {
+        // 对应 MSPT 推算（9A-6：TPS=0 是服务器完全冻结时的合法读数，除零会打印 "Infinityms"，
+        // 而那正是最需要读数的事故现场——必须单独处理而不是让它显示成无穷大）
+        if (snap.tps1m > 0 && snap.tps1m < 20) {
             double expectedMspt = 1000.0 / snap.tps1m;
             sender.sendMessage(Component.text("当前等效 MSPT: " + String.format("%.1f", expectedMspt) + "ms", GRAY));
+        } else if (snap.tps1m <= 0) {
+            sender.sendMessage(Component.text("当前等效 MSPT: 服务器无响应（TPS=0，主线程可能已完全阻塞）", RED));
         }
     }
 
@@ -436,21 +466,23 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
 
         sender.sendMessage(Component.text("=== MSPT 诊断 ===", GOLD, TextDecoration.BOLD));
         // P0-5：先判模块级"不可用"（P0-13 的 -1 哨兵"未知"仍由 formatMSPTComponent 处理）
-        if (snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT)) {
-            sender.sendMessage(yellowLabel("MSPT: ").append(Component.text("不可用", GRAY)));
+        // 9A-1：能力位为 false（Folia 无全局 tick 时间 / 实测恒空）时不存在可信数据源——
+        // 直接按"不可用"渲染并给出原因，绝不用 TPS 反推充数（Folia 的 TPS 是 region 局部值）。
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT) || !ServerCompat.isMsptTrustworthy()) {
+            sender.sendMessage(yellowLabel("MSPT: ").append(Component.text("不可用", GRAY))
+                .append(msptUnavailableTag()));
             return;
         }
-        // A1（命令侧）："(估算)"标签仅在一级 TickTimes 与二级 getAverageTickTime 都不可用
-        //（走 TPS 反推）时标注，与 showAll 同口径；二级是 Paper 真实平均 tick 数据、非估算
-        Component msptEstimate = !(ServerCompat.PAPER_MSPT_AVAILABLE || ServerCompat.PAPER_AVG_TICK_AVAILABLE)
+        // A1（命令侧，9A-0 修正）："(估算)"按本快照实际采集路径标注，与 showAll 同口径
+        Component msptEstimate = snap.msptSource == MetricsSnapshot.MSPT_SOURCE_TPS_FALLBACK
             ? Component.text(" (估算)", GRAY) : Component.empty();
         sender.sendMessage(yellowLabel("平均 MSPT: ")
             .append(formatMSPTComponent(snap.msptAvg))
             .append(msptEstimate));
-        // P0-13：-1 哨兵显示"未知"
-        Component msptMinComp = snap.msptMin <= 0 ? Component.text("未知", GRAY)
+        // 9A-0：-1 = 该采集路径不提供极值（二级 avg-only / 三级反推），显示"未采集"而非伪造数字
+        Component msptMinComp = snap.msptMin <= 0 ? Component.text("未采集", GRAY)
             : Component.text(String.format("%.2f ms", snap.msptMin), WHITE);
-        Component msptMaxComp = snap.msptMax <= 0 ? Component.text("未知", GRAY)
+        Component msptMaxComp = snap.msptMax <= 0 ? Component.text("未采集", GRAY)
             : Component.text(String.format("%.2f ms", snap.msptMax), WHITE);
         sender.sendMessage(yellowLabel("最小 MSPT: ").append(msptMinComp));
         sender.sendMessage(yellowLabel("最大 MSPT: ").append(msptMaxComp));
@@ -522,8 +554,15 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                     live.merge(entity.getType().name(), 1, Integer::sum);
                 }
                 scanned = live;
-            } catch (Exception ignored) {
-                // 世界实体扫描异常（如 Folia 跨区域限制）→ 下方显示"读取失败"
+            } catch (Exception e) {
+                // 9A-6：原来是 catch (Exception ignored) {}——Folia 跨区域限制等失败时
+                // 用户在游戏内只看到"读取失败"，控制台没有任何根因，排障只能靠猜。
+                plugin.getLogger().log(java.util.logging.Level.FINE,
+                    "[PerfScope] 世界实体即时扫描失败（world=" + world.getName() + "），显示为读取失败", e);
+                if (plugin.getConfigManager().get().general_debug) {
+                    plugin.getLogger().warning("[PerfScope] 世界实体扫描失败: " + e.getClass().getSimpleName()
+                        + ": " + e.getMessage());
+                }
             }
             typeDist = scanned;
             int sum = 0;
@@ -705,7 +744,9 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         sender.sendMessage(goldLabel("在线玩家: ")
             .append(Component.text(snap.playerCount + " / " + snap.maxPlayers, WHITE, TextDecoration.BOLD)));
 
-        int pct = snap.maxPlayers > 0 ? (snap.playerCount * 100 / snap.maxPlayers) : 0;
+        // 9A-6：统一走 MetricsSnapshot.playerPercent()（此前这里是 int 截断、采集层是 double 截断、
+        // 诊断规则是 Math.round，89.5% 时三方分别 89/89/90）
+        int pct = snap.playerPercent();
         String pBar = generateBar(pct, 30);
         // v1.2 A8：改为读 config 阈值（原硬编码 95/80，与默认巧合一致）
         TextColor pctColor = thresholdColors.colorOf(
@@ -904,6 +945,11 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
      * <p>输出锚点（harness 依赖）：标题 {@code === 智能诊断 ===}；无命中时 {@code 未发现已知问题}；
      * 每条命中含 {@code [ID] 标题} 行与 {@code 建议: } 行。能力边界声明逐字保留
      * （诚实划界——"本引擎只覆盖 N 条高置信规则"，防止被当成 spark 的替代品）。</p>
+     *
+     * <p><b>9A-3 修正</b>：旧实现用 {@code DiagnosticEngine.ruleCount()}（注册总数）冒充
+     * "已检查 N 条"，而 3/5 条规则前置不成立时根本没运行。现在改为如实报告
+     * "已评估 X/Y 条"并在有跳过时列出原因；只有当全部规则都评估过且无命中，
+     * 才允许说"未发现已知问题"。</p>
      */
     private void showDiagnose(CommandSender sender) {
         MetricsSnapshot snap = collector.getLatest();
@@ -912,10 +958,19 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             return;
         }
         sender.sendMessage(Component.text("=== 智能诊断 ===", GOLD, TextDecoration.BOLD));
-        List<Diagnosis> hits = plugin.getDiagnosticEngine().run();
+        var result = plugin.getDiagnosticEngine().run();
+        List<Diagnosis> hits = result.hits();
+        List<Diagnosis.Skip> skipped = result.skipped();
         if (hits.isEmpty()) {
-            sender.sendMessage(Component.text("未发现已知问题（已检查 " + DiagnosticEngine.ruleCount()
-                + " 条高置信规则）", GREEN));
+            if (result.fullyEvaluated()) {
+                sender.sendMessage(Component.text("未发现已知问题（已评估 " + result.evaluatedCount()
+                    + "/" + result.total() + " 条高置信规则）", GREEN));
+            } else {
+                // 有规则没跑：不能说"未发现"，只能说"没查完"
+                sender.sendMessage(Component.text("未发现问题，但结论不完整（已评估 "
+                    + result.evaluatedCount() + "/" + result.total() + " 条，其余 "
+                    + skipped.size() + " 条因证据不足未评估）", YELLOW));
+            }
         } else {
             for (Diagnosis d : hits) {
                 TextColor color = d.critical() ? RED : YELLOW;
@@ -926,7 +981,14 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                     .append(Component.text(d.suggestion(), AQUA)));
             }
         }
-        sender.sendMessage(Component.text("提示: 本引擎覆盖 " + DiagnosticEngine.ruleCount()
+        // 未评估明细（9A-3）：让服主知道"哪条没查、还缺什么"，而不是以为全查过了
+        if (!skipped.isEmpty()) {
+            sender.sendMessage(Component.text("未评估的规则（" + skipped.size() + " 条）:", GRAY));
+            for (Diagnosis.Skip s : skipped) {
+                sender.sendMessage(Component.text("  · " + s.ruleId() + " — " + s.reason(), GRAY));
+            }
+        }
+        sender.sendMessage(Component.text("提示: 本引擎覆盖 " + result.total()
             + " 条高置信规则，方法级深挖请用 /spark profiler", GRAY));
     }
 
@@ -1113,12 +1175,12 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             // 手抄不现实。玩家挂 copyToClipboard（悬停提示"点击复制路径"）；控制台/RCON 保持纯文本
             //（控制台无点击交互语义，路径仍是可用的诊断信息）
             if (sender instanceof Player) {
-                sender.sendMessage(Component.text("报告已生成: ", GREEN)
+                sender.sendMessage(Component.text(Messages.get("report-generated"), GREEN) // 9A-24：接线死键
                     .append(Component.text(path, GREEN, TextDecoration.UNDERLINED)
                         .clickEvent(ClickEvent.copyToClipboard(path))
                         .hoverEvent(HoverEvent.showText(Component.text("点击复制路径", GREEN)))));
             } else {
-                sender.sendMessage(Component.text("报告已生成: " + path, GREEN));
+                sender.sendMessage(Component.text(Messages.get("report-generated") + path, GREEN)); // 9A-24
             }
         } else {
             sender.sendMessage(Component.text(Messages.get("report-failed"), RED));
@@ -1135,6 +1197,274 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         }
         plugin.reload();
         sender.sendMessage(Component.text(Messages.get("reloaded"), GREEN));
+    }
+
+    // ==================== 9A-20 #5：插件自身状态 ====================
+
+    /**
+     * /perfscope status —— 插件自身健康（9A-20 #5）。
+     *
+     * <p>背景（锐评原文："对外很聪明，对内全瞎"）：此前 21 个子命令没有一个回答"插件自己还活着吗"。
+     * 采集任务被 Bukkit 静默取消后，所有子命令继续渲染最后一张快照，与正常运行无法区分；
+     * 模块被配置关掉与采集抛异常也共用同一句"不可用"。本命令把这些区分开：</p>
+     * <ul>
+     *   <li><b>采集存活</b>：{@link MetricsCollector#isStale()} / lastCollectAtMs / 连续失败次数；</li>
+     *   <li><b>模块三态</b>：正常 / 已禁用（config enabled=false）/ 采集失败 / 预热中——分别读
+     *       {@code disabledModules} / {@code unavailable} / {@code warmingUp}；</li>
+     *   <li><b>历史</b>：{@link MetricsCollector#getHistorySize()}、持久化可用性与目录；</li>
+     *   <li><b>告警</b>：直接读快照的 activeWarnings/activeCriticals（不依赖 AlertService 状态机）。</li>
+     * </ul>
+     *
+     * <p>输出锚点（harness 依赖）：标题 {@code === 插件状态 ===}。全部为只读操作、无副作用。</p>
+     */
+    private void showStatus(CommandSender sender) {
+        sender.sendMessage(Component.text("=== 插件状态 ===", GOLD, TextDecoration.BOLD));
+        sender.sendMessage(goldLabel("版本: ").append(Component.text(
+            plugin.getDescription().getVersion() + " | 服务端: " + ServerCompat.getServerName(), WHITE)));
+
+        // ---------- 采集存活（9A-20 #1） ----------
+        long lastAt = collector.lastCollectAtMs();
+        int cycleFailures = collector.consecutiveCollectFailures();
+        boolean stale = collector.isStale();
+        if (lastAt <= 0L && !stale) {
+            sender.sendMessage(goldLabel("采集: ").append(Component.text(
+                "尚未完成首轮采集（启动/重载后约 1 秒内就绪；超过 10 秒请看控制台）", YELLOW)));
+        } else if (lastAt <= 0L) {
+            // 9A-20：首轮采集就一直没产出（超过 10 秒）——这同样属于"采集死了"，不能只说"稍候"
+            sender.sendMessage(goldLabel("采集: ").append(Component.text(
+                "启动后 " + formatStatusDuration(collector.staleForMs())
+                    + " 仍无任何成功采集（从未拿到数据）", RED, TextDecoration.BOLD)));
+            sender.sendMessage(Component.text(
+                "  处理: 先看控制台是否有采集异常；可执行 /perfscope reload，仍无效请重启服务器", RED));
+        } else if (stale) {
+            sender.sendMessage(goldLabel("采集: ").append(Component.text(
+                "已停止更新 " + formatStatusDuration(collector.staleForMs())
+                    + "（最后采集 " + formatStatusClock(lastAt) + "）", RED, TextDecoration.BOLD)));
+            sender.sendMessage(Component.text(
+                "  警告: 其它子命令显示的仍是旧数据，不能据此判断服务器当前状态；"
+                    + "报告里的\"生成时间\"也不等于\"采样时间\"", RED));
+        } else {
+            sender.sendMessage(goldLabel("采集: ").append(Component.text(
+                "正常（最后采集 " + formatStatusClock(lastAt) + "，"
+                    + String.format(java.util.Locale.ROOT, "%.1f", collector.staleForMs() / 1000.0)
+                    + " 秒前）", GREEN)));
+        }
+        ConfigManager.ConfigData cfg = configManager.get();
+        long intervalTicks = cfg == null ? 20L : Math.max(1L, cfg.general_updateInterval);
+        sender.sendMessage(goldLabel("采集周期: ").append(Component.text(
+            intervalTicks + " tick（约 " + intervalTicks * 50L + "ms）"
+                + " | 过期阈值: " + collector.staleThresholdMs() + "ms", WHITE)));
+        // 9A-20 顺手项：JVM 异步节拍是独立任务——主线程节拍正常 ≠ 内存/CPU/GC 是新的。
+        // 异步任务被静默取消时主线程仍每秒产快照，只有这一行能看出来。
+        long jvmAt = collector.jvmSnapshotTimestamp();
+        if (collector.isJvmStale()) {
+            sender.sendMessage(goldLabel("JVM 采集: ").append(Component.text(
+                jvmAt <= 0L ? "从未成功（内存/CPU/GC 无数据）"
+                    : "已停止更新（内存/CPU/GC 停留在 " + formatStatusClock(jvmAt) + " 的值）", RED)));
+        } else {
+            sender.sendMessage(goldLabel("JVM 采集: ").append(Component.text(
+                "正常（最后更新 " + (jvmAt <= 0L ? "首轮未到" : formatStatusClock(jvmAt)) + "）", GREEN)));
+        }
+        // 9A-20：周期级 Throwable 逃逸过 → collectorDead；任务仍在按周期重试，故按"是否真的停止产出"
+        // 分两种语气：已过期（真的没数据了）才说"已停止"，否则说"本轮异常，等待自愈"
+        boolean reallyDead = collector.isCollectorDead() && (stale || cycleFailures >= 10);
+        Component cycleState = reallyDead
+            ? Component.text("已停止（周期任务抛过未捕获异常，采集无产出）", RED)
+            : (cycleFailures > 0 ? Component.text("本轮异常，任务仍在重试", YELLOW)
+                : Component.text("正常", GREEN));
+        sender.sendMessage(goldLabel("周期健康: ")
+            .append(Component.text("连续失败 " + cycleFailures + " 次 | ", WHITE))
+            .append(cycleState));
+        if (cycleFailures > 0 && collector.firstFailureAtMs() > 0L) {
+            sender.sendMessage(Component.text("  首次失败: " + formatStatusClock(collector.firstFailureAtMs()), GRAY));
+        }
+        String lastError = collector.lastCollectError();
+        if (lastError != null && !lastError.isEmpty()) {
+            sender.sendMessage(Component.text("  最近错误: " + lastError, GRAY));
+        }
+        if (collector.isCollectorDead() || cycleFailures >= 10) {
+            sender.sendMessage(Component.text(
+                "  处理: /perfscope reload 重建采集任务；若仍无效请重启服务器", YELLOW));
+        }
+
+        // ---------- 模块状态（9A-20 #3 三态） ----------
+        MetricsSnapshot snap = collector.getLatest();
+        sender.sendMessage(Component.text("--- 模块状态 ---", GOLD, TextDecoration.BOLD));
+        if (snap == null) {
+            sender.sendMessage(Component.text("  尚无快照（采集首轮未完成），模块状态未知", YELLOW));
+        } else {
+            if (stale) {
+                sender.sendMessage(Component.text("  注意: 以下是最后一张快照（"
+                    + formatStatusClock(snap.timestamp) + "）的状态，不代表现在", RED));
+            }
+            Map<String, Integer> failing = collector.failingModules();
+            for (String[] entry : STATUS_MODULES) {
+                String module = entry[0];
+                String display = entry[1];
+                Component state;
+                if (snap.disabledModules.contains(module)) {
+                    // entry[2] 为空表示该模块没有配置开关（正常路径不会进 disabledModules，防御性兜底）
+                    state = entry[2].isEmpty()
+                        ? Component.text("已禁用", GRAY)
+                        : Component.text("已禁用（config " + entry[2] + "=false）", GRAY);
+                } else if (snap.warmingUp.contains(module)) {
+                    state = Component.text("预热中（首轮采集未就绪）", YELLOW);
+                } else if (snap.unavailable.contains(module)) {
+                    Integer times = failing.get(module);
+                    state = Component.text("采集失败"
+                        + (times == null ? "" : "（连续 " + times + " 次）"), RED);
+                } else {
+                    state = Component.text("正常", GREEN);
+                }
+                sender.sendMessage(Component.text("  " + display + ": ", WHITE).append(state));
+            }
+        }
+
+        // ---------- 历史（9A-20 #6：getHistorySize 此前零调用） ----------
+        sender.sendMessage(Component.text("--- 历史数据 ---", GOLD, TextDecoration.BOLD));
+        sender.sendMessage(goldLabel("内存环形缓冲: ").append(Component.text(
+            collector.getHistorySize() + " 条快照（上限 300，约 "
+                + (collector.getHistorySize() * Math.max(1L, intervalTicks) / 20L) + " 秒）", WHITE)));
+        int historySamples = historyStore == null ? 0 : historyStore.size();
+        sender.sendMessage(goldLabel("历史采样环: ").append(Component.text(
+            historySamples + " 个样本（history.sample-interval-seconds="
+                + (cfg == null ? "?" : cfg.history_sampleIntervalSeconds) + "）", WHITE)));
+        var fileStore = plugin.getHistoryFileStore();
+        boolean persistOn = cfg != null && cfg.history_persistEnabled;
+        boolean persistOk = fileStore != null && fileStore.available();
+        Component persistState;
+        if (!persistOn) {
+            persistState = Component.text("已禁用（config history.persist=false）", GRAY);
+        } else if (persistOk) {
+            persistState = Component.text("可用", GREEN);
+        } else {
+            persistState = Component.text("不可用（目录不存在/只读，/trend 只能看本进程会话）", RED);
+        }
+        sender.sendMessage(goldLabel("文件持久化: ").append(persistState));
+        // 目录与 HistoryFileStore 内部布局一致（plugin.getDataFolder()/history）；该路径未对外暴露 getter，
+        // 故此处按同一约定推导（若持久化布局变更需同步改这里）
+        sender.sendMessage(goldLabel("历史目录: ").append(Component.text(
+            plugin.getDataFolder().toPath().resolve("history").toAbsolutePath().toString(), GRAY)));
+
+        // ---------- 告警（直接读快照，不依赖 AlertService 状态机） ----------
+        sender.sendMessage(Component.text("--- 当前告警 ---", GOLD, TextDecoration.BOLD));
+        if (snap == null) {
+            sender.sendMessage(Component.text("  尚无快照，无法统计", YELLOW));
+        } else {
+            int criticals = snap.activeCriticals.size();
+            int warnings = snap.activeWarnings.size();
+            Component warnState = warnings == 0 ? Component.text("无告警", GREEN)
+                : Component.text(warnings + " 条警告", YELLOW);
+            Component critState = criticals == 0 ? Component.text("无严重告警", GREEN)
+                : Component.text(criticals + " 条严重告警", RED);
+            sender.sendMessage(goldLabel("活跃告警: ").append(critState)
+                .append(Component.text(" | ", WHITE)).append(warnState));
+            boolean alertsOn = cfg != null && cfg.alerts_enabled;
+            sender.sendMessage(goldLabel("告警推送: ").append(Component.text(
+                alertsOn ? "已启用" : "已禁用（config alerts.enabled=false）", alertsOn ? GREEN : GRAY)));
+        }
+
+        // ---------- 调度器（9A-20 #6：按需现算，不进采集热路径） ----------
+        try {
+            int pending = Bukkit.getScheduler().getPendingTasks().size();
+            sender.sendMessage(goldLabel("调度器积压: ").append(Component.text(
+                pending + " 个待执行任务", pending > 500 ? YELLOW : WHITE)));
+        } catch (Exception | LinkageError t) {
+            sender.sendMessage(goldLabel("调度器积压: ").append(Component.text(
+                "不可用（Folia 无全局 Bukkit 调度器）", GRAY)));
+        }
+    }
+
+    /**
+     * 告警历史（9A-14 #4）：回答"这条告警什么时候开始的、持续多久、恢复了吗"。
+     *
+     * <p>用法：{@code /perfscope alerts [N]}（默认 20，上限 500）。
+     * 输出锚点：{@code === 告警历史 ===}。</p>
+     */
+    private void showAlerts(CommandSender sender, String[] args) {
+        int limit = 20;
+        if (args.length > 1) {
+            try {
+                limit = Integer.parseInt(args[1].trim());
+            } catch (NumberFormatException e) {
+                sender.sendMessage(Component.text("条数需为整数，已按 20 处理", YELLOW));
+            }
+        }
+        limit = Math.max(1, Math.min(500, limit));
+
+        sender.sendMessage(Component.text("=== 告警历史 ===", GOLD, TextDecoration.BOLD));
+        var alertService = plugin.getAlertService();
+        if (alertService == null) {
+            sender.sendMessage(Component.text("告警服务未启用（alerts.enabled=false）", GRAY));
+            return;
+        }
+        List<cn.perfscope.alert.AlertService.AlertEvent> events = alertService.recent(limit);
+        if (events.isEmpty()) {
+            sender.sendMessage(Component.text("暂无告警记录（近 " + limit + " 条内为空）", GRAY));
+            return;
+        }
+        for (var ev : events) {
+            TextColor color = "resolve".equals(ev.type()) || "resolved_by_disable".equals(ev.type())
+                ? GREEN : "critical".equals(ev.level()) ? RED : YELLOW;
+            sender.sendMessage(Component.text(" " + formatStatusClock(ev.ts()) + " ", GRAY)
+                .append(Component.text("[" + alertEventTypeName(ev.type()) + "] ", color))
+                .append(Component.text(ev.key() + " ", WHITE))
+                .append(Component.text(ev.display(), GRAY)));
+        }
+        sender.sendMessage(Component.text("共 " + events.size() + " 条（旧→新）；当前活跃 "
+            + alertService.getActiveCount() + " 条，模块不可用转 unknown "
+            + alertService.getSuspendedCount() + " 条", GRAY));
+    }
+
+    /** 告警事件类型中文名（9A-14）。 */
+    private static String alertEventTypeName(String type) {
+        switch (type) {
+            case "open": return "新增";
+            case "upgrade": return "升级";
+            case "downgrade": return "降级";
+            case "resolve": return "恢复";
+            case "refire": return "复燃";
+            case "restore": return "接管";
+            case "suspend": return "转unknown";
+            case "resolved_by_disable": return "静默解决";
+            default: return type;
+        }
+    }
+
+    /** 9A-20 status：模块展示表 {模块名, 展示名, 配置键}（顺序即输出顺序）。 */
+    private static final String[][] STATUS_MODULES = {
+        {MetricsSnapshot.MODULE_TPS, "TPS", "tps.enabled"},
+        {MetricsSnapshot.MODULE_MSPT, "MSPT", "mspt.enabled"},
+        {MetricsSnapshot.MODULE_PLAYERS, "在线玩家", "players.enabled"},
+        {MetricsSnapshot.MODULE_ENTITIES, "实体", "entities.enabled"},
+        {MetricsSnapshot.MODULE_CHUNKS, "区块", "chunks.enabled"},
+        {MetricsSnapshot.MODULE_TILE_ENTITIES, "方块实体", "tile_entities.enabled"},
+        {MetricsSnapshot.MODULE_HOTSPOTS, "热点区块", "hotspots.enabled"},
+        {MetricsSnapshot.MODULE_MEMORY, "内存", "memory.enabled"},
+        {MetricsSnapshot.MODULE_CPU, "CPU", "cpu.enabled"},
+        {MetricsSnapshot.MODULE_GC, "GC", ""},
+        {MetricsSnapshot.MODULE_SERVER, "服务器信息", ""},
+    };
+
+    /** 9A-20 status：epoch ms → "HH:mm:ss"（本地时区，与"采集时间"行同口径）。 */
+    private String formatStatusClock(long epochMs) {
+        return DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault())
+            .format(Instant.ofEpochMilli(epochMs));
+    }
+
+    /** 9A-20 status：毫秒时长 → "X 分 Y 秒" / "Y 秒"（负数或未知返回"未知"）。 */
+    private String formatStatusDuration(long ms) {
+        if (ms < 0) {
+            return "未知";
+        }
+        long totalSeconds = ms / 1000L;
+        if (totalSeconds >= 3600L) {
+            return (totalSeconds / 3600L) + " 小时 " + ((totalSeconds % 3600L) / 60L) + " 分";
+        }
+        if (totalSeconds >= 60L) {
+            return (totalSeconds / 60L) + " 分 " + (totalSeconds % 60L) + " 秒";
+        }
+        return totalSeconds + " 秒";
     }
 
     // ==================== 实时监测 ====================
@@ -1218,11 +1548,17 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         // A2（T1a）：六字段消费三态约定，与 showAll 同口径——
         // module unavailable → 该段"不可用"（灰；内存模块预热态除外，见下）；MSPT -1 哨兵由 formatMSPTComponent 渲染"未知"（灰）。
         // 修复禁用模块上屏 "TPS: 0.0"（红）/ "内存: 0%"（假绿）/ MSPT 直出 "-1.0" 的误导渲染
+        // 9A-1 / 9A-2：MSPT 能力位为 false（Folia 无全局 tick 时间）时 ActionBar 也显示"不可用"，
+        // 否则会在 Folia 上渲染出 -1 哨兵派生的"未知"，被误读成"采集坏了"。
+        boolean msptUnavailable = snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT)
+            || !ServerCompat.isMsptTrustworthy();
         Component actionBar = Component.text("TPS: ", GRAY)
             .append(snap.unavailable.contains(MetricsSnapshot.MODULE_TPS)
                 ? Component.text("不可用", GRAY) : formatTpsComponent(snap.tps1m))
+            // 9A-2：Folia 上追加极简口径标记（ActionBar 空间有限，用 "gr" 缩写并在 /perfscope tps 展开说明）
+            .append(ServerCompat.isTpsGlobalScope() ? Component.empty() : Component.text(" gr", GRAY))
             .append(Component.text(" | MSPT: ", GRAY))
-            .append(snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT)
+            .append(msptUnavailable
                 ? Component.text("不可用", GRAY) : formatMSPTComponent(snap.msptAvg))
             .append(Component.text(" | 玩家: ", GRAY))
             .append(snap.unavailable.contains(MetricsSnapshot.MODULE_PLAYERS)
@@ -1281,6 +1617,9 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         sendHelpLine(sender, "/perfscope gc", "GC 统计");
         sendHelpLine(sender, "/perfscope report [格式]", "/perfscope report html", "导出性能报告");
         sendHelpLine(sender, "/perfscope monitor", "切换 ActionBar 实时监测");
+        // 9A-20 #5：插件自身健康（采集存活/模块三态/历史/告警）
+        sendHelpLine(sender, "/perfscope status", "插件自身状态（采集存活 / 模块状态 / 历史 / 告警）");
+        sendHelpLine(sender, "/perfscope alerts [N]", "告警历史（何时开始 / 持续多久 / 是否恢复）；默认 20 条");
         sendHelpLine(sender, "/perfscope reload", "重载配置文件");
 
         if (sender instanceof Player) {
@@ -1303,7 +1642,7 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         if (args.length == 1) {
             String[] subs = {"all", "tps", "mspt", "entities", "chunks", "memory", "cpu",
                 "players", "world", "redstone", "tileentities", "uptime", "history", "hotspot", "diagnose", "trend", "gc",
-                "report", "monitor", "reload", "help"};
+                "status", "alerts", "report", "monitor", "reload", "help"};
             boolean canExport = sender.hasPermission("perfscope.admin") || sender.hasPermission("perfscope.export");
             boolean canReload = sender.hasPermission("perfscope.admin") || sender.hasPermission("perfscope.reload");
             for (String s : subs) {
@@ -1404,6 +1743,29 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         NamedTextColor color = thresholdColors.colorOf(
             thresholdColors.levelOf(ThresholdColors.Metric.TPS, tps));
         return Component.text(String.format("%.1f", Math.min(tps, 20.0)), color, TextDecoration.BOLD);
+    }
+
+    /**
+     * 9A-2：TPS 口径标注。Paper/Spigot 返回空组件（不产生任何视觉变化），
+     * Folia 返回 {@code (global region)}——Bukkit.getTPS() 在 Folia 上只反映 global region，
+     * 不是全服吞吐。统一在此处生成，避免 showAll / showTPS / 报告各写一份而说法漂移。
+     */
+    private Component tpsScopeTag() {
+        String label = ServerCompat.tpsScopeLabel();
+        return label.isEmpty() ? Component.empty() : Component.text(label, GRAY);
+    }
+
+    /**
+     * 9A-1：MSPT 不可用原因标注（"（无全局 tick 时间）"等）；可信时返回空组件。
+     * 与 {@link #tpsScopeTag()} 同理，文案唯一出处在 {@link ServerCompat#msptUnavailableReason()}。
+     */
+    private Component msptUnavailableTag() {
+        if (ServerCompat.isMsptTrustworthy()) {
+            return Component.empty();
+        }
+        String reason = ServerCompat.msptUnavailableReason();
+        return reason == null || reason.isEmpty()
+            ? Component.empty() : Component.text("（" + reason + "）", GRAY);
     }
 
     private Component formatMSPTComponent(double mspt) {

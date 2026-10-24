@@ -113,6 +113,16 @@ public final class SchedulerAdapter {
         return new TaskHandle(bukkitTask);
     }
 
+    // ==================== 9A-1：运行期能力探针的挂载点 ====================
+    // 探针本体在 ServerCompat.probeRuntimeAvailability(Logger, boolean)（不引入调度依赖，便于单测）。
+    // 挂载方式（PerfScope.onEnable() 内、startCollectionTasks() 之后）：
+    //   SchedulerAdapter.runLater(plugin,
+    //       () -> ServerCompat.probeRuntimeAvailability(getLogger(), ServerCompat.isFolia()),
+    //       ServerCompat.runtimeProbeDelayTicks());
+    // 为什么走本类：Folia 上 Bukkit 调度器必抛 UnsupportedOperationException，
+    // 探针必须经统一的 GlobalRegionScheduler 直连路径才能跑起来（与采集任务同一条通路）。
+    // 延迟原因：首周期之前 tick 采样窗口尚未填充，全零是正常态，过早探测会把 Paper 误判成"不可用"。
+
     /**
      * 延迟一次性任务（非重复）。
      * 非 Folia：runTaskLater；Folia：GlobalRegionScheduler.runDelayed（直连）。

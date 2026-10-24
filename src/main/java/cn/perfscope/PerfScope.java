@@ -55,6 +55,20 @@ public final class PerfScope extends JavaPlugin {
     private WebhookNotifier webhookNotifier;
     private DailySummaryService dailySummaryService;
 
+    // ==================== 9A-20 #4：采集任务 supervisor ====================
+    // 背景：collectSync 的任务体即便加了 try/catch(Throwable)，仍有"任务根本没跑起来"的路径——
+    // Folia 调度失败返回 noop 句柄、插件被其他插件 disable、服务端调度器异常等。这类情况下
+    // 采集不会报错、不会打日志，只会永久停在最后一张快照上。本 supervisor 每 10 秒看一眼
+    // MetricsCollector.isStale()，只在"进入过期/恢复"的边沿各记一条日志（不刷屏），
+    // 让控制台成为唯一的、不依赖人工比对时间戳的告警源。
+    private SchedulerAdapter.TaskHandle healthWatchTask;
+    /** supervisor 上次观测到的过期状态（false = 正常）；仅该任务线程读写。 */
+    private boolean lastStaleState = false;
+    /** supervisor 上次观测到的 JVM 异步节拍过期状态；仅该任务线程读写。 */
+    private boolean lastJvmStaleState = false;
+    /** supervisor 周期：10 秒（200 tick）。 */
+    private static final long HEALTH_WATCH_PERIOD_TICKS = 200L;
+
     @Override
     public void onEnable() {
         instance = this;
@@ -77,9 +91,10 @@ public final class PerfScope extends JavaPlugin {
         this.historyStore = new HistoryStore(configManager);
 
         // Wave 8B：历史文件持久化（按天 CSV；重启不清零）+ 启动期清理超期文件
+        // 9A-18：写盘已改为单写者异步队列（不再阻塞主线程），retention 从写入路径剥离为独立方法
         this.historyFileStore = new HistoryFileStore(this);
         this.historyStore.setFileStore(historyFileStore);
-        historyFileStore.cleanOld(configManager.get().history_persistRetentionDays);
+        historyFileStore.runRetention(configManager.get().history_persistRetentionDays);
 
         // Wave 8A：诊断引擎（无状态构造；规则只读快照与历史，由命令层按需调用）
         this.diagnosticEngine = new DiagnosticEngine(this, historyStore);
@@ -87,6 +102,12 @@ public final class PerfScope extends JavaPlugin {
         // 初始化性能采集器
         this.metricsCollector = new MetricsCollector(this, historyStore);
         startCollectionTasks();
+
+        // 9A-1：MSPT 能力位运行期复核——首周期之后再实测一次 getTickTimes()/getAverageTickTime()，
+        // 把"方法存在"与"数据真实"分开（Folia 上方法存在但恒返回全零）。
+        // 延迟 100 tick（≈5 秒）：早于此采样窗口尚未填充，全零是正常态，会把 Paper 误判为不可用。
+        // 经 SchedulerAdapter 挂载，Folia 上走 GlobalRegionScheduler（Bukkit 调度器在 Folia 必抛 UOE）。
+        ServerCompat.armRuntimeProbe(this);
 
         // 初始化告警服务（P0-4：位置在采集器启动之后，周期读取快照推送告警）
         this.alertService = new AlertService(this);
@@ -126,9 +147,18 @@ public final class PerfScope extends JavaPlugin {
             getLogger().info("  [+] 指令系统已注册 (/perfscope, /pscope, /perf)");
             getLogger().info("  [+] 报告系统就绪 (格式: " +
                 configManager.get().report_format + ")");
-            // MC-1 标注层：一级 getTickTimes 或二级 getAverageTickTime 均非"估算"，仅三级 TPS 反推才是
-            boolean exactMspt = ServerCompat.PAPER_MSPT_AVAILABLE || ServerCompat.PAPER_AVG_TICK_AVAILABLE;
-            getLogger().info("  MSPT精确采集: " + (exactMspt ? "Paper API" : "TPS估算"));
+            // MC-1 标注层 / 9A-1 条件输出：只有"实测可信"才宣称精确。
+            // 能力位自 9A-1 起在 Folia 上恒 false（getTickTimes 方法存在但恒返回全零），
+            // 因此本行在 Folia 上不打 "Paper API"（避免假精确），改为如实说明；
+            // Paper 系保持原样（harness 断言 perfscope-surface.json 依赖此行原文）。
+            if (ServerCompat.isMsptTrustworthy()) {
+                getLogger().info("  MSPT精确采集: Paper API");
+            } else {
+                // reason 理论上此时已由类初始化置好；null 兜底避免打出 "null"
+                String reason = ServerCompat.msptUnavailableReason();
+                getLogger().info("  MSPT精度: 不可用"
+                    + (reason == null || reason.isEmpty() ? "" : "（" + reason + "）"));
+            }
             getLogger().info("  ActionBar: " + (ServerCompat.PAPER_ACTION_BAR_AVAILABLE ? "可用" : "不可用"));
         }
 
@@ -142,18 +172,60 @@ public final class PerfScope extends JavaPlugin {
 
     @Override
     public void onDisable() {
-        // P0-12：先停 monitor 任务，再停自动报告与采集（顺序不可换）
+        // 9A-10 #5：关服顺序固定为「先停产生者 → 再停消费者 → 最后关输出」。
+        //  ① 产生者：采集任务（MSPT/实体/区块……）与自动报告定时器——不先停它们，
+        //     后面关掉的执行器/服务会在关服瞬间收到新的提交请求（RejectedExecutionException）。
+        //  ② 消费者：日报（消费告警与历史）→ 告警（消费快照）→ 看门狗。
+        //  ③ 输出：报告执行器最后关，保证上面任何一处触发的报告都能落盘完成（shutdownNow 会中断在写任务）。
+        // P0-12：monitor 任务最先停（它直接推 ActionBar，与采集/告警无依赖，早停早静音）。
         if (command != null) {
             command.shutdown();
         }
-        stopAutoReport();
-        // Wave 7D：先停日报（消费告警与历史），再停告警，最后停采集
-        stopDailySummary();
-        // P0-4：先停告警服务，再停采集（避免告警定时器读到已停采集的旧快照）
-        stopAlertService();
-        stopCollectionTasks();
+        // 9A-20 #4：看门狗是纯观察者（只读采集状态、不产出任何数据），必须早于采集停止——
+        // 否则停止采集到停止看门狗之间那段窗口里，它会观察到"采集已过期"并在关服日志里报假警。
+        stopHealthWatch();         // 观察者：先摘掉
+        stopCollectionTasks();     // ① 产生者：采集
+        stopAutoReport();          // ① 产生者：自动报告（不再向报告执行器提交新任务）
+        // Wave 7D：先停日报（消费告警与历史），再停告警（消费快照）
+        stopDailySummary();        // ② 消费者
+        stopAlertService();        // ② 消费者
+        // 9A-18：告警状态写线程只在关服时关（reload 复用实例，不能关线程池）
+        shutdownAlertStateWriter();
+        // 9A-18：历史写线程必须在采集停止之后关——它要把队列残余刷盘，否则最后一批样本丢失
+        shutdownHistoryFileStore();
+        shutdownReportGenerator(); // ③ 输出：最后关报告执行器
         getLogger().info(Messages.get("shutdown-bye"));
         instance = null;
+    }
+
+    /**
+     * 9A-10 #5：关闭报告执行器。
+     *
+     * <p>{@link ReportGenerator#shutdown()} 使用 {@code shutdownNow()}——关服阶段丢弃排队的报告请求、
+     * 中断正在进行的写盘，绝不让主线程为一份没人看的报告多等 IO。已生成的文件不受影响。</p>
+     */
+    /**
+     * 关闭历史文件写线程（9A-18）：必须在采集任务停止之后调用——
+     * 写线程要把队列中尚未落盘的样本刷完再退出，否则关服瞬间的最后一批数据会丢。
+     */
+    private void shutdownHistoryFileStore() {
+        if (historyFileStore != null) {
+            try {
+                historyFileStore.shutdown();
+            } catch (Exception | LinkageError e) {
+                getLogger().warning("[PerfScope] 历史写线程关闭失败: " + e.getMessage());
+            }
+        }
+    }
+
+    private void shutdownReportGenerator() {
+        if (reportGenerator != null) {
+            try {
+                reportGenerator.shutdown();
+            } catch (Exception | LinkageError e) {
+                getLogger().warning("[PerfScope] 报告执行器关闭失败: " + e.getMessage());
+            }
+        }
     }
 
     // ==================== 任务启停（P0-14 收敛：P0-8 替换为 SchedulerAdapter 时只需改这四个方法内部） ====================
@@ -166,6 +238,8 @@ public final class PerfScope extends JavaPlugin {
             getLogger().severe("[PerfScope] 采集任务启动失败: " + e.getMessage());
             getLogger().log(java.util.logging.Level.SEVERE, "[PerfScope] 采集任务启动异常堆栈", e);
         }
+        // 9A-20 #4：采集启动后立刻挂 supervisor（含 start 失败的分支——那正是最需要它的场景）
+        startHealthWatch();
     }
 
     /** 停止采集任务。 */
@@ -173,6 +247,106 @@ public final class PerfScope extends JavaPlugin {
         if (metricsCollector != null) {
             metricsCollector.stop();
         }
+    }
+
+    // ==================== 9A-20 #4：采集任务 supervisor ====================
+
+    /**
+     * 挂载采集健康看门狗（9A-20 #4，"无 supervisor"的补齐）。
+     *
+     * <p>职责只有一件事：在 {@code MetricsCollector.isStale()} 的<b>边沿</b>上说话。
+     * 每 {@value #HEALTH_WATCH_PERIOD_TICKS} tick（10 秒）检查一次，</p>
+     * <ul>
+     *   <li>正常 → 过期：SEVERE「采集已停止更新…」，并提示 /perfscope status 与 reload；</li>
+     *   <li>过期 → 正常：INFO「采集已恢复」，附更新时间。</li>
+     * </ul>
+     * <p>边沿触发而非周期触发，避免 10 秒一条的二次刷屏；任务体自带 try 边界（任何异常只跳过本轮，
+     * 不中断看门狗自身——看门狗自己死了才是真的没人管了）。调度失败时只是少一层日志，
+     * 不影响 /perfscope status 与命令层的过期判定。</p>
+     */
+    private void startHealthWatch() {
+        stopHealthWatch();
+        lastStaleState = false;
+        lastJvmStaleState = false;
+        try {
+            healthWatchTask = SchedulerAdapter.runAsyncTimer(this, this::checkCollectorHealth,
+                HEALTH_WATCH_PERIOD_TICKS, HEALTH_WATCH_PERIOD_TICKS);
+        } catch (Exception | LinkageError e) {
+            healthWatchTask = null;
+            getLogger().warning("[PerfScope] 采集健康看门狗启动失败（不影响采集本体，/perfscope status 仍可用）: "
+                + e.getMessage());
+        }
+    }
+
+    private void stopHealthWatch() {
+        if (healthWatchTask != null) {
+            healthWatchTask.cancel();
+            healthWatchTask = null;
+        }
+    }
+
+    /** 看门狗单轮检查（异步线程；只读 MetricsCollector 的 volatile 状态）。 */
+    private void checkCollectorHealth() {
+        try {
+            MetricsCollector mc = metricsCollector;
+            if (mc == null) {
+                return;
+            }
+            checkMainTickHealth(mc);
+            checkJvmTickHealth(mc);
+        } catch (Exception | LinkageError e) {
+            // 看门狗自身绝不因单轮异常而退出
+            getLogger().warning("[PerfScope] 采集健康检查异常（已跳过本轮）: " + e.getMessage());
+        }
+    }
+
+    /** 主线程采集节拍：过期/恢复的边沿各说一句。 */
+    private void checkMainTickHealth(MetricsCollector mc) {
+        boolean stale = mc.isStale();
+        if (stale == lastStaleState) {
+            return;   // 边沿触发：状态未变不说话
+        }
+        lastStaleState = stale;
+        if (stale) {
+            getLogger().severe("[PerfScope] 采集已停止更新 " + (mc.staleForMs() / 1000L)
+                + " 秒（最后成功采集 " + clockOf(mc.lastCollectAtMs()) + "，连续失败 "
+                + mc.consecutiveCollectFailures() + " 次）——"
+                + "/perfscope 显示的数据已过期，请执行 /perfscope reload，仍无效则重启服务器");
+        } else {
+            long lastAt = mc.lastCollectAtMs();
+            getLogger().info("[PerfScope] 采集已恢复" + (lastAt > 0L
+                ? "（最后成功采集 " + clockOf(lastAt) + "）"
+                : "（已进入新任务的预热窗口，尚未产出首轮数据）"));
+        }
+    }
+
+    /**
+     * JVM 异步节拍同样需要看门狗（9A-20 顺手项）：它是独立任务，被静默取消时主线程仍每秒产快照，
+     * {@link MetricsCollector#isStale()} 看不出来——症状是内存/CPU/GC 永远停在最后一次的数值。
+     */
+    private void checkJvmTickHealth(MetricsCollector mc) {
+        boolean jvmStale = mc.isJvmStale();
+        if (jvmStale == lastJvmStaleState) {
+            return;
+        }
+        lastJvmStaleState = jvmStale;
+        long jvmAt = mc.jvmSnapshotTimestamp();
+        if (jvmStale) {
+            getLogger().warning("[PerfScope] JVM 异步采集已停止更新（内存/CPU/GC 停留在 "
+                + clockOf(jvmAt) + " 的数值）——请执行 /perfscope reload，仍无效则重启服务器");
+        } else {
+            getLogger().info("[PerfScope] JVM 异步采集已恢复（最后更新 " + clockOf(jvmAt) + "）");
+        }
+    }
+
+    /** 9A-20：epoch ms → "HH:mm:ss"（本地时区，与命令层"采集时间"同口径）；0 → "从未"。 */
+    private static String clockOf(long epochMs) {
+        if (epochMs <= 0L) {
+            return "从未";
+        }
+        return java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")
+            .withZone(java.time.ZoneId.systemDefault())
+            .format(java.time.Instant.ofEpochMilli(epochMs));
     }
 
     /** 启动自动报告任务。A9a：调度异常捕获并记录（间隔非法时 report 侧不再进入半状态）。 */
@@ -217,6 +391,17 @@ public final class PerfScope extends JavaPlugin {
     private void stopAlertService() {
         if (alertService != null) {
             alertService.stop();
+        }
+    }
+
+    /** 9A-18：关服时关闭告警状态写线程（stopAlertService 已把最后一份状态提交进去）。 */
+    private void shutdownAlertStateWriter() {
+        if (alertService != null) {
+            try {
+                alertService.shutdown();
+            } catch (Exception | LinkageError e) {
+                getLogger().warning("[PerfScope] 告警状态写线程关闭失败: " + e.getMessage());
+            }
         }
     }
 
@@ -311,10 +496,18 @@ public final class PerfScope extends JavaPlugin {
         } catch (Exception | LinkageError e) {
             getLogger().warning("[PerfScope] 旧报告清理失败: " + e.getMessage());
         }
+        // 9A-18：保留天数可能被改过；清理已从写入路径剥离，reload 时显式跑一次
+        try {
+            historyFileStore.runRetention(configManager.get().history_persistRetentionDays);
+        } catch (Exception | LinkageError e) {
+            getLogger().warning("[PerfScope] 历史文件清理失败: " + e.getMessage());
+        }
         if (loadFailed) {
-            getLogger().warning("PerfScope 配置重载未完成（已按旧配置重启采集/告警）");
+            getLogger().warning(Messages.get("reload-failed-old-config")); // 9A-24：接线死键
         } else {
-            getLogger().info("PerfScope 配置已重载喵~");
+            // 9A-24：控制台用独立键，默认值与改造前逐字一致（"PerfScope " 前缀保留，日志更好检索），
+            // 与聊天侧的 reloaded 分开——专业部署可能只想中性化聊天回复而不动控制台日志
+            getLogger().info(Messages.get("reloaded-console"));
         }
     }
 

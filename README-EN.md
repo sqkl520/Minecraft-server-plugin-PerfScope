@@ -20,7 +20,7 @@ A comprehensive performance monitoring plugin for Minecraft servers, focused on 
 - **CPU Diagnostics** —— Process CPU usage/system CPU load/available processors/active threads
 - **Tile Entity Statistics** —— Total/per-world distribution
 - **Server Info** —— Uptime/thread count/plugin count/world count/JVM version
-- **Highly Customizable Config** —— All module alert thresholds and collection intervals configurable
+- **Highly Customizable Config** —— All module alert thresholds configurable (collection cadence is set by `general.update_interval`; per-module entity/chunk/tile sampling rates are built-in constants)
 - **ActionBar Live Monitor** —— `/perfscope monitor` to toggle, refreshes core metrics every second to the ActionBar (above the hotbar at the bottom of the screen). Positioned as a **diagnostic probe**: turn it on for a few dozen seconds while troubleshooting lag or handling an incident, then turn it off; it is not designed as an always-on 24/7 monitoring panel
 - **Performance Report Export** —— HTML/TXT/JSON formats, HTML reports include TPS trend chart, entity distribution table, memory progress bar, alert highlights
 - **Auto Report Generation** —— Configurable interval, async generation without blocking main thread, auto cleanup by retention days
@@ -30,16 +30,29 @@ A comprehensive performance monitoring plugin for Minecraft servers, focused on 
 - **Daily Summary** (new in v1.2) —— A 3-line digest at a fixed time each day: lowest TPS (with time) / peak entities & heap / alert statistics; if the server happens to be down at the configured time, one catch-up summary is sent after startup
 - **History Summary** (new in v1.2) —— `/perfscope history` shows the last ~24 hours: coverage, lowest TPS with its timestamp, peak entities, peak heap — answering "when did it start getting worse"
 - **Hotspot Localization** (new in v1.2) —— `/perfscope hotspot` lists the top-3 entity-density chunks server-wide with coordinates (and dominant type share), drilling from "many entities" down to "go look at this spot"; coordinates are click-to-copy
-- **Color-Coded UI** —— Rendered via Paper Adventure API, key metrics colored by level (green/yellow/red) based on the `config.yml` alert thresholds; display and alerts share one source of truth, and colors follow immediately after a config reload
+- **Color-Coded UI** —— Rendered via Paper Adventure API, key metrics colored by level (green/yellow/red) based on the `config.yml` alert thresholds; display and alerts **share the same config source and the same level-decision entry point**, and colors follow immediately after a config reload. Note: the display uses closed intervals (color changes when the threshold is *reached*) while some alert checks use strict greater-than, so **at exactly the threshold the color flips a moment before the alert fires** — an intentional early-warning semantic
 
 ## Target Platform & Compatibility
 
-Since v1.1, PerfScope focuses on the **Paper family** of servers and relies heavily on Paper-native features such as the Adventure API:
+Since v1.1, PerfScope focuses on the **Paper family** of servers and relies heavily on Paper-native features such as the Adventure API.
 
-- **Supported**: Paper 1.20.4+ and its downstream forks (Purpur / Pufferfish / Leaves, etc.)
-  — **Folia / Purpur / Leaf / Leaves verified on real servers** (full command surface + history tested on 1.21.4, 49 assertions each)
-- **Folia**: supported since v1.1 — adapted through a scheduler layer via `GlobalRegionScheduler` / `AsyncScheduler`, with `folia-supported: true` declared in `plugin.yml` (global and JVM-level metrics are complete; entity/chunk metrics are best-effort)
-- **Not supported**: plain Spigot / CraftBukkit
+> Bottom line up front: **"loads and the command answers" ≠ "the numbers are correct"**. The table below separates the two, so read it as a measure of verification strength.
+
+| Platform | Verification level | Notes |
+|----------|--------------------|-------|
+| **Paper 1.21.x** | **Verified on a real server** | Full command surface + threshold alerts + history persistence + diagnostic engine exercised on a live server |
+| **Paper 1.20.4+** | **Compile-time compatible** | Built against `paper-api 1.20.4` (`pom.xml`), **not yet boot-verified on a real 1.20.x server**; nothing below 1.20.4 is guaranteed |
+| **Purpur / Leaf / Leaves** | **Load-verified** | The same Paper code path starts and responds to commands; **fork-private optimizations (AI throttling, entity merging, chunk caching, etc.) are not covered** and may affect the absolute accuracy of entity/chunk counts |
+| **Folia** | **Loads, but metrics are limited** | Starts and responds to commands, but **MSPT is unavailable** (no global tick timing) and **TPS is a global-region-local value** (not server-wide throughput); entity/chunk/hotspot modules may report "unavailable" across regions |
+| **Plain Spigot / CraftBukkit** | Not supported | Requires Adventure rendering and cannot run without the Paper API |
+
+Additional notes:
+
+- **What the compatibility matrix covers**: the project's 196 compatibility assertions verify **loadability and command reachability** (the command runs and its output contains the expected heading/field). They **do not verify numeric correctness** — every assertion is a label substring match and does not check whether the TPS/MSPT/entity figures are true.
+- **MSPT semantics on Paper 1.21.x**: sourced from Paper's `getTickTimes()` (avg/min/max in one call). If that implementation returns all zeros, the plugin re-checks it (two consecutive confirmations, to avoid a transient false positive) roughly 5–10 seconds after enable, automatically downgrades it to "unavailable", and **never prints a fake-precise value**.
+- **TPS labelling on Folia**: every TPS output carries a `(global region)` tag. The global region only runs global logic and chunks that belong to no region, so the figure being **lower** than the server-wide throughput players actually feel is expected; early in an empty server's life the global-region report also has a gap window, so a briefly near-zero reading does not mean the server is frozen.
+- **MSPT on Folia**: `getTickTimes()` exists on that platform but always returns all zeros. The plugin therefore marks MSPT unavailable right at enable (no sampling delay needed); `/perfscope mspt` reports "unavailable (Folia has no global tick timing)".
+- **Scheduling on Folia**: adapted via `GlobalRegionScheduler` / `AsyncScheduler`, with `folia-supported: true` declared in `plugin.yml`; JVM-level metrics (memory/CPU/GC/threads) are fully available.
 
 ## Commands
 
@@ -65,6 +78,7 @@ Since v1.1, PerfScope focuses on the **Paper family** of servers and relies heav
 | `/perfscope gc` | GC statistics (per-collector details) |
 | `/perfscope report [format]` | Export performance report (html/txt/json) |
 | `/perfscope monitor` | Toggle ActionBar live monitor |
+| `/perfscope status` | Plugin self-health (collector alive / module states / history / alerts) |
 | `/perfscope reload` | Reload config file |
 | `/perfscope help` | Show command help |
 
@@ -104,7 +118,7 @@ GC: 42 次 / 5.23 秒
 
 ## Installation
 
-> **Download**: [GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest) (latest stable **v1.2.0**, `PerfScope-1.2.0.jar`)
+> **Download**: [GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest) (latest stable **v1.2.1**, `PerfScope-1.2.1.jar`)
 
 1. Download the latest JAR file
 2. Place it in your server's `plugins/` directory
@@ -224,32 +238,52 @@ See `plugins/PerfScope/config.yml` for complete configuration details.
 
 > Note: **Redstone activity** and **network throughput** monitoring were discontinued in v1.1 (redstone was a stub implementation; network was hardcoded fake data); these metrics and features are no longer provided. The `/perfscope redstone` subcommand is kept as an entry point but only returns a discontinued notice.
 
-## Performance & Overhead (Self-Reported)
+## Performance & Overhead (Self-Tested, Not a Guarantee)
 
 A performance plugin that cannot explain its own overhead is self-contradictory. The design principle here is **keep heavy work off the main thread**:
 
-- **Async JVM metrics** — memory/CPU/GC/runtime info is read from MXBeans on an async thread and published as a whole snapshot for the main thread to reuse; zero main-thread blocking;
-- **Main thread does lightweight Bukkit reads only** — TPS/MSPT/players every cycle; entities/chunks every 5 cycles, tile entities every 10, hotspot chunks every 30 (all configurable), reusing caches in between;
+- **Async JVM metrics** — memory/CPU/GC/runtime info is read from MXBeans on an async thread and published as a whole snapshot for the main thread to reuse; no long blocking on the main thread. The only disk-related main-thread action is a non-blocking *enqueue* of the history sample once every 60 seconds (an `offer` that drops-and-counts when the queue is full); the actual writing is batched on the `perfscope-history-writer` daemon thread;
+- **Main thread does lightweight Bukkit reads only** — TPS/MSPT/players every cycle; entities/chunks every 5 cycles and tile entities every 10 are **built-in constants**, hotspot chunks every 30 (`hotspots.sample-every-cycles`, configurable), reusing caches in between;
 - **Guarded player-layer pushes** — the per-second ActionBar push only runs while a player has monitor on, and skipped (not crashed) the moment they disconnect.
 
-**Measured (JDK Flight Recorder, `settings=profile`, 90-second window, Paper 1.21.4, monitor active + normal collection cadence)**:
+**Measured (JFR, 90-second window, build under test: a 2026-10-18 master snapshot, *not* the v1.2 release; empty server + 1 bot / `view-distance=5` / ~121 loaded chunks)**:
 
-| Metric | Measured |
+| Metric | Value |
 |---|---|
-| Samples containing a `cn.perfscope` frame | **~2.5%** |
-| Of those, on async threads (JVM metrics) | 36/110 frames |
-| Main-thread chunk sweeps hit | 1 sample in 90s |
+| **Samples** containing a `cn.perfscope` frame | 37 / 4394 = **0.84%** |
+| Of those, on async threads (JVM metric collection) | 36 / 37 |
+| Main thread (Server thread) | 1 hit out of 19 samples (Wilson 95% CI ≈ 0.9%–24.6%) |
 
-Reproduce (JFR-sample a running server and count frames): `tools/perfscope-jfr-overhead.ps1`
+**What this number is, and what it is not** (every line matters):
 
-> Caveat: the numbers above are a **magnitude reference** from one shared dev machine (light load, 90-second window), not a performance guarantee. A full high-load baseline (P99 at 5000 entities / 2000 chunks) is still being built. If you observe abnormal overhead, report it with a spark profiler link.
+- It is a **share of samples** in the thread-time composition — **not a CPU percentage**. The denominator is a count of JFR samples, not CPU time.
+- It does **not** translate into a TPS or tick-latency impact. No A/B run and no tick-duration comparison were done, so 0.84% cannot be converted into "N TPS lost".
+- **96.75% of the samples in that window (4251 / 4394) came from eight idle I/O threads blocking in native code** — `HttpClient-SelectorManager` ×2, `FileSystemWatchService`, `HTTP-Dispatcher`, `RCON Listener`, `Netty Server IO #0/#1/#2`, about 531 samples each. They consume almost no CPU (parked in `WEPoll.wait` / `GetQueuedCompletionStatus`), so the sample total mostly reflects how often idle threads were sampled, not who is doing work. 0.84% is computed over a denominator dominated by idle threads.
+- The main thread contributed only **19 samples with 1 hit**. The Wilson 95% interval is roughly 0.9%–24.6% — **not enough evidence to conclude anything**, in either direction.
+- The measurement is from the **2026-10-18 05:14 build**, which predates the hotspot full-world sweep commit (21:39 the same day) and the CSV persistence commit (02:17 the next day). So it is **not the v1.2 release build**. The `MetricsCollector.java:656` in the sampled stack is the line number of *that* source tree (the `world.getLoadedChunks()` call inside `collectChunks`); in the current tree that method sits at a different line — which by itself shows the sampled binary and the repository HEAD were not the same code. The table therefore does **not** cover v1.2's new main-thread paths.
+- An earlier draft reported 110 frame *lines* ≈ 2.5%. That counted **frame lines as samples**: one call chain (`getProcessCpuLoad0 → getProcessCpuLoad() → collectCPU → lambda$collectJvmAsync$5 → safeCollect`) spans 3 `cn.perfscope` lines, inflating the result ~3×. Every number here is now counted **per sample block**.
+
+**Known main-thread cost points** (listed honestly, not quantified):
+
+- Every 5 cycles (5 s by default) one `world.getLoadedChunks()` per world, which allocates a chunk array. The *only* main-thread hit in the table above lands exactly there (`CraftWorld.getLoadedChunks ← collectChunks`). The allocation cost at 2000–5000 chunks is **not measured**;
+- Every 30 cycles (30 s by default) a **full sweep of every loaded chunk** (hotspot location): `getEntities()` plus a per-chunk `HashMap` for the dominant type. This is the heaviest main-thread section in the plugin and is **not measured**;
+- Once per collection cycle, a `history.size()` cap check (`ConcurrentLinkedDeque.size()` is an O(n) traversal; the ring holds 300 entries, so ~300 node visits per second);
+- Every 60 s, one non-blocking history enqueue plus the in-memory ring-buffer write on the main thread.
+- **Alert-state persistence**: this used to be synchronous main-thread I/O (`AlertService.persistState()` writing a temp file with `Files.write` and then an atomic `Files.move`). In the 2026-10-25 busy-load sample, **5 of 22** main-thread hits landed on that path (`checkCycle ← persistState ← Files.write`), second only to the chunk/entity sweeps. **That path now hands the write to a single-writer daemon thread** (the state snapshot is still taken on the main thread; only open/write/move moved to the `perfscope-alert-state-writer` daemon thread). The 5-of-22 figure comes from the build *before* that change; the new build has not been re-measured.
+
+**Not yet measured**: high-load P99 (5000 entities / 2000 chunks), GC count and pause impact, heap retention, startup cost, A/B comparison.
+
+Reproduce: `tools/perfscope-jfr-overhead.ps1` (counts per sample block, requests both `jdk.ExecutionSample` and `jdk.NativeMethodSample`, reports Server thread separately with a Wilson interval, and prints the tested jar's version and SHA-256).
+The full, executable minimal measurement set (three load tiers, A/B baseline, artifact format) is in `docs/07-guides/PERF-BASELINE-PLAN.md`.
+
+> Caveat: the table above is a **magnitude reference** from one shared dev machine (empty server + 1 bot, `view-distance 5`, ~121 loaded chunks, 90-second window) — not a performance guarantee and not representative of your server. The test load is only **2%–5%** of the 2000–5000-chunk target (121 chunks vs 2000–5000, a 16–41× gap). If you observe abnormal overhead, report it with a `/spark profiler` link.
 
 ## Boundaries & What This Plugin Does Not Do
 
 An honest scope statement — the following are things this plugin does **not** do; pair it with other tools as needed:
 
 1. **No root-cause profiling** —— It narrows down *which* metric is abnormal (a suspect range), but does not produce method-level flame graphs; use `/spark profiler` to actually locate the cause of lag.
-2. **No persistent history** —— History lives only in an in-memory ring buffer (~24 hours, queryable via `/perfscope history`) and **is cleared on restart**; nothing is written to disk, and there are no weekly/monthly trends. For long-term retention, export reports periodically or hook up an external monitoring stack.
+2. **No long-term time-series platform** —— History **is persisted** (enabled by default, see `history.persist`): an in-memory ring buffer holds ~24 hours (queryable via `/perfscope history`), and daily CSV files are written to `plugins/PerfScope/history/history-<date>.csv`, kept for 7 days by default (`history.retention-days`); `/perfscope trend` can look back across restarts. What it does **not** do: weekly/monthly trend analysis, multi-server aggregation, or replacing an external monitoring stack (Prometheus/Grafana) — hook one up if you need long-term retention or cross-server comparison.
 3. **Limited MSPT spike-detection window** —— Values come from Paper `getTickTimes()`, a rolling window (roughly the last 100 ticks); a spike that already scrolled out of the window may not be reflected, so "did it just lag?" is not always answerable.
 4. **No automatic remediation** —— The plugin only observes, alerts and exports reports; it never performs any intervention on its own (no restarts, no entity cleanup, no config changes).
 5. **Alerts are debounced** —— By default an alert needs 3 consecutive over-threshold collection cycles before it is pushed (`alerts.debounce-cycles`, configurable), adding up to ~3× the collection interval (about 3 seconds by default) of latency; a deliberate trade to suppress threshold-flicker noise — set `debounce-cycles` to 1 if you need instant delivery.

@@ -30,12 +30,12 @@ import java.util.List;
  *
  * <p>设计取舍（锐评 B 论点 7）：37 条规则<b>不</b>平铺进巨型求值器，而是每条规则一个实现类、
  * 注册进 {@link #RULES} 列表；引擎只做三件事：取快照 → 逐条评估（异常隔离）→ 按级别排序输出。
- * 互斥/优先级不进引擎（首批 5 条规则语义天然正交，无需互斥机制；加规则时按需引入，
- * 避免为假想复杂度预付设计成本）。</p>
+ * 互斥/优先级不进引擎（首批 5 条规则语义天然正交，无需互斥机制）。</p>
  *
- * <p><b>无规则命中时输出什么</b>：明确说"未发现已知问题"，并且<b>声明能力边界</b>
- * （"本引擎只覆盖 N 条高置信规则，不替代 spark profiler 的深度剖析"）——诚实划界是
- * 与"看起来答了实际答错"的分界线。</p>
+ * <p><b>9A-3 修正（三态聚合）</b>：{@link #run} 现在返回 {@link Result}，
+ * 里面区分「命中 / 评估后干净 / 未评估（含原因）」。旧实现只返回命中列表，
+ * 于是展示层只能拿 {@code RULES.size()} 当"已检查 N 条"——而 3/5 条规则前置不成立时
+ * 根本没运行。现在"评估了几条、跳过几条、为什么跳过"都是真实计数。</p>
  *
  * <p>线程模型：由命令层在主线程调用；规则只读快照与历史（HistoryStore 自带锁），无共享可变状态。</p>
  */
@@ -60,37 +60,63 @@ public class DiagnosticEngine {
         this.historyStore = historyStore;
     }
 
-    /** 已注册的规则数（供输出展示能力边界）。 */
+    /** 已注册的规则数（= 引擎能力上限，不等于"本次实际评估数"）。 */
     public static int ruleCount() {
         return RULES.size();
     }
 
     /**
-     * 对最新快照运行全部规则。
-     * 单条规则抛异常只跳过该条并记日志（异常隔离——与采集层 safeCollect 同口径），
-     * 绝不让一条坏规则拖垮整页诊断。
+     * 一次诊断的完整结果（9A-3）。
      *
-     * @return 命中列表（critical 在前）；无命中返回空列表（非 null）
+     * @param hits    命中列表（critical 在前）
+     * @param skipped 未评估的规则及原因
+     * @param total   注册的规则总数
      */
-    public List<Diagnosis> run() {
+    public record Result(List<Diagnosis> hits, List<Diagnosis.Skip> skipped, int total) {
+
+        /** 本次实际评估过的规则数（= 总数 - 跳过数）。 */
+        public int evaluatedCount() {
+            return total - skipped.size();
+        }
+
+        /** 是否所有规则都评估过（否则输出不能说"未发现已知问题"）。 */
+        public boolean fullyEvaluated() {
+            return skipped.isEmpty();
+        }
+    }
+
+    /**
+     * 对最新快照运行全部规则。
+     *
+     * <p>单条规则抛异常只跳过该条并记日志（异常隔离——与采集层 safeCollect 同口径），
+     * 绝不让一条坏规则拖垮整页诊断；并且该条会计入"未评估"，不会伪装成"查过了没问题"。</p>
+     */
+    public Result run() {
         List<Diagnosis> hits = new ArrayList<>();
+        List<Diagnosis.Skip> skipped = new ArrayList<>();
         MetricsSnapshot snap = plugin.getMetricsCollector() == null
             ? null : plugin.getMetricsCollector().getLatest();
         if (snap == null) {
-            return hits; // 无快照：命令层已处理"采集中"文案
+            return new Result(hits, skipped, RULES.size()); // 无快照：命令层已处理"采集中"文案
         }
         ConfigManager.ConfigData cfg = configManager.get();
         if (cfg == null) {
-            return hits;
+            return new Result(hits, skipped, RULES.size());
         }
         for (DiagnosticRule rule : RULES) {
             try {
-                Diagnosis d = rule.evaluate(snap, historyStore, cfg);
-                if (d != null) {
-                    hits.add(d);
+                Evaluation ev = rule.evaluate(snap, historyStore, cfg);
+                if (ev == null) {
+                    // 契约违约：旧式规则返回 null。不当作"干净"，如实记为未评估。
+                    skipped.add(new Diagnosis.Skip(rule.id(), "规则未给出结论（实现未遵循三态契约）"));
+                } else if (ev.hit() != null) {
+                    hits.add(ev.hit());
+                } else if (ev.skip() != null) {
+                    skipped.add(ev.skip());
                 }
+                // ev.isClean() → 评估过且干净，两者都不计入
             } catch (Exception | LinkageError e) {
-                // 单条失败只记日志（debug 门控堆栈），不中断其余规则
+                skipped.add(new Diagnosis.Skip(rule.id(), "规则评估异常：" + e.getClass().getSimpleName()));
                 if (cfg.general_debug) {
                     plugin.getLogger().log(java.util.logging.Level.WARNING,
                         "[诊断] 规则 " + rule.id() + " 评估失败（已跳过）", e);
@@ -102,6 +128,6 @@ public class DiagnosticEngine {
         }
         // critical 优先（排序稳定：同为 critical 保持注册顺序）
         hits.sort((a, b) -> Boolean.compare(b.critical(), a.critical()));
-        return hits;
+        return new Result(hits, skipped, RULES.size());
     }
 }

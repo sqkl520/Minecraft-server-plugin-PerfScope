@@ -36,4 +36,17 @@ public record Diagnosis(
     String detail,
     String suggestion,
     boolean critical
-) {}
+) {
+
+    /**
+     * 未评估原因（9A-3）：规则因前置条件不成立而没有结论。
+     *
+     * <p>为什么要把它做成一等状态而不是直接 {@code return null}：{@code null} 在展示层
+     * 与"评估了且干净"无法区分，于是"已检查 N 条规则"就成了假话——3/5 条规则不满足前置时
+     * 从未评估过，用户却以为全部查过。现在每条规则不结论时<b>必须</b>说明原因。</p>
+     *
+     * @param ruleId 规则 ID（与 {@link Diagnosis#ruleId()} 同体系）
+     * @param reason 人类可读的跳过原因（含"还需要什么才能评估"）
+     */
+    public record Skip(String ruleId, String reason) {}
+}

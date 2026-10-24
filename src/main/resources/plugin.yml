@@ -18,6 +18,9 @@ commands:
       /perfscope <子命令>
     aliases: [pscope, perf]
     permission: perfscope.use
+    # 9A-24：此值只是"消息层加载前的首帧兜底"。插件启动/重载时会把 messages.yml 的
+    # no-permission 回写为权限拒绝文案（Messages#applyCommandPermissionMessage），
+    # 因此改文案请改 messages.yml，不要依赖这里（否则会出现两份副本各说各话）。
     permission-message: 你没有权限使用此指令喵
 
 permissions:

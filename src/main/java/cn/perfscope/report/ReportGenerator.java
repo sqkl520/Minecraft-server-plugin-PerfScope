@@ -18,6 +18,7 @@
 package cn.perfscope.report;
 
 import cn.perfscope.PerfScope;
+import cn.perfscope.compat.ServerCompat;
 import cn.perfscope.config.ConfigManager;
 import cn.perfscope.metrics.MetricsCollector;
 import cn.perfscope.metrics.MetricsSnapshot;
@@ -29,10 +30,18 @@ import com.google.gson.GsonBuilder;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
+import java.nio.file.StandardOpenOption;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.function.Supplier;
 
 /**
  * 性能报告生成器 - 支持 HTML / TXT / JSON 三种格式
@@ -57,6 +66,22 @@ public class ReportGenerator {
     // P0-11：JSON 改用 Gson（服务端 provided）；serializeNulls 让 unavailable 语义明确
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().serializeNulls().create();
 
+    // ==================== 9A-10 #4：报告写入串行化 ====================
+    // 背景：自动报告（异步定时器）与 /ps report（命令线程）会同时调用 generateAndSave()，
+    // 旧实现的 resolveReportFile().exists() 与 Files.write(TRUNCATE_EXISTING) 之间没有原子性——
+    // 两个线程可能解析出同一文件名，后写者把先写者的内容整段截断，留下半份报告。
+    // 修复分三层：
+    //   ① 单线程执行器串行化本类所有"生成+写盘"操作（同一时刻只有一个报告在写）；
+    //   ② 文件创建改用 CREATE_NEW（O_EXCL 语义，原子），真正碰撞时由内核拒绝而不是静默覆盖；
+    //   ③ 捕获 FileAlreadyExistsException 后换名重试（最多 MAX_FILE_NAME_RETRIES 次）。
+    // 守护线程 + 有界语义：不阻止 JVM 退出，onDisable 由 shutdown() 主动收尾。
+    private static final int MAX_FILE_NAME_RETRIES = 10;
+    private final ExecutorService reportExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "perfscope-report");
+        t.setDaemon(true);
+        return t;
+    });
+
     public ReportGenerator(PerfScope plugin) {
         this.plugin = plugin;
         this.collector = plugin.getMetricsCollector();
@@ -69,16 +94,61 @@ public class ReportGenerator {
     }
 
     /**
-     * 生成并保存报告 (默认格式)
+     * 生成并保存报告 (默认格式)。
+     *
+     * <p><b>9A-10 #4</b>：提交到单线程报告执行器串行执行，返回值是执行完成后的文件绝对路径
+     * （{@code null} = 失败/生成器已关闭）。同一路径既有自动报告（异步定时器）也有
+     * {@code /ps report}（命令线程）调用，串行化 + {@code CREATE_NEW} 才能保证不互相截断。</p>
      */
     public String generateAndSave() {
-        return generateSpecific(configManager.get().report_format);
+        return submitAndAwait(() -> generateSpecificOnExecutor(configManager.get().report_format));
     }
 
     /**
-     * 按指定格式生成并保存报告
+     * 按指定格式生成并保存报告（同样经报告执行器串行化）。
      */
     public String generateSpecific(String format) {
+        return submitAndAwait(() -> generateSpecificOnExecutor(format));
+    }
+
+    /**
+     * 9A-10 #4：把一次"生成+写盘"提交到 {@link #reportExecutor} 并等待结果。
+     *
+     * <ul>
+     *   <li>已在执行器线程内调用（例如未来某处在任务内部再生成报告）→ 直接内联执行，避免自等死锁；</li>
+     *   <li>已 {@link #shutdown()} → 记 warning 并返回 null（关服阶段不再产生新报告）；</li>
+     *   <li>等待被中断 → 恢复中断标志并返回 null，绝不吞掉中断信号。</li>
+     * </ul>
+     */
+    private String submitAndAwait(Supplier<String> task) {
+        if (Thread.currentThread().getName().startsWith("perfscope-report")) {
+            // 同一线程内联：RejectedExecutionException/自等死锁的防呆
+            return task.get();
+        }
+        Future<String> future;
+        try {
+            future = reportExecutor.submit(task::get);
+        } catch (RejectedExecutionException e) {
+            plugin.getLogger().warning("[PerfScope] 报告生成器已关闭，本次报告请求已忽略");
+            return null;
+        }
+        try {
+            return future.get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();   // 恢复中断，交由上层停止
+            return null;
+        } catch (ExecutionException e) {
+            // generateSpecificOnExecutor 自身已兜底全部异常，走到这里属意外；仍不向调用方抛出
+            plugin.getLogger().warning("[PerfScope] 报告生成任务异常: " + e.getCause());
+            return null;
+        }
+    }
+
+    /**
+     * 9A-10 #4：真正执行"生成+写盘"的方法——<b>只允许在 {@link #reportExecutor} 线程内调用</b>
+     * （由 {@link #submitAndAwait} 保证串行）。
+     */
+    private String generateSpecificOnExecutor(String format) {
         MetricsSnapshot snap = collector.getLatest();
         if (snap == null) return null;
 
@@ -89,47 +159,23 @@ public class ReportGenerator {
             return null;
         }
 
-        File file;
+        String ext = normalizeExtension(format);
+        String content;
+        try {
+            content = switch (ext) {
+                case "html" -> generateHtmlReport(snap, history);
+                case "json" -> generateJsonReport(snap, history);
+                default -> generateTextReport(snap, history);
+            };
+        } catch (Throwable t) {
+            // P0-11 兜底：极端精简端缺 Gson 等运行时异常同样返回 null
+            plugin.getLogger().warning("生成" + ext.toUpperCase(Locale.ROOT) + "报告失败: " + t.getMessage());
+            return null;
+        }
 
-        switch (format.toLowerCase()) {
-            case "html":
-                file = resolveReportFile("html");
-                try {
-                    Files.write(file.toPath(), generateHtmlReport(snap, history).getBytes(StandardCharsets.UTF_8));
-                } catch (IOException e) {
-                    plugin.getLogger().warning("生成HTML报告失败: " + e.getMessage());
-                    return null;
-                } catch (Throwable t) {
-                    // P0-11 兜底：极端精简端缺 Gson 等运行时异常同样返回 null
-                    plugin.getLogger().warning("生成HTML报告失败: " + t.getMessage());
-                    return null;
-                }
-                break;
-            case "json":
-                file = resolveReportFile("json");
-                try {
-                    Files.write(file.toPath(), generateJsonReport(snap, history).getBytes(StandardCharsets.UTF_8));
-                } catch (IOException e) {
-                    plugin.getLogger().warning("生成JSON报告失败: " + e.getMessage());
-                    return null;
-                } catch (Throwable t) {
-                    plugin.getLogger().warning("生成JSON报告失败: " + t.getMessage());
-                    return null;
-                }
-                break;
-            case "txt": case "text":
-            default:
-                file = resolveReportFile("txt");
-                try {
-                    Files.write(file.toPath(), generateTextReport(snap, history).getBytes(StandardCharsets.UTF_8));
-                } catch (IOException e) {
-                    plugin.getLogger().warning("生成TXT报告失败: " + e.getMessage());
-                    return null;
-                } catch (Throwable t) {
-                    plugin.getLogger().warning("生成TXT报告失败: " + t.getMessage());
-                    return null;
-                }
-                break;
+        File file = writeReportAtomically(ext, content);
+        if (file == null) {
+            return null;
         }
 
         // 清理旧报告
@@ -139,17 +185,63 @@ public class ReportGenerator {
     }
 
     /**
-     * P0-11：解析报告文件路径。基名精确到毫秒；若已存在则追加 -1/-2... 计数（防毫秒碰撞双保险）。
+     * 9A-10 #4：把报告内容写到一个<b>此前不存在</b>的文件里。
+     *
+     * <p>{@link StandardOpenOption#CREATE_NEW} 是原子创建（底层 O_CREAT|O_EXCL）：文件已存在时
+     * 内核直接抛 {@link FileAlreadyExistsException}，不会像 {@code TRUNCATE_EXISTING} 那样
+     * 静默截断别人的报告。碰撞时计数器 +1 换名重试，上限 {@link #MAX_FILE_NAME_RETRIES}。</p>
+     *
+     * @return 实际写入的文件；重试耗尽或 IO 失败时返回 {@code null}（已记 warning）
      */
-    private File resolveReportFile(String extension) {
+    private File writeReportAtomically(String extension, String content) {
         String base = "perfscope-" + LocalDateTime.now().format(FILE_TS);
-        File file = new File(reportDir, base + "." + extension);
-        int counter = 1;
-        while (file.exists()) {
-            file = new File(reportDir, base + "-" + counter + "." + extension);
-            counter++;
+        byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
+        for (int counter = 0; counter <= MAX_FILE_NAME_RETRIES; counter++) {
+            File file = new File(reportDir, counter == 0
+                ? base + "." + extension
+                : base + "-" + counter + "." + extension);
+            try {
+                Files.write(file.toPath(), bytes, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+                return file;
+            } catch (FileAlreadyExistsException e) {
+                // 正常碰撞（同毫秒/同秒内并发生成，或旧文件残留）：换名重试
+                continue;
+            } catch (IOException e) {
+                plugin.getLogger().warning("生成" + extension.toUpperCase(Locale.ROOT)
+                    + "报告失败: " + e.getMessage());
+                return null;
+            } catch (Throwable t) {
+                plugin.getLogger().warning("生成" + extension.toUpperCase(Locale.ROOT)
+                    + "报告失败: " + t.getMessage());
+                return null;
+            }
         }
-        return file;
+        plugin.getLogger().warning("[PerfScope] 报告文件名重试 " + MAX_FILE_NAME_RETRIES
+            + " 次仍冲突（" + base + "." + extension + "），本次报告已放弃");
+        return null;
+    }
+
+    /** 9A-10 #4：格式归一化（与旧 switch 的 case 集合保持一致：html / json / txt|text / 其它 → txt）。 */
+    private static String normalizeExtension(String format) {
+        if (format == null) {
+            return "txt";
+        }
+        switch (format.toLowerCase(Locale.ROOT)) {
+            case "html":
+                return "html";
+            case "json":
+                return "json";
+            default:
+                return "txt";   // 含 "txt" / "text" / 未知值
+        }
+    }
+
+    /**
+     * 9A-10 #4：关闭报告执行器（由 {@code PerfScope.onDisable()} 在停止生产者之后调用）。
+     * 使用 {@code shutdownNow()} 丢弃排队请求并中断在写任务——关服阶段不应再阻塞主线程等待 IO。
+     */
+    public void shutdown() {
+        reportExecutor.shutdownNow();
     }
 
     /**
@@ -254,16 +346,24 @@ public class ReportGenerator {
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_TPS)) {
             html.append(htmlCard("TPS (1分钟)", "不可用", "unknown", ""));
         } else {
+            // 9A-2：Folia 上 Bukkit.getTPS() 只反映 global region，不能宣称是全服口径
             html.append(htmlCard("TPS (1分钟)", String.format("%.2f", snap.tps1m), getTpsClass(snap.tps1m),
-                "5分钟: " + String.format("%.2f", snap.tps5m) + " | 15分钟: " + String.format("%.2f", snap.tps15m)));
+                "5分钟: " + String.format("%.2f", snap.tps5m) + " | 15分钟: " + String.format("%.2f", snap.tps15m)
+                    + ServerCompat.tpsScopeLabel()));
         }
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT)) {
-            html.append(htmlCard("MSPT (平均)", "不可用", "unknown", ""));
+            // 9A-1：Folia 上是"该平台没有全局 tick 时间"，不是"采集坏了"——reason 来自 ServerCompat 唯一出处
+            String reason = ServerCompat.isMsptTrustworthy() ? "" : ServerCompat.msptUnavailableReason();
+            html.append(htmlCard("MSPT (平均)", "不可用", "unknown", reason));
         } else if (snap.msptAvg < 0) {
             html.append(htmlCard("MSPT (平均)", "未知", "unknown", "健康服 TPS=20 时估算无意义"));
         } else {
-            html.append(htmlCard("MSPT (平均)", String.format("%.2f ms", snap.msptAvg), getMsptClass(snap.msptAvg),
-                "最小: " + String.format("%.2f", snap.msptMin) + "ms | 最大: " + String.format("%.2f", snap.msptMax) + "ms"));
+            // 9A-0：min/max 为 -1 表示该采集路径不提供极值（avg-only / TPS 反推），
+            // 渲染"未采集"而不是把平均值复制成假极值（旧实现输出 "最小 12.3 | 最大 12.3"）
+            String range = (snap.msptMin <= 0 || snap.msptMax <= 0)
+                ? "极值未采集（该采集路径仅提供平均值）"
+                : "最小: " + String.format("%.2f", snap.msptMin) + "ms | 最大: " + String.format("%.2f", snap.msptMax) + "ms";
+            html.append(htmlCard("MSPT (平均)", String.format("%.2f ms", snap.msptAvg), getMsptClass(snap.msptAvg), range));
         }
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_PLAYERS)) {
             html.append(htmlCard("在线玩家", "不可用", "unknown", ""));
@@ -459,12 +559,18 @@ public class ReportGenerator {
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_TPS)) {
             sb.append("TPS (1m/5m/15m): 不可用\n");
         } else {
-            sb.append(String.format("TPS (1m/5m/15m): %.2f / %.2f / %.2f\n", snap.tps1m, snap.tps5m, snap.tps15m));
+            // 9A-2：Folia 上 TPS 是 global region 局部值，报告里必须标注口径
+            sb.append(String.format("TPS (1m/5m/15m): %.2f / %.2f / %.2f%s\n",
+                snap.tps1m, snap.tps5m, snap.tps15m, ServerCompat.tpsScopeLabel()));
         }
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT)) {
-            sb.append("MSPT (avg/min/max): 不可用\n");
+            String reason = ServerCompat.isMsptTrustworthy() ? "" : "（" + ServerCompat.msptUnavailableReason() + "）";
+            sb.append("MSPT (avg/min/max): 不可用" + reason + "\n");
         } else if (snap.msptAvg < 0) {
             sb.append("MSPT (avg/min/max): 未知\n");
+        } else if (snap.msptMin <= 0 || snap.msptMax <= 0) {
+            // 9A-0：极值未采集（avg-only / TPS 反推路径），不输出伪造的 min==max==avg
+            sb.append(String.format("MSPT (avg/min/max): %.2f / 未采集 / 未采集 ms\n", snap.msptAvg));
         } else {
             sb.append(String.format("MSPT (avg/min/max): %.2f / %.2f / %.2f ms\n", snap.msptAvg, snap.msptMin, snap.msptMax));
         }
@@ -579,8 +685,11 @@ public class ReportGenerator {
         } else {
             Map<String, Object> mspt = new LinkedHashMap<>();
             mspt.put("avg", safeDouble(snap.msptAvg));
+            // 9A-0：-1 = 该采集路径不提供极值（avg-only / TPS 反推）。
+            // 下游 JSON 消费方必须据此判空，不能再假设 min/max 恒等于 avg。
             mspt.put("min", safeDouble(snap.msptMin));
             mspt.put("max", safeDouble(snap.msptMax));
+            mspt.put("source", msptSourceName(snap.msptSource));
             root.put("mspt", mspt);
         }
 
@@ -719,6 +828,20 @@ public class ReportGenerator {
      */
     private static double safeDouble(double v) {
         return Double.isFinite(v) ? v : -1;
+    }
+
+    /** 9A-0：MSPT 采集路径名（JSON 可读输出，便于下游区分精确与估算）。 */
+    private static String msptSourceName(int source) {
+        switch (source) {
+            case MetricsSnapshot.MSPT_SOURCE_TICK_TIMES:
+                return "tick_times";
+            case MetricsSnapshot.MSPT_SOURCE_AVG_TICK:
+                return "avg_tick";
+            case MetricsSnapshot.MSPT_SOURCE_TPS_FALLBACK:
+                return "tps_fallback";
+            default:
+                return "unknown";
+        }
     }
 
     /**

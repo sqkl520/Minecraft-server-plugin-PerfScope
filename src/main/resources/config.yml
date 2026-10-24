@@ -2,6 +2,30 @@
 # PerfScope - 服务器性能监测插件 配置文件
 # ==========================================
 
+# 配置结构版本（9A-11）：由插件自动识别与维护，请勿手改。
+# 缺这一行 = 旧版配置，插件会提示"检测到旧版配置"、把原文件备份为 config.yml.bak-<时间戳>，
+# 再在文件末尾自动补写本行；已有配置项的原值不受影响，新增项按默认值生效。
+config-version: 1
+
+# ------------------------------------------
+# 单位速查表（9A-11）
+# ------------------------------------------
+# | 配置项                            | 单位 / 含义                            |
+# |-----------------------------------|----------------------------------------|
+# | general.update_interval           | tick（20 tick ≈ 1 秒）                 |
+# | alerts.cooldown-seconds           | 秒                                      |
+# | history.sample-interval-seconds   | 秒                                      |
+# | hotspots.sample-every-cycles      | 采集周期数（1 周期 ≈ update_interval）  |
+# | history.retention-days            | 天                                      |
+# | report.auto_export_interval       | 分钟                                    |
+# | report.retention_days             | 天（0 = 永久保留）                      |
+# | tps.* / mspt.*                    | TPS / 毫秒                              |
+# | players.* / memory.* / cpu.*      | 百分比（players 为占 max_players 的比例） |
+#
+# 命名风格说明（9A-11）：本文件的键名存在历史遗留混用——有的用下划线
+# （update_interval、total_warning_threshold），有的用连字符（bstats-enabled、
+# cooldown-seconds）。为保证老用户配置继续有效，键名一律不改，新增项沿用所在节的既有风格。
+
 # 常规设置
 general:
   # 数据采集间隔 (tick), 20 = 1秒
@@ -63,7 +87,11 @@ memory:
 cpu:
   enabled: true
   # 进程 CPU 使用率告警阈值 (百分比)
+  # 注意分母是【整机 CPU】：16 核机器上单个线程打满只显示 6.25%，
+  # 要触发 80% 需要 13 个核被 JVM 吃满。单核卡死/GC 频繁这类问题请结合 TPS 与 MSPT 判断，
+  # 调低本阈值反而可能让正常的高负载时段持续误报（合法范围 0 < 值 <= 100，越界会回退默认值）。
   process_warning_threshold: 80.0
+  # 系统 CPU 使用率告警阈值 (百分比；同样是整机口径，包含 JVM 之外的进程占用)
   system_warning_threshold: 90.0
 
 # 红石监测 —— v1.1 已下线（此前为空实现/启发式检测，未真正采集）
@@ -93,7 +121,13 @@ report:
   # 报告保留天数 (0 = 永久保留)
   retention_days: 7
 
-# 告警推送 (v1.1 基础版：控制台 + 在线 OP 游戏内推送 + 冷却；v1.2 Wave 7C：+ 防抖收敛)
+# 告警推送 (9A-14 决策层重写：生命周期 + 历史 + 防抖对称 + digest 合并)
+#
+# ⚠️ 关于"周期"的含义（9A-14 修正旧文档的严重误导）：
+#   本段的 debounce-cycles / recovery-debounce-cycles 单位是"检查周期"，
+#   一个检查周期 = general.update_interval（默认 20 tick ≈ 1 秒）。
+#   所以默认 3 周期 ≈ 3 秒，不是 3 分钟！想抑制 1 分钟的 TPS 抖动请调到 60 以上
+#   （例如 60 ≈ 1 分钟；与 tps 的 1 分钟均值窗口对齐才有实际意义）。
 alerts:
   # 总开关 (false = 完全不做告警检查与推送)
   enabled: true
@@ -101,21 +135,38 @@ alerts:
   console: true
   # 游戏内推送 (发送给在线且有 perfscope.alert 权限的玩家)
   in-game: true
-  # 同一告警的冷却秒数 (0 = 无冷却，仍受采集周期节流)
+  # 同一告警的冷却秒数 (0 = 无冷却，仍受检查周期节流)
+  # 语义（9A-14）：冷却只压制"同一告警的重复提醒"；恢复后的复燃会绕过冷却单独通知。
   cooldown-seconds: 300
-  # 恢复通知 (告警消失时推送一条"已恢复正常")
+  # 恢复通知 (告警连续 N 个干净周期后推送一条"已恢复正常")
   notify-recovery: true
-  # 防抖：同一告警需连续 N 个采集周期超标才首次推送 (默认 3，钳 ≥1；1 = 首次出现即推)
+  # 降级通知（9A-14）：critical 掉到 warning 时推一条「已缓解」（问题仍在，不是恢复）
+  notify-mitigation: true
+  # 防抖：同一告警需连续 N 个检查周期超标才首次推送 (默认 3，钳 ≥1；1 = 首次出现即推)
+  # ⚠️ 单位是检查周期（≈ general.update_interval，默认 1 秒），3 周期 ≈ 3 秒
   # 目的：抑制指标在阈值附近秒级抖动产生的告警/恢复交替噪音
   debounce-cycles: 3
+  # 恢复防抖（9A-14）：需连续 N 个检查周期都不越界才宣布"已恢复正常"
+  # 默认与上方 debounce-cycles 同值；1 = 一个干净周期即宣布恢复（旧行为，不推荐）
+  recovery-debounce-cycles: 3
+  # 告警摘要模式（9A-14）：true = 同一检查周期内的多条新增告警合并成一条消息
+  # （按指标分组，最多列 5 条 + "等 N 条"）；级别升级 / 复燃仍即时单独发
+  digest-mode: false
+  # 模块失效转 unknown（9A-14）：告警所属采集模块连续不可用超过 N 分钟，
+  # 该告警转入 unknown 状态（不再算"活跃"）；模块恢复后若问题已消失则静默解决（不发"已恢复"）
+  unknown-after-minutes: 5
 
   # 每日摘要 (3 行概况：最低 TPS / 峰值实体与内存 / 告警统计；推送到控制台、在线 OP 与 webhook)
   # 补发语义：若配置时刻已过且当日未发（如服务端在彼时停机），启动/重载后补发一次，保证"每天都到"
   daily-summary:
     enabled: false            # 默认关
-    time: "08:00"             # 本地时区 HH:mm
+    time: "08:00"             # HH:mm
+    # 时区（9A-14）：IANA 名（如 Asia/Shanghai / UTC），留空 = 跟随 JVM 系统时区
+    # 容器/云主机常是 UTC，此时"08:00"实际是北京时间 16:00——请显式设置
+    timezone: ""
 
-  # webhook 推送 (告警 / 恢复 / 日摘要统一出口；发送失败仅记日志，不重试不阻塞)
+  # webhook 推送 (告警 / 恢复 / 日摘要统一出口；异步发送，失败仅记日志，不重试不阻塞)
+  # ⚠️ 送达结果在插件侧不可观测：每日摘要只报"已排队 N 条"，不谎称"成功"
   webhook:
     enabled: false
     type: discord             # discord | onebot (QQ)
@@ -136,10 +187,15 @@ hotspots:
   enabled: true
   # 采样节流（每 N 个采集周期全遍历一次；默认 30 ≈ 30 秒，避免全遍历拖慢主线程）
   sample-every-cycles: 30
+  # 单个区块的实体数告警阈值（注意：这是"一个区块"的口径，与上方 entities 段的全服总数不同）。
+  # /perfscope diagnose 的热点规则用它判定；默认 200 即单区块 200 个实体会被点出坐标。
+  chunk-warning-threshold: 200
 
 # 各世界单独设置 (可覆盖全局设置)
 # 语义（与采集层判定一致）：此处配置了的世界，其实体数按该世界独立阈值逐世界判定；
 # 未在此处配置的世界，不逐世界判定，统一由上方 entities 段的全服合计阈值覆盖。
+# 世界名必须是 Bukkit 的真实世界名（区分大小写，如 world / world_nether / world_the_end）。
+# 9A-11：加载时插件会把这里的世界名与当前已加载世界比对，不认识的名字会 WARNING 并列出可用世界名。
 worlds:
   world:
     entities:
