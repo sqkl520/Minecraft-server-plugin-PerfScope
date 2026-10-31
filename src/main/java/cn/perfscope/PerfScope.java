@@ -73,10 +73,9 @@ public final class PerfScope extends JavaPlugin {
     public void onEnable() {
         instance = this;
 
-        getLogger().info("========================================");
-        getLogger().info(Messages.get("core.banner.starting", getDescription().getVersion()));
-        getLogger().info(Messages.get("core.banner.server", ServerCompat.getServerName()));
-        getLogger().info("========================================");
+        // 9D 修（验收 HIGH）：横幅**推迟到 Messages.load() 之后**再打印。
+        // 原先写在这里，而 load() 在下面十几行之后——于是 language: zh 的服务器
+        // 首两行（插件名/服务端）永远是英文默认语言，正是"混排"最显眼的一处。
 
         // 初始化配置
         this.configManager = new ConfigManager(this);
@@ -94,6 +93,13 @@ public final class PerfScope extends JavaPlugin {
         Messages.onFirstLoad(cn.perfscope.report.ReportMessages::init);
         Messages.saveDefault(this);
         Messages.load(this);
+
+        // 9D 修（验收 HIGH）：横幅放在消息层就绪之后，保证 language: zh 的服务器
+        // 从第一行起就是中文——此前横幅在 load() 之前打印，首两行永远是英文默认语言。
+        getLogger().info("========================================");
+        getLogger().info(Messages.get("core.banner.starting", getDescription().getVersion()));
+        getLogger().info(Messages.get("core.banner.server", ServerCompat.getServerName()));
+        getLogger().info("========================================");
 
         // 初始化历史环形缓冲（Wave 7A）：由本类持有（非采集器），reload/采集重启不丢历史；
         // 采集器构造时注入引用，collectSync 末尾按节流间隔入环

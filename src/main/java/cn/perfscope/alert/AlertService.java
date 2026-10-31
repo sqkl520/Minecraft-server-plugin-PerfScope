@@ -1773,6 +1773,32 @@ public class AlertService {
     /** 9D：是否已经为本次进程做过"首写前备份 v1 文件"。 */
     private boolean stateBackedUp = false;
 
+    /**
+     * 9D：本次进程开始时发现状态文件是旧格式（无 v2 头），首次写入前必须先备份。
+     *
+     * <p>与 {@link #stateFormatVersion} 分开，是因为"要不要备份"取决于**文件当前长什么样**，
+     * 而"用什么格式写"取决于**我们即将写什么**。混成一个变量正是验收 HIGH 的成因。</p>
+     */
+    private boolean pendingLegacyBackup = false;
+
+    /** 9D：判断状态文件是否带 v2 版本头（只需读前几行）。 */
+    private boolean hasV2Header(File f) {
+        try (java.io.BufferedReader r = java.nio.file.Files.newBufferedReader(
+                f.toPath(), StandardCharsets.UTF_8)) {
+            String line;
+            int n = 0;
+            while ((line = r.readLine()) != null && n++ < 8) {
+                if (line.contains("perfscope-alert-state v=2")) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (Exception | LinkageError e) {
+            // 读不了就当作旧格式：宁可多备份一次，不能丢数据
+            return false;
+        }
+    }
+
     /** 9D：解析出的格式版本（loadState 时确定；缺头 = v1）。 */
     private int stateFormatVersion = 1;
 
@@ -1788,10 +1814,11 @@ public class AlertService {
      * 每进程只做一次，避免反复堆积备份。</p>
      */
     private void backupLegacyStateOnce(File f) {
-        if (stateBackedUp || stateFormatVersion >= 2 || !f.isFile()) {
+        if (stateBackedUp || !pendingLegacyBackup || !f.isFile()) {
             return;
         }
         stateBackedUp = true;
+        pendingLegacyBackup = false;
         String stamp = new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.ROOT)
             .format(new java.util.Date());
         File bak = new File(f.getParentFile(), "alerts.state.v1.bak-" + stamp);
@@ -1847,9 +1874,25 @@ public class AlertService {
             return;
         }
         stateLoaded = true;
+        // 9D 修（验收 HIGH）：先把"需要备份"这件事定下来，再读文件。
+        //
+        // 原实现的漏洞：stateFormatVersion 只在读到 **v2 版本头**时才变成 2，
+        // 而 v1 文件没有头 → 它永远停在 1 → 判定"这是迁移" → 应该备份。
+        // 听起来对，但真正危险的是**顺序**：AlertService.start() 第一行就是 stop()，
+        // 而 stop() 会调 persistState()——那时 loadState() 还没跑完（甚至还没开始），
+        // stateFormatVersion 仍是初始值，backupLegacyStateOnce 里 `!f.isFile()` 或
+        // 竞态条件会让备份被跳过，然后 v2 内容直接覆写 v1 原件，用户的历史告警永久丢失。
+        //
+        // 现在改为：进入 loadState 时若文件存在且**没有 v2 头**，立刻记下
+        // "这是旧格式、必须先备份"（pendingLegacyBackup=true），与读取过程解耦。
         File f = stateFile();
         if (!f.isFile()) {
+            stateFormatVersion = 2;   // 全新安装：没有旧文件，不需要备份
             return;
+        }
+        pendingLegacyBackup = !hasV2Header(f);
+        if (!pendingLegacyBackup) {
+            stateFormatVersion = 2;
         }
         int restored = 0;
         try {
