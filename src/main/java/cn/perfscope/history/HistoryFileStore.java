@@ -19,6 +19,7 @@ package cn.perfscope.history;
 
 import cn.perfscope.PerfScope;
 import cn.perfscope.config.ConfigManager;
+import cn.perfscope.util.Messages;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -182,7 +183,7 @@ public class HistoryFileStore {
         try {
             Files.createDirectories(dir);
         } catch (IOException e) {
-            recordFailure("历史目录创建失败", e);
+            recordFailure(Messages.get("run.history.dir-create-failed"), e);
         }
         Thread t = new Thread(this::writerLoop, WRITER_THREAD_NAME);
         t.setDaemon(true);
@@ -293,7 +294,7 @@ public class HistoryFileStore {
                 }
             }
         } catch (Exception | LinkageError e) {
-            recordFailure("历史写线程异常", e);
+            recordFailure(Messages.get("run.history.writer-crashed"), e);
         }
         drainAndClose();
     }
@@ -319,7 +320,7 @@ public class HistoryFileStore {
             onWriteSuccess();
         } catch (Exception | LinkageError e) {
             closeWriterQuietly();
-            recordFailure("历史写入失败", e);
+            recordFailure(Messages.get("run.history.write-failed"), e);
         }
     }
 
@@ -333,7 +334,7 @@ public class HistoryFileStore {
             onWriteSuccess();
         } catch (Exception | LinkageError e) {
             closeWriterQuietly();
-            recordFailure("历史 flush 失败", e);
+            recordFailure(Messages.get("run.history.flush-failed"), e);
         }
     }
 
@@ -425,8 +426,8 @@ public class HistoryFileStore {
             Thread.currentThread().interrupt();
         }
         if (t.isAlive()) {
-            logger.warning("[历史] 写线程未在 " + SHUTDOWN_JOIN_MS
-                + " ms 内退出，剩余 " + queue.size() + " 条样本可能丢失（目录: " + dir.toAbsolutePath() + "）");
+            logger.warning(Messages.get("run.history.writer-shutdown-timeout",
+                SHUTDOWN_JOIN_MS, queue.size(), dir.toAbsolutePath()));
             closeWriterQuietly();
         }
         writerThread = null;
@@ -523,19 +524,22 @@ public class HistoryFileStore {
      */
     private void recordFailure(String what, Throwable e) {
         int failures = ++consecutiveFailures;
-        String reason = e == null ? "未知原因" : (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+        String reason = e == null
+            ? Messages.get("run.history.unknown-reason")
+            : (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+        // lastError 是**日志/状态文本**（非控制流），故整条走文案层；
+        // 其中的 reason 是异常原文，逐字保留
         lastError = what + ": " + reason;
-        String msg = "[历史] " + lastError + "（目录: " + dir.toAbsolutePath() + "）";
+        String msg = Messages.get("run.history.log.failure", lastError, dir.toAbsolutePath());
         if (failures == FAILURE_SEVERE_THRESHOLD) {
-            logger.severe(msg + " —— 连续失败 " + failures
-                + " 次，文件持久化已停摆；/perfscope trend 只能回退内存环");
+            logger.severe(Messages.get("run.history.failure-severe", msg, failures));
             lastFailureLogMs = System.currentTimeMillis();
             return;
         }
         if (failures > FAILURE_SEVERE_THRESHOLD) {
             if (failures % 60 == 0 && System.currentTimeMillis() - lastFailureLogMs >= FAILURE_LOG_INTERVAL_MS) {
                 lastFailureLogMs = System.currentTimeMillis();
-                logger.severe(msg + " —— 连续失败 " + failures + " 次");
+                logger.severe(Messages.get("run.history.failure-repeated", msg, failures));
             }
             return;
         }
@@ -554,8 +558,7 @@ public class HistoryFileStore {
         }
         lastDropLogMs = now;
         lastDropReported = dropped;
-        logger.warning("[历史] 写队列已满，累计丢弃 " + dropped
-            + " 条历史样本（写盘速度跟不上采样；目录: " + dir.toAbsolutePath() + "）");
+        logger.warning(Messages.get("run.history.queue-full", dropped, dir.toAbsolutePath()));
     }
 
     /** 失败日志限频：同错误 5 分钟一条（防故障期刷屏）。 */
@@ -613,7 +616,7 @@ public class HistoryFileStore {
                 }
             }
         } catch (Exception | LinkageError e) {
-            logger.warning("[历史] 历史文件枚举失败: " + e.getMessage());
+            logger.warning(Messages.get("run.history.enumerate-failed", e.getMessage()));
         }
         out.sort(Comparator.comparingLong(HistorySample::timestamp));
         return out;
@@ -639,8 +642,8 @@ public class HistoryFileStore {
             cache.put(date, new CachedFile(name, mtime, size, parsed));
             return parsed;
         } catch (Exception | LinkageError e) {
-            logger.warning("[历史] 历史文件读取失败（已跳过）: "
-                + file.getFileName() + ": " + e.getMessage());
+            logger.warning(Messages.get("run.history.read-failed",
+                file.getFileName(), e.getMessage()));
             return List.of();
         }
     }
@@ -678,8 +681,8 @@ public class HistoryFileStore {
                 }
             }
         } catch (Exception | LinkageError e) {
-            logger.warning("[历史] 历史文件读取失败（已跳过）: "
-                + file.getFileName() + ": " + e.getMessage());
+            logger.warning(Messages.get("run.history.read-failed",
+                file.getFileName(), e.getMessage()));
         }
         // 二分查找要求时间升序；正常追加写天然有序，NTP 回拨等异常情况下排序兜底
         boolean sorted = true;
@@ -842,13 +845,13 @@ public class HistoryFileStore {
                         Files.deleteIfExists(p);
                         cache.remove(d);
                     } catch (IOException e) {
-                        logger.warning("[历史] 旧历史文件删除失败: "
-                            + p.getFileName() + ": " + e.getMessage());
+                        logger.warning(Messages.get("run.history.delete-failed",
+                            p.getFileName(), e.getMessage()));
                     }
                 }
             });
         } catch (Exception | LinkageError e) {
-            logger.warning("[历史] 历史清理失败: " + e.getMessage());
+            logger.warning(Messages.get("run.history.retention-failed", e.getMessage()));
         }
     }
 

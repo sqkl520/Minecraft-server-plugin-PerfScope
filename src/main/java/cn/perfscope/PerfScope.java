@@ -91,6 +91,10 @@ public final class PerfScope extends JavaPlugin {
         // 报告层：本类仿 Colleague 方式自注册（ensureRegistered），但在 load 之前若有人
         // 读 report.* 会拿到键名。显式登记一次，保证与其它模块时序一致。
         Messages.onFirstLoad(cn.perfscope.report.ReportMessages::init);
+        // 9D：采集/历史/兼容层的控制台日志
+        Messages.onFirstLoad(RuntimeMessages::init);
+        // 9D：配置校验警告（服主改错配置时最常看到的那类）
+        Messages.onFirstLoad(cn.perfscope.config.ConfigMessages::init);
         // 9D 修（验收）：必须**先合并模块表**再生成 messages.yml，
         // 否则 saveDefault 只会写出基础 86 个键（模块表尚未合并进来），
         // 用户打开模板找不到 cmd.*/report.*/alert.*，会以为自定义功能不存在。

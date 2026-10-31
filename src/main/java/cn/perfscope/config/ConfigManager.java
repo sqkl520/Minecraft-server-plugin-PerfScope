@@ -18,6 +18,7 @@
 package cn.perfscope.config;
 
 import cn.perfscope.PerfScope;
+import cn.perfscope.util.Messages;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
 import org.bukkit.configuration.ConfigurationSection;
@@ -100,6 +101,17 @@ public class ConfigManager {
     /** 9A-11：类型告警文本（供 LoadResult 汇总，命令层可展示）。 */
     private final List<String> typeWarningsThisLoad = new ArrayList<>();
 
+    static {
+        // 注册本层文案表。ConfigManager 在 PerfScope#onEnable 里**先于** Messages.load() 构造，
+        // 因此在类初始化阶段注册可以保证：无论编排方是否记得登记 Messages.onFirstLoad，
+        // 本模块的键都已经在 Messages 第一次 mergeModules() 之前进入 EXTRA 表。
+        // 注意：注册本身不会立刻进入当前语言快照（那只发生在 Messages.load() 内），
+        // 所以"首次启动中早于 Messages.load() 的那一轮配置告警"仍可能显示键名；
+        // 第二轮（reload）起一切正常。要彻底消除该窗口，需把 Messages.load() 提到
+        // configManager.load() 之前——那在 PerfScope 里，不属本文件职责。
+        ConfigMessages.init();
+    }
+
     public ConfigManager(PerfScope plugin) {
         this.plugin = plugin;
     }
@@ -133,9 +145,9 @@ public class ConfigManager {
         // 9A-11：Bukkit 的 loadConfiguration 会把语法错误吞成"空配置"，继续走就是全默认值静默覆盖。
         // 这里显式识别：文件里有实际内容（非仅注释/空行）却解析出 0 个顶层键 → 视为加载失败，保持旧快照。
         if (configFile.exists() && hasNonCommentContent(configFile) && yaml.getKeys(false).isEmpty()) {
-            String msg = "config.yml 解析失败（YAML 语法错误？），本次加载已放弃，继续使用上一份配置";
+            String msg = Messages.get("config.load.parse-failed");
             plugin.getLogger().severe("[PerfScope] " + msg);
-            plugin.getLogger().severe("[PerfScope] 请修正 config.yml 的缩进/引号后执行 /perfscope reload");
+            plugin.getLogger().severe("[PerfScope] " + Messages.get("config.load.parse-failed-hint"));
             LoadResult failed = LoadResult.failed(msg);
             lastLoadResult = failed;
             throw new IllegalStateException(msg);
@@ -297,10 +309,9 @@ public class ConfigManager {
 
         // 9A-11：有缺键/类型错误时给一条汇总，方便用户知道"配置没完全按我写的生效"
         if (!result.missingKeys.isEmpty() || !result.typeWarnings.isEmpty()) {
-            plugin.getLogger().info("[PerfScope] 配置加载完成：缺键 " + result.missingKeys.size()
-                + " 项（用默认值）、类型错误 " + result.typeWarnings.size()
-                + " 项（已回退默认值）、未知键 " + result.unknownKeys.size()
-                + " 项、未知世界 " + result.invalidWorldNames.size() + " 项");
+            plugin.getLogger().info("[PerfScope] " + Messages.get("config.load.summary",
+                result.missingKeys.size(), result.typeWarnings.size(),
+                result.unknownKeys.size(), result.invalidWorldNames.size()));
         }
         // 9D（验收）：升级用户的界面语言会被**静默**从中文翻成英文——
         // 他们的 config.yml 没有 general.language，于是走默认 en，整站变英文，
@@ -309,11 +320,8 @@ public class ConfigManager {
         // 判据：缺 general.language（= 旧配置）且当前生效值是默认 en。
         if (result.missingKeys.contains(LANGUAGE_CONFIG_KEY)
             && LANGUAGE_DEFAULT.equals(fresh.general_language)) {
-            plugin.getLogger().warning(
-                "[PerfScope] 界面语言已默认为英文（本配置此前没有 general.language 项）。"
-                    + "如需保持中文，请在本文件 general 段加入 \"language: zh\" 后执行 /perfscope reload。"
-                    + " | The interface language is now English by default (this config had no "
-                    + "general.language). To keep Chinese, add \"language: zh\" under general and reload.");
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.load.language-default",
+                LANGUAGE_CONFIG_KEY, "language: zh"));
         }
         return result;
     }
@@ -361,15 +369,15 @@ public class ConfigManager {
         if (yaml.contains(CONFIG_VERSION_KEY)) {
             return false;
         }
-        plugin.getLogger().info("[PerfScope] 检测到旧版配置（无 config-version），"
-            + "将按默认值补齐新增键（已有键保持原值不动）");
+        plugin.getLogger().info("[PerfScope] " + Messages.get("config.version.legacy-detected",
+            CONFIG_VERSION_KEY));
         boolean written = writeBackConfigVersion();
         if (written) {
-            plugin.getLogger().info("[PerfScope] 已备份原配置并写入 " + CONFIG_VERSION_KEY
-                + ": " + CURRENT_CONFIG_VERSION + "（备份文件与原文件同目录）");
+            plugin.getLogger().info("[PerfScope] " + Messages.get("config.version.written",
+                CONFIG_VERSION_KEY, CURRENT_CONFIG_VERSION));
         } else {
-            plugin.getLogger().warning("[PerfScope] " + CONFIG_VERSION_KEY
-                + " 写回磁盘失败（不影响本次运行，但下次启动会再次提示，请检查文件权限）");
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.version.write-failed",
+                CONFIG_VERSION_KEY));
         }
         return written;
     }
@@ -385,16 +393,15 @@ public class ConfigManager {
         Object raw = yaml.get(CONFIG_VERSION_KEY);
         Integer v = coerceInt(raw);
         if (v == null) {
-            warnType(CONFIG_VERSION_KEY, raw, 0, "整数");
+            warnType(CONFIG_VERSION_KEY, raw, 0, "config.expected.integer");
             return 0;
         }
         if (v > CURRENT_CONFIG_VERSION) {
-            plugin.getLogger().warning("[PerfScope] " + CONFIG_VERSION_KEY + "=" + v
-                + " 高于本插件支持的版本 " + CURRENT_CONFIG_VERSION
-                + "（配置来自更新版本的 PerfScope？）本版本不认识的新键会被忽略");
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.version.too-new",
+                CONFIG_VERSION_KEY, v, CURRENT_CONFIG_VERSION));
         } else if (v < CURRENT_CONFIG_VERSION) {
-            plugin.getLogger().info("[PerfScope] 配置版本 " + v + " 低于当前 " + CURRENT_CONFIG_VERSION
-                + "，新增键将按默认值生效（已有键保持原值）");
+            plugin.getLogger().info("[PerfScope] " + Messages.get("config.version.older",
+                v, CURRENT_CONFIG_VERSION));
         }
         return v;
     }
@@ -433,7 +440,8 @@ public class ConfigManager {
             Files.write(path, text.getBytes(StandardCharsets.UTF_8));
             return true;
         } catch (Exception e) {
-            plugin.getLogger().warning("[PerfScope] 写回 " + CONFIG_VERSION_KEY + " 失败: " + e.getMessage());
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.version.append-failed",
+                CONFIG_VERSION_KEY, e.getMessage()));
             return false;
         }
     }
@@ -451,7 +459,7 @@ public class ConfigManager {
         Object raw = yaml.get(key);
         Boolean v = coerceBool(raw);
         if (v == null) {
-            warnType(key, raw, def, "布尔值");
+            warnType(key, raw, def, "config.expected.boolean");
             return def;
         }
         return v;
@@ -466,7 +474,7 @@ public class ConfigManager {
         Object raw = yaml.get(key);
         Integer v = coerceInt(raw);
         if (v == null) {
-            warnType(key, raw, def, "整数");
+            warnType(key, raw, def, "config.expected.integer");
             return def;
         }
         return v;
@@ -483,7 +491,7 @@ public class ConfigManager {
         Object raw = yaml.get(key);
         Integer v = coerceInt(raw);
         if (v == null) {
-            warnType(key, raw, def, "整数");
+            warnType(key, raw, def, "config.expected.integer");
             return def;
         }
         return v;
@@ -503,7 +511,7 @@ public class ConfigManager {
         Object raw = yaml.get(key);
         Double v = coerceDouble(raw);
         if (v == null) {
-            warnType(key, raw, def, "小数");
+            warnType(key, raw, def, "config.expected.decimal");
             return def;
         }
         return v;
@@ -519,7 +527,7 @@ public class ConfigManager {
         if (raw instanceof String) {
             return (String) raw;
         }
-        warnType(key, raw, def, "字符串");
+        warnType(key, raw, def, "config.expected.string");
         return def;
     }
 
@@ -597,15 +605,13 @@ public class ConfigManager {
             return;
         }
         String head = migrating
-            ? "[PerfScope] 旧版配置迁移：以下 " + missingKeysThisLoad.size()
-              + " 个键不存在，已按默认值运行（如需自定义请从插件默认配置复制后修改）: "
-            : "[PerfScope] 配置缺少 " + missingKeysThisLoad.size()
-              + " 个键（旧版配置属正常），本次按默认值运行: ";
+            ? "[PerfScope] " + Messages.get("config.missing.migrating", missingKeysThisLoad.size())
+            : "[PerfScope] " + Messages.get("config.missing.summary", missingKeysThisLoad.size());
         StringBuilder sb = new StringBuilder();
         int shown = 0;
         for (Map.Entry<String, Object> e : missingKeysThisLoad.entrySet()) {
             if (shown >= 15) {
-                sb.append(" 等共 ").append(missingKeysThisLoad.size()).append(" 项");
+                sb.append(Messages.get("config.missing.more", missingKeysThisLoad.size()));
                 break;
             }
             if (shown > 0) {
@@ -622,9 +628,8 @@ public class ConfigManager {
         if (!typeWarnedThisLoad.add(key)) {
             return;
         }
-        String msg = "[PerfScope] 配置类型错误：" + key + " 的当前值 " + describe(raw)
-            + " 是" + typeName(raw) + "，应为" + expected
-            + "，本次已改用 " + describe(used) + "；修正后执行 /perfscope reload 生效";
+        String msg = "[PerfScope] " + Messages.get("config.type.error",
+            key, describe(raw), Messages.get(typeName(raw)), Messages.get(expected), describe(used));
         plugin.getLogger().warning(msg);
         typeWarningsThisLoad.add(key);
     }
@@ -639,27 +644,28 @@ public class ConfigManager {
         return String.valueOf(v);
     }
 
+    /** 实际类型 → 文案键（由调用方经 {@link Messages#get(String)} 解析成当前语言）。 */
     private static String typeName(Object v) {
         if (v == null) {
-            return "空值";
+            return "config.type.null";
         }
         if (v instanceof Boolean) {
-            return "布尔值";
+            return "config.type.boolean";
         }
         if (v instanceof Integer || v instanceof Long || v instanceof Short || v instanceof Byte) {
-            return "整数";
+            return "config.type.integer";
         }
         if (v instanceof Number) {
-            return "小数值";
+            return "config.type.decimal";
         }
         if (v instanceof String) {
-            return "字符串";
+            return "config.type.string";
         }
         if (v instanceof ConfigurationSection) {
-            return "配置节";
+            return "config.type.section";
         }
         if (v instanceof List) {
-            return "列表";
+            return "config.type.list";
         }
         return v.getClass().getSimpleName();
     }
@@ -679,7 +685,7 @@ public class ConfigManager {
         if (raw == null) {
             return null;
         }
-        warnType("worlds", raw, "(忽略该段)", "配置节");
+        warnType("worlds", raw, Messages.get("config.value.section-ignored"), "config.expected.section");
         return null;
     }
 
@@ -719,12 +725,11 @@ public class ConfigManager {
             unknown.add(key);
         }
         for (String key : unknown) {
-            plugin.getLogger().warning("[PerfScope] 配置项 " + key
-                + " 已不再使用/拼写可能有误（当前版本不读取该键，可安全删除）");
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.unknown.key", key));
         }
         if (!unknown.isEmpty()) {
-            plugin.getLogger().warning("[PerfScope] 共发现 " + unknown.size()
-                + " 个未知配置项；若你确认拼写无误，请升级 PerfScope 或反馈该键名");
+            plugin.getLogger().warning("[PerfScope] "
+                + Messages.get("config.unknown.summary", unknown.size()));
         }
         return new ArrayList<>(unknown);
     }
@@ -741,8 +746,8 @@ public class ConfigManager {
             known.add(CONFIG_VERSION_KEY);
             return known;
         } catch (Exception e) {
-            plugin.getLogger().warning("[PerfScope] 无法读取内置默认 config.yml，已跳过未知配置项检测: "
-                + e.getMessage());
+            plugin.getLogger().warning("[PerfScope] "
+                + Messages.get("config.unknown.known-keys-failed", e.getMessage()));
             return null;
         }
     }
@@ -821,7 +826,7 @@ public class ConfigManager {
             return Collections.emptyList();
         }
         if (loaded == null || loaded.isEmpty()) {
-            plugin.getLogger().info("[PerfScope] 世界尚未加载，本次跳过 worlds 段世界名校验");
+            plugin.getLogger().info("[PerfScope] " + Messages.get("config.worlds.skipped", "worlds"));
             return Collections.emptyList();
         }
         Set<String> names = new TreeSet<>();
@@ -842,10 +847,8 @@ public class ConfigManager {
         if (bad.isEmpty()) {
             return bad;
         }
-        plugin.getLogger().warning("[PerfScope] 配置 worlds 段包含未知世界: " + String.join(", ", bad)
-            + "；当前已加载的世界: " + String.join(", ", names)
-            + "。这些条目不会生效（多为改名后残留或拼写错误），请核对世界名；"
-            + "若该世界只是尚未加载，加载后 /perfscope reload 即可");
+        plugin.getLogger().warning("[PerfScope] " + Messages.get("config.worlds.unknown",
+            "worlds", String.join(", ", bad), String.join(", ", names)));
         return bad;
     }
 
@@ -910,9 +913,8 @@ public class ConfigManager {
         // 上界 50 的理由——margin 超过 50 等于把退出线压到阈值一半以下，一次真实的持续过载会永远退不出去。
         if (!Double.isFinite(cfg.cpu_hysteresisMargin)
             || cfg.cpu_hysteresisMargin < 0 || cfg.cpu_hysteresisMargin > 50) {
-            plugin.getLogger().warning("[PerfScope] 配置校验：cpu.hysteresis_margin="
-                + cfg.cpu_hysteresisMargin + " 超出合法区间 [0, 50]，已回退默认值 "
-                + CPU_HYSTERESIS_DEFAULT);
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.hysteresis",
+                "cpu.hysteresis_margin", cfg.cpu_hysteresisMargin, CPU_HYSTERESIS_DEFAULT));
             cfg.cpu_hysteresisMargin = CPU_HYSTERESIS_DEFAULT;
         }
 
@@ -931,57 +933,58 @@ public class ConfigManager {
 
         // === alerts.cooldown-seconds：负值钳制为 0 ===
         if (cfg.alerts_cooldownSeconds < 0) {
-            plugin.getLogger().warning("[PerfScope] 配置校验：alerts.cooldown-seconds 为负值("
-                + cfg.alerts_cooldownSeconds + ")，已钳制为 0");
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.cooldown-negative",
+                "alerts.cooldown-seconds", cfg.alerts_cooldownSeconds));
             cfg.alerts_cooldownSeconds = 0;
         }
 
         // === alerts.debounce-cycles：非法值（≤0）钳到默认 3 并 warning（Wave 7C，与全仓 clamp 口径一致） ===
         if (cfg.alerts_debounceCycles <= 0) {
-            plugin.getLogger().warning("[PerfScope] 配置校验：alerts.debounce-cycles="
-                + cfg.alerts_debounceCycles + " 非法（需 ≥1），已按 3 处理");
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.debounce-cycles",
+                "alerts.debounce-cycles", cfg.alerts_debounceCycles, 3));
             cfg.alerts_debounceCycles = 3;
         }
 
         // === alerts.daily-summary.time：非法格式回退 "08:00" 并 warning（Wave 7D；容忍 "8:00" 单数字小时） ===
         if (!isValidHhMm(cfg.alerts_dailySummaryTime)) {
-            plugin.getLogger().warning("[PerfScope] 配置校验：alerts.daily-summary.time=\""
-                + cfg.alerts_dailySummaryTime + "\" 非法（需 HH:mm），已回退默认 08:00");
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.daily-summary-time",
+                "alerts.daily-summary.time", cfg.alerts_dailySummaryTime, "08:00"));
             cfg.alerts_dailySummaryTime = "08:00";
         }
 
         // === alerts.webhook.type：未知值按 discord 处理并 warning（Wave 7D，不静默） ===
         if (!"discord".equals(cfg.alerts_webhookType) && !"onebot".equals(cfg.alerts_webhookType)) {
-            plugin.getLogger().warning("[PerfScope] 配置校验：alerts.webhook.type=\""
-                + cfg.alerts_webhookType + "\" 未知（支持 discord | onebot），已按 discord 处理");
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.webhook-type",
+                "alerts.webhook.type", cfg.alerts_webhookType, "discord"));
             cfg.alerts_webhookType = "discord";
         }
 
         // === history.sample-interval-seconds：非法值（≤0）钳到 60 并 warning（Wave 7A，与全仓 clamp 口径一致） ===
         if (cfg.history_sampleIntervalSeconds <= 0) {
-            plugin.getLogger().warning("[PerfScope] 配置校验：history.sample-interval-seconds="
-                + cfg.history_sampleIntervalSeconds + " 非法（需 ≥1），已按 60 秒处理");
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.history-interval",
+                "history.sample-interval-seconds", cfg.history_sampleIntervalSeconds, 60));
             cfg.history_sampleIntervalSeconds = 60;
         }
 
         // === history.retention-days：非法值（≤0）钳到 7 并 warning（Wave 8B，与全仓 clamp 口径一致） ===
         if (cfg.history_persistRetentionDays <= 0) {
-            plugin.getLogger().warning("[PerfScope] 配置校验：history.retention-days="
-                + cfg.history_persistRetentionDays + " 非法（需 ≥1），已按 7 天处理");
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.history-retention",
+                "history.retention-days", cfg.history_persistRetentionDays, 7));
             cfg.history_persistRetentionDays = 7;
         }
 
         // === hotspots.sample-every-cycles：非法值（≤0）钳到 30 并 warning（Wave 8C，与全仓 clamp 口径一致） ===
         if (cfg.hotspots_sampleEveryCycles <= 0) {
-            plugin.getLogger().warning("[PerfScope] 配置校验：hotspots.sample-every-cycles="
-                + cfg.hotspots_sampleEveryCycles + " 非法（需 ≥1），已按 30 周期处理");
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.hotspots-cycles",
+                "hotspots.sample-every-cycles", cfg.hotspots_sampleEveryCycles, 30));
             cfg.hotspots_sampleEveryCycles = 30;
         }
 
         // === hotspots.chunk-warning-threshold：非法值（≤0）钳到 200 并 warning（9A-8） ===
         if (cfg.hotspots_chunkWarningThreshold <= 0) {
-            plugin.getLogger().warning("[PerfScope] 配置校验：hotspots.chunk-warning-threshold="
-                + cfg.hotspots_chunkWarningThreshold + " 非法（需 ≥1），已按 200 处理");
+            plugin.getLogger().warning("[PerfScope] "
+                + Messages.get("config.check.hotspots-chunk-threshold",
+                    "hotspots.chunk-warning-threshold", cfg.hotspots_chunkWarningThreshold, 200));
             cfg.hotspots_chunkWarningThreshold = 200;
         }
 
@@ -991,8 +994,9 @@ public class ConfigManager {
         // 认不出则回退默认并 warning，日志保留用户原始拼写，方便对照 config.yml 直接改。
         String language = normalizeLanguage(cfg.general_language);
         if (language == null) {
-            plugin.getLogger().warning("[PerfScope] 配置校验：general.language=" + cfg.general_language
-                + " 不是受支持的语言（支持: en, zh），已回退 " + LANGUAGE_DEFAULT);
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.language",
+                LANGUAGE_CONFIG_KEY, cfg.general_language,
+                String.join(", ", SUPPORTED_LANGUAGES), LANGUAGE_DEFAULT));
             language = LANGUAGE_DEFAULT;
         }
         cfg.general_language = language;
@@ -1044,13 +1048,13 @@ public class ConfigManager {
      */
     private double sanitizePercent(String key, double v, double def) {
         if (!Double.isFinite(v)) {
-            plugin.getLogger().warning("[PerfScope] 配置校验：" + key
-                + " 为非有限数值(NaN/Infinity)，已回退默认值：" + v + " -> " + def);
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.percent-non-finite",
+                key, v, def));
             return def;
         }
         if (v <= 0.0d || v > 100.0d) {
-            plugin.getLogger().warning("[PerfScope] 配置校验：" + key + "=" + v
-                + " 越界（要求 0 < 值 <= 100，百分比），已回退默认值 " + def);
+            plugin.getLogger().warning("[PerfScope] "
+                + Messages.get("config.check.percent-out-of-range", key, v, def));
             return def;
         }
         return v;
@@ -1112,18 +1116,18 @@ public class ConfigManager {
      */
     private void warnThresholdFallback(String key, boolean outOfRange, Object w, Object c) {
         if (outOfRange) {
-            plugin.getLogger().warning("[PerfScope] 配置校验：" + key
-                + " 数值越界（要求 0 ≤ 值 ≤ " + MAX_INT_THRESHOLD + "），已回退默认值：w=" + w + " c=" + c);
+            plugin.getLogger().warning("[PerfScope] "
+                + Messages.get("config.check.threshold-out-of-range", key, MAX_INT_THRESHOLD, w, c));
         } else {
-            plugin.getLogger().warning("[PerfScope] 配置校验：" + key
-                + " 的 warning(critical) 设置倒置，已回退默认值：w=" + w + " c=" + c);
+            plugin.getLogger().warning("[PerfScope] "
+                + Messages.get("config.check.threshold-inverted", key, w, c));
         }
     }
 
     /** 非有限数值（NaN/Infinity）专用的回退告警，与越界/倒置分开措辞。 */
     private void warnThresholdNonFinite(String key, Object w, Object c) {
-        plugin.getLogger().warning("[PerfScope] 配置校验：" + key
-            + " 存在非有限数值(NaN/Infinity)，已回退默认值：w=" + w + " c=" + c);
+        plugin.getLogger().warning("[PerfScope] "
+            + Messages.get("config.check.threshold-non-finite", key, w, c));
     }
 
     public ConfigData get() {
@@ -1183,7 +1187,7 @@ public class ConfigManager {
         public static LoadResult success(int configVersion, boolean versionKeyWritten,
                                          List<String> missingKeys, List<String> unknownKeys,
                                          List<String> invalidWorldNames, List<String> typeWarnings) {
-            return new LoadResult(true, "配置加载成功", configVersion, versionKeyWritten,
+            return new LoadResult(true, Messages.get("config.load.success"), configVersion, versionKeyWritten,
                 missingKeys, unknownKeys, invalidWorldNames, typeWarnings);
         }
 
@@ -1196,13 +1200,11 @@ public class ConfigManager {
         /** 9A-11：一行摘要（供命令层 / 日志使用）。 */
         public String summary() {
             if (!success) {
-                return "配置加载失败：" + message;
+                return Messages.get("config.load.result.failed", message);
             }
-            return "配置加载成功（config-version=" + configVersion
-                + "，缺键 " + missingKeys.size()
-                + "，类型错误 " + typeWarnings.size()
-                + "，未知键 " + unknownKeys.size()
-                + "，未知世界 " + invalidWorldNames.size() + "）";
+            return Messages.get("config.load.result.success", configVersion,
+                missingKeys.size(), typeWarnings.size(),
+                unknownKeys.size(), invalidWorldNames.size());
         }
     }
 

@@ -19,6 +19,7 @@ package cn.perfscope.history;
 
 import cn.perfscope.config.ConfigManager;
 import cn.perfscope.metrics.MetricsSnapshot;
+import cn.perfscope.util.Messages;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -202,10 +203,8 @@ public final class HistoryStore {
             return;
         }
         warnedIntervalSec = intervalSec;
-        logger.warning("[历史] history.sample-interval-seconds=" + intervalSec
-            + " 过大：30 分钟诊断窗口内最多只有 " + Math.max(1L, 1800L / intervalSec)
-            + " 条样本，DIAG-MEM-LEAK / DIAG-TPS-PERSIST 等趋势规则会因样本不足（MIN_SAMPLES=10）长期跳过。"
-            + "建议保持 ≤60 秒。");
+        logger.warning(Messages.get("run.history.interval-too-large", intervalSec,
+            Math.max(1L, 1800L / intervalSec)));
     }
 
     /** Wave 8B：装配文件持久化出口（PerfScope 在构造时/装配期调用；null 安全）。 */

@@ -17,6 +17,7 @@
  */
 package cn.perfscope.compat;
 
+import cn.perfscope.util.Messages;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.scheduler.BukkitTask;
 
@@ -77,7 +78,7 @@ public final class SchedulerAdapter {
                 Object scheduledTask = FoliaSchedulerBridge.runGlobalAtFixedRate(plugin, task, d, p);
                 return new TaskHandle(scheduledTask, plugin);
             } catch (Throwable t) {
-                plugin.getLogger().severe("[PerfScope] Folia 调度不可用，相关功能停用：" + describe(t));
+                plugin.getLogger().severe(Messages.get("run.compat.folia-scheduler-unavailable", describe(t)));
                 return TaskHandle.noop();
             }
         }
@@ -104,7 +105,7 @@ public final class SchedulerAdapter {
                 Object scheduledTask = FoliaSchedulerBridge.runAsyncAtFixedRate(plugin, task, dMs, pMs);
                 return new TaskHandle(scheduledTask, plugin);
             } catch (Throwable t) {
-                plugin.getLogger().severe("[PerfScope] Folia 调度不可用，相关功能停用：" + describe(t));
+                plugin.getLogger().severe(Messages.get("run.compat.folia-scheduler-unavailable", describe(t)));
                 return TaskHandle.noop();
             }
         }
@@ -140,7 +141,7 @@ public final class SchedulerAdapter {
                 Object scheduledTask = FoliaSchedulerBridge.runGlobalDelayed(plugin, task, d);
                 return new TaskHandle(scheduledTask, plugin);
             } catch (Throwable t) {
-                plugin.getLogger().severe("[PerfScope] Folia 调度不可用，相关功能停用：" + describe(t));
+                plugin.getLogger().severe(Messages.get("run.compat.folia-scheduler-unavailable", describe(t)));
                 return TaskHandle.noop();
             }
         }
@@ -216,7 +217,7 @@ public final class SchedulerAdapter {
                     FoliaSchedulerBridge.cancel(foliaTask);
                 } catch (Throwable t) {
                     if (plugin != null) {
-                        plugin.getLogger().warning("[PerfScope] 取消 Folia 任务失败: " + t.getMessage());
+                        plugin.getLogger().warning(Messages.get("run.compat.folia-cancel-failed", t.getMessage()));
                     }
                 }
             }

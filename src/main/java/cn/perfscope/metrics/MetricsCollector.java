@@ -23,6 +23,7 @@ import cn.perfscope.compat.SchedulerAdapter;
 import cn.perfscope.compat.ServerCompat;
 import cn.perfscope.config.ConfigManager;
 import cn.perfscope.history.HistoryStore;
+import cn.perfscope.util.Messages;
 import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
 import org.bukkit.World;
@@ -266,7 +267,7 @@ public class MetricsCollector {
             try {
                 avgTickMethod = Bukkit.getServer().getClass().getMethod("getAverageTickTime");
             } catch (Exception e) {
-                plugin.getLogger().warning("[PerfScope] getAverageTickTime 反射解析失败，将使用 TPS 反推 MSPT");
+                plugin.getLogger().warning(Messages.get("run.collector.reflect-avg-tick-failed"));
             }
         }
         // Paper 世界 TileEntity 计数
@@ -274,7 +275,7 @@ public class MetricsCollector {
             try {
                 tileEntityCountMethod = World.class.getMethod("getTileEntityCount");
             } catch (Exception e) {
-                plugin.getLogger().warning("[PerfScope] getTileEntityCount 反射解析失败，将使用 Bukkit 降级路径");
+                plugin.getLogger().warning(Messages.get("run.collector.reflect-te-count-failed"));
             }
         }
     }
@@ -325,8 +326,7 @@ public class MetricsCollector {
         // 故强制下限 1（对齐 AlertService.start 已有范式），非法配置同时记 warning 便于诊断
         int configuredInterval = configManager.get().general_updateInterval;
         if (configuredInterval <= 0) {
-            plugin.getLogger().warning("[PerfScope] general.update_interval=" + configuredInterval
-                + " 非法（需 ≥1），已按 1 tick 处理");
+            plugin.getLogger().warning(Messages.get("run.collector.invalid-interval", configuredInterval));
         }
         long interval = Math.max(1, configuredInterval);
         // 9A-10 #1：把代际捕获进闭包——任务体每次执行前先校验，过期代直接丢弃本轮结果
@@ -522,9 +522,12 @@ public class MetricsCollector {
             firstFailureAtMs = 0L;
             lastCollectError = null;
             collectorDead = false;
-            plugin.getLogger().info("[PerfScope] 采集已恢复（此前连续失败 " + failedBefore + " 次"
-                + (firstAt > 0 ? "，首次失败 " + formatClock(firstAt) : "")
-                + "，恢复于 " + formatClock(lastCollectAtMs) + "）");
+            // 两种完整句式（带/不带"首次失败"）由消息层各自成句——片段拼接在英文里语序会散架
+            plugin.getLogger().info(firstAt > 0
+                ? Messages.get("run.collector.cycle-recovered",
+                    failedBefore, formatClock(firstAt), formatClock(lastCollectAtMs))
+                : Messages.get("run.collector.cycle-recovered-brief",
+                    failedBefore, formatClock(lastCollectAtMs)));
         } else {
             collectorDead = false;
         }
@@ -551,18 +554,17 @@ public class MetricsCollector {
             || now - lastCycleFailureLogAtMs >= CYCLE_FAILURE_LOG_INTERVAL_MS;
         if (logNow) {
             lastCycleFailureLogAtMs = now;
-            String detail = "[PerfScope] 采集周期异常（已连续失败 " + failures + " 次，首次失败 "
-                + formatClock(firstFailureAtMs) + "）: " + lastCollectError;
+            String detail = Messages.get("run.collector.cycle-failed",
+                failures, formatClock(firstFailureAtMs), lastCollectError);
             if (configManager.get() != null && configManager.get().general_debug) {
-                plugin.getLogger().log(Level.SEVERE, detail + " —— 数据可能已停止更新，/perfscope status 可查", t);
+                plugin.getLogger().log(Level.SEVERE,
+                    Messages.get("run.collector.cycle-failed-hint", detail), t);
             } else {
                 plugin.getLogger().severe(detail);
             }
         }
         if (severe) {
-            plugin.getLogger().severe("[PerfScope] 采集已连续失败 " + failures
-                + " 次，/perfscope 显示的数据可能已过期。请执行 /perfscope reload，"
-                + "若仍无效请重启服务器（期间可用 /perfscope status 查看最近错误）");
+            plugin.getLogger().severe(Messages.get("run.collector.dead", failures));
         }
     }
 
@@ -593,8 +595,8 @@ public class MetricsCollector {
             long now = System.currentTimeMillis();
             if (now - lastJvmCycleFailureLogAtMs >= CYCLE_FAILURE_LOG_INTERVAL_MS) {
                 lastJvmCycleFailureLogAtMs = now;
-                plugin.getLogger().warning("[PerfScope] JVM 异步采集周期异常（已限频记录，JVM 指标可能停滞）: "
-                    + describeThrowable(t));
+                plugin.getLogger().warning(Messages.get("run.collector.jvm-cycle-failed",
+                    describeThrowable(t)));
             }
         }
     }
@@ -700,11 +702,7 @@ public class MetricsCollector {
             return;
         }
         foliaSkipLogged = true;
-        plugin.getLogger().info("[PerfScope] Folia 下跨 region 聚合不可靠（World.getEntities()/"
-            + "getLoadedChunks()、Chunk.getEntities()/getTileEntities() 均按 region 归属，"
-            + "可能只返回部分 region 或抛 IllegalStateException），"
-            + "entities / chunks / tile_entities / hotspots 已自动跳过并标记为平台限制；"
-            + "需要这些数据请用 AlmanacAPI 等 region 感知方案（说明见 docs/07-guides/COMPAT-MATRIX-VERIFICATION.md）");
+        plugin.getLogger().info(Messages.get("run.collector.folia-skip"));
     }
 
     /** 实体采集（分级降频）：每 ENTITY_SAMPLE_EVERY 个周期遍历一次世界实体并刷新缓存，其余周期复用缓存值填入快照。 */
@@ -1054,8 +1052,8 @@ public class MetricsCollector {
                 ConfigManager.ConfigData hsCfg = configManager.get();
                 if (nullSkipped > 0 && hsCfg != null && hsCfg.general_debug) {
                     // 计数口径说明：实体数仍是数组长度（含已被移除的槽位），此处只保证不崩
-                    plugin.getLogger().fine("[PerfScope] 热点扫描跳过 " + nullSkipped
-                        + " 个 null 实体槽位（world=" + worldName + "）");
+                    plugin.getLogger().fine(Messages.get("run.collector.hotspot-null-slots",
+                        nullSkipped, worldName));
                 }
                 String dominant = "UNKNOWN";
                 int dominantCount = 0;
@@ -1242,9 +1240,9 @@ public class MetricsCollector {
             return;   // 抖动抑制：5 分钟内只报一次"已恢复"
         }
         h.lastRecoveryLogAtMs = now;
-        plugin.getLogger().info("[PerfScope] 采集模块已恢复: " + module
-            + "（此前连续失败 " + failedTimes + " 次"
-            + (firstAt > 0 ? "，首次失败 " + formatClock(firstAt) : "") + "）");
+        plugin.getLogger().info(firstAt > 0
+            ? Messages.get("run.collector.module-recovered", module, failedTimes, formatClock(firstAt))
+            : Messages.get("run.collector.module-recovered-brief", module, failedTimes));
     }
 
     /**
@@ -1267,9 +1265,8 @@ public class MetricsCollector {
             return;   // 限频：5 分钟内不重复记
         }
         h.lastLogAtMs = now;
-        String detail = "[PerfScope] 采集模块失败: " + module + ": " + h.lastMessage
-            + "（已连续失败 " + h.consecutiveFailures + " 次，首次失败 "
-            + formatClock(h.firstFailureAtMs) + "；同类日志 5 分钟内不重复记）";
+        String detail = Messages.get("run.collector.module-failed", module, h.lastMessage,
+            h.consecutiveFailures, formatClock(h.firstFailureAtMs));
         if (configManager.get() != null && configManager.get().general_debug) {
             plugin.getLogger().log(Level.WARNING, detail, t);
         } else {
@@ -1300,9 +1297,10 @@ public class MetricsCollector {
     /** 异常单行描述（类名 + 消息），供日志与 status 输出（绝不输出堆栈到聊天框）。 */
     private static String describeThrowable(Throwable t) {
         if (t == null) {
-            return "unknown";
+            return Messages.get("run.collector.unknown-error");
         }
         String msg = t.getMessage();
+        // 类名与原始消息保持原样（可检索），只有"没有消息"这一种情况走文案层
         return t.getClass().getSimpleName() + (msg == null ? "" : ": " + msg);
     }
 
