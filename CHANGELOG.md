@@ -32,7 +32,7 @@
   现在各层自带一张表（`CommandMessages` 251 键、`AlertMessages` 102、`ReportMessages` 76、
   `DiagnoseMessages` 35、`CoreMessages` 21），静态块里注册，`load()` 时统一合并。
   合并结果与"直接写在一个类里"完全等价（同一张表、同一条回退链）。
-- 五个模块消息类，**合计 485 个键，中英键集合完全一致**。
+- 五个模块消息类，**合计 504 个键**（`CommandMessages` 251 / `AlertMessages` 100 / `ReportMessages` 76 / `DiagnoseMessages` 35 / `CoreMessages` 42），**中英键集合完全一致、占位符零错配**。
 
 ### Changed
 - **`PerfScopeCommand.java`：代码中文字面量 4327 → 0**（注释保留）。去重生效：
@@ -55,9 +55,12 @@
 
 ### Contract preserved（明确未动）
 - `alerts.jsonl` 字段名 `ts/type/key/level/value/display`、事件令牌（`open`/`resolve`/…）、
-  级别令牌（`warning`/`critical`）、`alerts.state` 列头、模块常量、CSV schema、
+  级别令牌（`warning`/`critical`）、模块常量、CSV schema、
   报告 JSON 的全部键名与字面值（`unavailable`/`ok`/`degraded`/`tick_times`/`avg_tick`）——
   这些是外部契约，逐项核对未变。
+  **例外（本版确实变了，且有兼容与备份）**：`alerts.state` 的列头从 8 列升为 10 列
+  （新增 `scope`/`threshold`/`exitThreshold`，去掉渲染串 `display`），带 `# perfscope-alert-state v=2`
+  版本头；旧文件仍可读，首次覆写前自动备份为 `alerts.state.v1.bak-<时间戳>`。
 
 ### Notes
 - **`PerfScopeCommand` 曾在一路改造中被误用 `git checkout` 覆盖**，随后从文件历史快照完整还原，

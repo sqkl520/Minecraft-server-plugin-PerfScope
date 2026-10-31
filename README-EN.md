@@ -234,7 +234,7 @@ general:
 - **Placeholders**: messages may contain `{0}`, `{1}`, … filled in by the plugin. Missing arguments leave the placeholder verbatim; nothing throws.
 - **Upgrading**: a legacy `messages.yml` with no `language` tag is backed up and regenerated for the current language **if you never customized it**; if it contains customizations it is left untouched and not applied this run (the reload reply tells you), so add the `language:` tag and translate the entries.
 
-> Exceptions (do not follow the language): the `plugin.yml` description, report files already exported, history entries already written (these are re-rendered in the current language), and webhook messages already queued at the moment of the switch.
+> Exceptions (do not follow the language): the `plugin.yml` description, report files already exported, history entries already written (stored in the language they were written in; not re-rendered on switch), and webhook messages already queued at the moment of the switch.
 
 > Note (threshold direction): TPS is a low-is-bad metric — the lower the worse — so it requires `warning_threshold ≥ critical_threshold` (the opposite of high-is-bad metrics such as MSPT or memory; do not invert it by mistake). If inverted, `/perfscope reload` validates and falls back to the default values, logging a "配置校验：…设置倒置，已回退默认值" warning to the console — it will not take effect silently.
 >

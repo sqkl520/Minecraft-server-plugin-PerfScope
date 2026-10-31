@@ -76,6 +76,9 @@ public class ConfigManager {
      *  但面向"用户可见文案"时英文是更安全的通用默认（非中文服主看到中文界面会完全无从下手）。 */
     public static final String LANGUAGE_DEFAULT = "en";
 
+    /** 9D：界面语言配置键（general.language）。 */
+    public static final String LANGUAGE_CONFIG_KEY = "general.language";
+
     private final PerfScope plugin;
     /** 配置快照——load() 末尾整体替换发布（单次发布、原子可见）；volatile 保证异步任务（如自动报告）读取的跨线程可见性（A9a Wave4 修正） */
     private volatile ConfigData config;
@@ -298,6 +301,19 @@ public class ConfigManager {
                 + " 项（用默认值）、类型错误 " + result.typeWarnings.size()
                 + " 项（已回退默认值）、未知键 " + result.unknownKeys.size()
                 + " 项、未知世界 " + result.invalidWorldNames.size() + " 项");
+        }
+        // 9D（验收）：升级用户的界面语言会被**静默**从中文翻成英文——
+        // 他们的 config.yml 没有 general.language，于是走默认 en，整站变英文，
+        // 而控制台唯一相关的那行只说"缺 1 个键（旧版配置属正常）"。
+        // 这里补一条点名说清楚的语言变更通知，并给出改回中文的一行操作。
+        // 判据：缺 general.language（= 旧配置）且当前生效值是默认 en。
+        if (result.missingKeys.contains(LANGUAGE_CONFIG_KEY)
+            && LANGUAGE_DEFAULT.equals(fresh.general_language)) {
+            plugin.getLogger().warning(
+                "[PerfScope] 界面语言已默认为英文（本配置此前没有 general.language 项）。"
+                    + "如需保持中文，请在本文件 general 段加入 \"language: zh\" 后执行 /perfscope reload。"
+                    + " | The interface language is now English by default (this config had no "
+                    + "general.language). To keep Chinese, add \"language: zh\" under general and reload.");
         }
         return result;
     }

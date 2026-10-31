@@ -91,8 +91,12 @@ public final class PerfScope extends JavaPlugin {
         // 报告层：本类仿 Colleague 方式自注册（ensureRegistered），但在 load 之前若有人
         // 读 report.* 会拿到键名。显式登记一次，保证与其它模块时序一致。
         Messages.onFirstLoad(cn.perfscope.report.ReportMessages::init);
-        Messages.saveDefault(this);
+        // 9D 修（验收）：必须**先合并模块表**再生成 messages.yml，
+        // 否则 saveDefault 只会写出基础 86 个键（模块表尚未合并进来），
+        // 用户打开模板找不到 cmd.*/report.*/alert.*，会以为自定义功能不存在。
+        // load() 内部会 touchModules + mergeModules；saveDefault 放在它之后即可看到全表。
         Messages.load(this);
+        Messages.saveDefault(this);
 
         // 9D 修（验收 HIGH）：横幅放在消息层就绪之后，保证 language: zh 的服务器
         // 从第一行起就是中文——此前横幅在 load() 之前打印，首两行永远是英文默认语言。

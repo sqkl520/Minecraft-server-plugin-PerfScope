@@ -386,7 +386,7 @@ public final class CommandMessages {
             "No alert records (nothing within the last {0} entries)", "暂无告警记录（近 {0} 条内为空）");
         put(en, zh, "cmd.alerts.footer",
             "{0} entries (oldest first); {1} currently active, {2} suspended because their module is unavailable",
-            "共 {0} 条（旧→新）；当前活跃 {1} 条，模块不可用转 unknown {2} 条");
+            "共 {0} 条（旧→新）；当前活跃 {1} 条，因模块不可用而挂起 {2} 条");
 
         // ==================== 错误 / 建议 ====================
         put(en, zh, "cmd.error.no-data",

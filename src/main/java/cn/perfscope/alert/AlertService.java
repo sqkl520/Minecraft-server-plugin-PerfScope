@@ -2117,9 +2117,22 @@ public class AlertService {
                 }
             }
             synchronized (this) {
+                // 9D 修（验收）：跳过本进程**已经**记在内存里的事件。
+                // recordEvent 是先 addLast 再 appendEventLine，所以本进程写的事件同时存在于
+                // 内存与磁盘；若播种时原样读回，/alerts 会把每条事件显示两遍。
+                // 判据用 (ts,type,key) 三元组：同一毫秒内同 key 同类型重复在现实中不会发生，
+                // 而只比 ts 会因为秒级批量事件误伤。
+                java.util.Set<String> inMemory = new java.util.HashSet<>();
+                for (AlertEvent e : recentEvents) {
+                    inMemory.add(e.ts() + "|" + e.type() + "|" + e.key());
+                }
                 // 播种插到已有（本进程新增的）事件之前，保持"旧→新"；不覆盖运行时事件
                 for (int i = seeded.size() - 1; i >= 0; i--) {
-                    recentEvents.addFirst(seeded.get(i));
+                    AlertEvent e = seeded.get(i);
+                    if (inMemory.contains(e.ts() + "|" + e.type() + "|" + e.key())) {
+                        continue;
+                    }
+                    recentEvents.addFirst(e);
                 }
                 while (recentEvents.size() > MAX_RECENT_EVENTS) {
                     recentEvents.removeFirst();
