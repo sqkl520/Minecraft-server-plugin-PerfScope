@@ -357,22 +357,22 @@ public class ReportGenerator {
         String unavailable = htmlMsg("report.common.unavailable");
         String unknown = htmlMsg("report.common.unknown");
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_TPS)) {
-            html.append(htmlCard(htmlMsg("report.html.card.tps"), unavailable, "unknown", ""));
+            html.append(htmlCard(Messages.get("report.html.card.tps"), unavailable, "unknown", ""));
         } else {
             // 9A-2：Folia 上 Bukkit.getTPS() 只反映 global region，不能宣称是全服口径
-            html.append(htmlCard(htmlMsg("report.html.card.tps"),
+            html.append(htmlCard(Messages.get("report.html.card.tps"),
                 String.format(java.util.Locale.ROOT, "%.2f", snap.tps1m), getTpsClass(snap.tps1m),
-                htmlMsg("report.html.card.tps.subtitle",
+                Messages.get("report.html.card.tps.subtitle",
                     String.format(java.util.Locale.ROOT, "%.2f", snap.tps5m), String.format(java.util.Locale.ROOT, "%.2f", snap.tps15m))
                     + ServerCompat.tpsScopeLabel()));
         }
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT)) {
             // 9A-1：Folia 上是"该平台没有全局 tick 时间"，不是"采集坏了"——reason 来自 ServerCompat 唯一出处
             String reason = ServerCompat.isMsptTrustworthy() ? "" : ServerCompat.msptUnavailableReason();
-            html.append(htmlCard(htmlMsg("report.html.card.mspt"), unavailable, "unknown", reason));
+            html.append(htmlCard(Messages.get("report.html.card.mspt"), unavailable, "unknown", reason));
         } else if (snap.msptAvg < 0) {
-            html.append(htmlCard(htmlMsg("report.html.card.mspt"), unknown, "unknown",
-                htmlMsg("report.html.mspt.estimate-note")));
+            html.append(htmlCard(Messages.get("report.html.card.mspt"), unknown, "unknown",
+                Messages.get("report.html.mspt.estimate-note")));
         } else {
             // 9A-0：min/max 为 -1 表示该采集路径不提供极值（avg-only / TPS 反推），
             // 渲染"未采集"而不是把平均值复制成假极值（旧实现输出 "最小 12.3 | 最大 12.3"）
@@ -380,49 +380,49 @@ public class ReportGenerator {
                 ? htmlMsg("report.html.mspt.range-uncollected")
                 : htmlMsg("report.html.mspt.range",
                     String.format(java.util.Locale.ROOT, "%.2f", snap.msptMin), String.format(java.util.Locale.ROOT, "%.2f", snap.msptMax));
-            html.append(htmlCard(htmlMsg("report.html.card.mspt"),
+            html.append(htmlCard(Messages.get("report.html.card.mspt"),
                 String.format(java.util.Locale.ROOT, "%.2f ms", snap.msptAvg), getMsptClass(snap.msptAvg), range));
         }
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_PLAYERS)) {
-            html.append(htmlCard(htmlMsg("report.html.card.players"), unavailable, "unknown", ""));
+            html.append(htmlCard(Messages.get("report.html.card.players"), unavailable, "unknown", ""));
         } else {
-            html.append(htmlCard(htmlMsg("report.html.card.players"),
+            html.append(htmlCard(Messages.get("report.html.card.players"),
                 snap.playerCount + " / " + snap.maxPlayers, "normal", ""));
         }
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_ENTITIES)) {
-            html.append(htmlCard(htmlMsg("report.html.card.entities"), unavailable, "unknown", ""));
+            html.append(htmlCard(Messages.get("report.html.card.entities"), unavailable, "unknown", ""));
         } else {
-            html.append(htmlCard(htmlMsg("report.html.card.entities"),
+            html.append(htmlCard(Messages.get("report.html.card.entities"),
                 String.valueOf(snap.totalEntities), "normal", ""));
         }
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_CHUNKS)) {
-            html.append(htmlCard(htmlMsg("report.html.card.chunks"), unavailable, "unknown", ""));
+            html.append(htmlCard(Messages.get("report.html.card.chunks"), unavailable, "unknown", ""));
         } else {
-            html.append(htmlCard(htmlMsg("report.html.card.chunks"),
+            html.append(htmlCard(Messages.get("report.html.card.chunks"),
                 String.valueOf(snap.totalLoadedChunks), "normal",
-                htmlMsg("report.html.card.chunks.subtitle", snap.totalForceLoadedChunks)));
+                Messages.get("report.html.card.chunks.subtitle", snap.totalForceLoadedChunks)));
         }
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_MEMORY)) {
-            html.append(htmlCard(htmlMsg("report.html.card.heap"), unavailable, "unknown", ""));
+            html.append(htmlCard(Messages.get("report.html.card.heap"), unavailable, "unknown", ""));
         } else {
-            html.append(htmlCard(htmlMsg("report.html.card.heap"),
+            html.append(htmlCard(Messages.get("report.html.card.heap"),
                 formatBytes(snap.heapUsed) + " / " + formatBytes(snap.heapMax),
                 getMemClass(snap.heapUsagePercent),
-                htmlMsg("report.html.card.heap.subtitle", snap.heapUsagePercent)));
+                Messages.get("report.html.card.heap.subtitle", snap.heapUsagePercent)));
         }
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_CPU)) {
-            html.append(htmlCard(htmlMsg("report.html.card.cpu"), unavailable, "unknown", ""));
+            html.append(htmlCard(Messages.get("report.html.card.cpu"), unavailable, "unknown", ""));
         } else {
-            html.append(htmlCard(htmlMsg("report.html.card.cpu"),
+            html.append(htmlCard(Messages.get("report.html.card.cpu"),
                 formatCpuPct(snap.processCpuLoad), "normal",
-                htmlMsg("report.html.card.cpu.subtitle", formatCpuPct(snap.systemCpuLoad))));
+                Messages.get("report.html.card.cpu.subtitle", formatCpuPct(snap.systemCpuLoad))));
         }
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_SERVER)) {
-            html.append(htmlCard(htmlMsg("report.html.card.worlds"), unavailable, "unknown", ""));
+            html.append(htmlCard(Messages.get("report.html.card.worlds"), unavailable, "unknown", ""));
         } else {
-            html.append(htmlCard(htmlMsg("report.html.card.worlds"),
+            html.append(htmlCard(Messages.get("report.html.card.worlds"),
                 String.valueOf(snap.worldCount), "normal",
-                htmlMsg("report.html.card.worlds.subtitle", snap.loadedPluginCount)));
+                Messages.get("report.html.card.worlds.subtitle", snap.loadedPluginCount)));
         }
 
         html.append("</div></div>\n");

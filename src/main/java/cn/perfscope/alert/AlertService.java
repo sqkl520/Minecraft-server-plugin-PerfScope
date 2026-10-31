@@ -1928,9 +1928,13 @@ public class AlertService {
                 // 9D：两种格式共存读取。
                 //   v1（旧）：key|level|firstSeen|lastSeen|value(文本)|display|module|state   —— 8 列
                 //   v2（新）：key|level|firstSeen|lastSeen|value(数值)|scope|threshold|exit|module|state —— 10 列
-                // 判定依据是列数：v1 的 module 位于第 7 列且总是 ASCII 模块名；
-                // v2 一定 ≥10 列。用列数区分比嗅探内容更可靠。
-                boolean v2 = p.length >= 10;
+                //
+                // 9D 修（验收）：判定依据改为**版本头**（stateFormatVersion），列数只作兜底。
+                // 原先只数 `p.length >= 10`——一个 v1 行若某个字段含未转义的 '|'（旧版本
+                // 手改、或第三方工具改写），就会被当成 v2 解析：scope 取到旧 display、
+                // threshold 取到旧 module，然后立刻用 v2 格式覆写，结构化数据错位且不可逆。
+                // 版本头是显式的、由本插件自己写的，不存在这种歧义。
+                boolean v2 = stateFormatVersion >= 2;
                 double value;
                 String scope;
                 double threshold;
@@ -2028,6 +2032,17 @@ public class AlertService {
      * @param value   观测值（message 最后一个冒号后）
      * @param display 告警类别文案（恢复文案锚点）
      */
+    /**
+     * 告警历史事件（内存镜像与 {@code alerts.jsonl} 的共同载体）。
+     *
+     * <p><b>9D：字段名是外部契约，不能改。</b>{@code ts/type/key/level/value/display}
+     * 在 v1.2.1 就写进了用户磁盘上的 {@code alerts.jsonl}，下游可能已在解析。</p>
+     *
+     * <p>但 {@code display} 是**渲染后的自然语言串**——写进文件的那一刻就冻结了语言，
+     * 之后切语言不会变，历史里于是中英混排。<b>修法不是改字段名，而是让读取端
+     * 优先用 {@code key + level} 重新渲染</b>（见 {@link #parseEventLine}），
+     * {@code display} 只作兜底：它仍然会被写出去（保持契约），只是不再被优先信任。</p>
+     */
     public record AlertEvent(long ts, String type, String key, String level, String value, String display) {
     }
 
@@ -2049,7 +2064,25 @@ public class AlertService {
             all = new ArrayList<>(recentEvents);
         }
         int from = Math.max(0, all.size() - n);
-        return List.copyOf(all.subList(from, all.size()));
+        List<AlertEvent> out = new ArrayList<>(all.size() - from);
+        for (int i = from; i < all.size(); i++) {
+            out.add(localizeEvent(all.get(i)));
+        }
+        return List.copyOf(out);
+    }
+
+    /**
+     * 9D：把事件里的 {@code display} 换成**当前语言**的渲染结果。
+     *
+     * <p>为什么要在读取时做：{@link #recentEvents} 是内存镜像，里面的对象是在
+     * 各自被记录的那一刻创建的（可能还是上一种语言）。不在这里重渲染的话，
+     * 用户切换语言后仍会看到旧语言的历史条目——正是"全有或全无"要消灭的混排。</p>
+     */
+    private static AlertEvent localizeEvent(AlertEvent ev) {
+        String localized = renderDisplayForHistory(ev.key(), ev.level());
+        return localized == null || localized.equals(ev.display())
+            ? ev
+            : new AlertEvent(ev.ts(), ev.type(), ev.key(), ev.level(), ev.value(), localized);
     }
 
     /**
@@ -2159,8 +2192,40 @@ public class AlertService {
         } catch (NumberFormatException e) {
             ts = 0L;
         }
-        return new AlertEvent(ts, type, key, jsonField(line, "level"),
-            jsonField(line, "value"), jsonField(line, "display"));
+        String level = jsonField(line, "level");
+        String value = jsonField(line, "value");
+        String stored = jsonField(line, "display");
+
+        // 9D：display 不再被优先信任——用 key+level 按**当前语言**重新渲染，
+        // 这样切换到另一种语言后，历史条目也跟着变，不再出现中英混排。
+        // 只有在无法重新渲染（key 不认识 / 已下线指标）时才退回文件中冻结的旧串。
+        String display = renderDisplayForHistory(key, level);
+        if (display == null) {
+            display = stored;
+        }
+        return new AlertEvent(ts, type, key, level, value, display);
+    }
+
+    /**
+     * 用 {@code key}+{@code level} 重建历史事件的分类名（当前语言）。
+     *
+     * @return 重建失败（未知指标 / 指标已下线）时返回 {@code null}，调用方退回存储值
+     */
+    private static String renderDisplayForHistory(String key, String level) {
+        try {
+            Metric metric = Metric.ofKey(key);
+            if (metric == null) {
+                return null;
+            }
+            Alert probe = new Alert(key, level, metric, null, 0L,
+                Double.NaN, Double.NaN, Metric.scopeOf(key), Double.NaN, Double.NaN);
+            String title = AlertCatalog.title(probe);
+            // title() 在键缺失时退回 "metric level" 这种内部 id —— 那不是给用户看的，
+            // 此时宁可显示文件里冻结的原文
+            return title.contains(metric.id()) && title.contains(level) ? null : title;
+        } catch (Exception | LinkageError e) {
+            return null;
+        }
     }
 
     /** 极简 JSON 字段提取（仅支持本类写出的扁平对象与字符串/数字字段）。 */
