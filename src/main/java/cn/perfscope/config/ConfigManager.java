@@ -58,6 +58,24 @@ public class ConfigManager {
     /** 9A-11：配置版本键名（位于 config.yml 顶层）。 */
     public static final String CONFIG_VERSION_KEY = "config-version";
 
+    /**
+     * CPU 告警迟滞带的默认宽度（百分点）。
+     *
+     * <p>取值依据来自真机实验（docs/04-dev-reports/CPU-ALERT-SAWTOOTH-EXPERIMENT.md）：
+     * 在 E5-2660 v2 上施加负载后测得的采样标准差约 12 个百分点，样本在 55%–100% 之间摆动。
+     * 6 小时合成轨迹上，margin=0 产出 1333 条消息，margin=3 降到 33 条，margin=5 降到 1 条。
+     * 选 5 是为了落在拐点右侧，同时不把退出线压得过低（90−5=85 仍可通过真实的负载回落）。</p>
+     */
+    public static final double CPU_HYSTERESIS_DEFAULT = 5.0;
+
+    /** i18n：受支持的语言代码（归一化后的规范形式）。新增语言时同步扩展 {@link #normalizeLanguage}。 */
+    public static final Set<String> SUPPORTED_LANGUAGES =
+        Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList("en", "zh")));
+
+    /** i18n：缺键 / 非法值时的回退语言。选 en 而不是 zh——控制台日志与默认配置的注释虽为中文，
+     *  但面向"用户可见文案"时英文是更安全的通用默认（非中文服主看到中文界面会完全无从下手）。 */
+    public static final String LANGUAGE_DEFAULT = "en";
+
     private final PerfScope plugin;
     /** 配置快照——load() 末尾整体替换发布（单次发布、原子可见）；volatile 保证异步任务（如自动报告）读取的跨线程可见性（A9a Wave4 修正） */
     private volatile ConfigData config;
@@ -133,6 +151,9 @@ public class ConfigManager {
         fresh.configVersion = configVersion;
 
         // === 常规设置 ===
+        // i18n：界面语言。此处只做"读原始值"，归一化/回退统一交给 validateThresholds——
+        // 若在读取处直接归一，非法值的 warning 会被拆散到两处，且难以保证"日志里看到的就是用户写的值"。
+        fresh.general_language = readString("general.language", LANGUAGE_DEFAULT);
         fresh.general_updateInterval = readInt("general.update_interval", 20);
         fresh.general_verboseStartup = readBool("general.verbose_startup", true);
         fresh.general_debug = readBool("general.debug", false);
@@ -173,6 +194,7 @@ public class ConfigManager {
         fresh.cpu_enabled = readBool("cpu.enabled", true);
         fresh.cpu_processWarningThreshold = readDouble("cpu.process_warning_threshold", 80.0);
         fresh.cpu_systemWarningThreshold = readDouble("cpu.system_warning_threshold", 90.0);
+        fresh.cpu_hysteresisMargin = readDouble("cpu.hysteresis_margin", CPU_HYSTERESIS_DEFAULT);
 
         // P0-7：红石采集已下线，不再读取 redstone.*（旧配置残留键由 9A-11 未知键检测点名）
 
@@ -201,6 +223,11 @@ public class ConfigManager {
         fresh.alerts_notifyMitigation = readBool("alerts.notify-mitigation", true);
         fresh.alerts_unknownAfterMinutes = readInt("alerts.unknown-after-minutes", 5);
         fresh.alerts_dailySummaryTimezone = readString("alerts.daily-summary.timezone", "");
+        // 9C-4：抖动抑制三项。此处登记只为让它们进入"已知键"集合（未知键检测取自 jar 内默认
+        // config.yml），实际判定由 AlertService 经 RawConfig 读取——决策层参数集中在决策层，
+        // 避免 ConfigData 再膨胀三个只在 AlertService 用到的字段。
+        readInt("alerts.flap-window-seconds", 180);
+        readInt("alerts.repush-delta", 8);
         // === 每日摘要与 webhook（Wave 7D） ===
         fresh.alerts_dailySummaryEnabled = readBool("alerts.daily-summary.enabled", false);
         fresh.alerts_dailySummaryTime = readString("alerts.daily-summary.time", "08:00");
@@ -863,6 +890,15 @@ public class ConfigManager {
             sanitizePercent("cpu.process_warning_threshold", cfg.cpu_processWarningThreshold, 80.0);
         cfg.cpu_systemWarningThreshold =
             sanitizePercent("cpu.system_warning_threshold", cfg.cpu_systemWarningThreshold, 90.0);
+        // 迟滞带：合法区间 [0, 50]。0 = 关闭迟滞（允许，退回旧行为）；
+        // 上界 50 的理由——margin 超过 50 等于把退出线压到阈值一半以下，一次真实的持续过载会永远退不出去。
+        if (!Double.isFinite(cfg.cpu_hysteresisMargin)
+            || cfg.cpu_hysteresisMargin < 0 || cfg.cpu_hysteresisMargin > 50) {
+            plugin.getLogger().warning("[PerfScope] 配置校验：cpu.hysteresis_margin="
+                + cfg.cpu_hysteresisMargin + " 超出合法区间 [0, 50]，已回退默认值 "
+                + CPU_HYSTERESIS_DEFAULT);
+            cfg.cpu_hysteresisMargin = CPU_HYSTERESIS_DEFAULT;
+        }
 
         // === worlds 段覆盖值对（倒置时回退到已校验的全局值） ===
         if (cfg.worldSettings != null) {
@@ -932,6 +968,56 @@ public class ConfigManager {
                 + cfg.hotspots_chunkWarningThreshold + " 非法（需 ≥1），已按 200 处理");
             cfg.hotspots_chunkWarningThreshold = 200;
         }
+
+        // === general.language：界面语言归一化（i18n） ===
+        // 语言项没有"越界"概念——写错就是一个不存在的语言，因此只做"识别 / 不认识"二分支。
+        // 能识别就把归一化后的规范值写回（en_US -> en、zh_TW -> zh），下游 Messages 不必再归一；
+        // 认不出则回退默认并 warning，日志保留用户原始拼写，方便对照 config.yml 直接改。
+        String language = normalizeLanguage(cfg.general_language);
+        if (language == null) {
+            plugin.getLogger().warning("[PerfScope] 配置校验：general.language=" + cfg.general_language
+                + " 不是受支持的语言（支持: en, zh），已回退 " + LANGUAGE_DEFAULT);
+            language = LANGUAGE_DEFAULT;
+        }
+        cfg.general_language = language;
+    }
+
+    /**
+     * i18n：语言代码归一化——把各种写法收敛为受支持的规范代码，供配置校验与消息层共用。
+     *
+     * <p>为什么需要这一步：Bukkit 生态里语言标签的写法并不统一（{@code en_US}、{@code en-us}、
+     * {@code zh_CN}、{@code zh_TW} 都有人写），而本插件只提供"英文 / 简体中文"两套完整文案。
+     * 若不做归一，就会出现"配置写 {@code en_US} 却被当成未知语言"式的隐性歧义。</p>
+     *
+     * <p>规则：去首尾空白 → 转小写 → 取主语言子标签（{@code _} 或 {@code -} 之前的部分）→
+     * 与 {@link #SUPPORTED_LANGUAGES} 比对。于是 {@code en} / {@code en_US} / {@code en-GB} 统一为
+     * {@code en}，{@code zh} / {@code zh_CN} / {@code zh_tw} 统一为 {@code zh}。
+     * 繁体中文与简体中文共用 {@code zh} 一套文案——当前没有独立繁体资源，
+     * 强行区分只会得到"一半键缺失、回退英文"的混排界面。</p>
+     *
+     * @param raw 原始配置值，可为 {@code null}
+     * @return 规范化的语言代码（{@code "en"} 或 {@code "zh"}）；无法识别时返回 {@code null}
+     *         （<b>刻意不</b>在此处兜底成 {@link #LANGUAGE_DEFAULT}：调用方需要能区分
+     *         "用户本来就写 en" 与 "用户写错了被回退"，否则校验告警永远无法触发）
+     */
+    public static String normalizeLanguage(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String s = raw.trim().toLowerCase(Locale.ROOT);
+        if (s.isEmpty()) {
+            return null;
+        }
+        // 只取主语言子标签：zh_CN / zh-TW / zh-Hans-CN 一律收敛为 zh
+        String primary = s;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '_' || c == '-') {
+                primary = s.substring(0, i);
+                break;
+            }
+        }
+        return SUPPORTED_LANGUAGES.contains(primary) ? primary : null;
     }
 
     /**
@@ -1112,6 +1198,14 @@ public class ConfigManager {
         public int configVersion;
 
         // 常规
+        /**
+         * 界面语言（i18n）：<b>已归一化</b>的规范代码，只会是 {@code "en"} 或 {@code "zh"}。
+         *
+         * <p>load() 里 {@code validateThresholds} 已把 {@code en_US}/{@code zh_TW} 等写法收敛，
+         * 非法值也已回退默认，因此消息层可以直接拿它当值用，不必再调
+         * {@link ConfigManager#normalizeLanguage(String)}。</p>
+         */
+        public String general_language;
         public int general_updateInterval;
         public boolean general_verboseStartup;
         public boolean general_debug;
@@ -1152,6 +1246,11 @@ public class ConfigManager {
         public boolean cpu_enabled;
         public double cpu_processWarningThreshold;
         public double cpu_systemWarningThreshold;
+        /**
+         * 迟滞带宽度（百分点）：告警进入用阈值本身，退出用「阈值 − 本值」。
+         * 0 = 关闭迟滞（退回旧行为，不推荐）。见 {@code MetricsCollector.collectCPU} 的闩锁注释。
+         */
+        public double cpu_hysteresisMargin;
 
         // P0-7：redstone_enabled 已删除（红石采集下线）
 

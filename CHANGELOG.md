@@ -20,6 +20,301 @@
 
 ---
 
+## [Unreleased] — Wave 9D「i18n：命令层正文 + 报告 + 告警信封 + 诊断规则」
+
+> **本批次把"英文默认"真正落到全站**：命令面板正文、报告三格式、告警信封、诊断规则、
+> 启动横幅、兼容层说明——原先约 900 条硬编码中文字面量，现在全部经由消息层。
+> 加上前两批的标题与告警正文，`/perfscope` 在 `language: en` 下**整页无中文**。
+
+### Added
+- **模块自带消息表机制**（`Messages.registerModule` / `onFirstLoad`）。此前所有文案键必须写进
+  `Messages` 的静态块，那会让它膨胀成两千行的**唯一写入热点**，多路改造无法并行。
+  现在各层自带一张表（`CommandMessages` 251 键、`AlertMessages` 102、`ReportMessages` 76、
+  `DiagnoseMessages` 35、`CoreMessages` 21），静态块里注册，`load()` 时统一合并。
+  合并结果与"直接写在一个类里"完全等价（同一张表、同一条回退链）。
+- 五个模块消息类，**合计 485 个键，中英键集合完全一致**。
+
+### Changed
+- **`PerfScopeCommand.java`：代码中文字面量 4327 → 0**（注释保留）。去重生效：
+  `不可用` 在命令层出现 62 处 → 只剩 1 个键供 41 个位点共用；`未知`/`预热中`/`未采集` 同理。
+- **`ReportGenerator.java`：105 → 0**。`<html lang>` 改为跟随 `Messages.activeLocale()`
+  （`en` / `zh-CN`）——此前英文报告仍自称 `lang="zh-CN"`，对浏览器与读屏软件都是错的。
+  HTML 文案新增一层 `escapeHtml`：`messages.yml` 是用户可编辑的，英文的 `Min & max`
+  直接拼进标记就会破版。
+- **`AlertService.java` 122 → 0、`DailySummaryService.java` 38 → 0**。告警**信封**此前未翻译——
+  英文模式下会出现「`System CPU load high: 92.1%` + `| key=cpu:system 值=92.1% 阈值(进程 > 80.0%…) | 持续 3m | 下一步: 检查宿主机…`」
+  这种半吊子输出。现在 `[告警][严重][motd]` → `[Alert][Critical][motd]`，
+  `值=` → `value=`、`阈值(...)` → `threshold(...)`、`持续` → `lasted`、`下一步:` → `next step:`。
+  **`key=cpu:system` 保持 ASCII 不变**（日志检索锚点）。
+- **`CoreRules.java` 79 → 0、`DiagnosticEngine.java` 6 → 0**。规则 ID（`DIAG-TPS-PERSIST` 等）
+  保持 ASCII；`/spark`、`/perfscope` 等命令路径在两种语言里逐字相同（翻译命令 = 给出坏指令）。
+- **`ServerCompat` 的 MSPT 不可用原因改为消息键**：该串会进 `/ps`、报告、启动横幅，
+  留着中文会让英文报告中出现一句中文。
+- 器时长格式化统一走 `DurationFormat`：中文由「分钟/小时」改为「分/时」，
+  与既有的 uptime 路径一致；英文为 `3m 15s` / `2d 5h`。
+
+### Contract preserved（明确未动）
+- `alerts.jsonl` 字段名 `ts/type/key/level/value/display`、事件令牌（`open`/`resolve`/…）、
+  级别令牌（`warning`/`critical`）、`alerts.state` 列头、模块常量、CSV schema、
+  报告 JSON 的全部键名与字面值（`unavailable`/`ok`/`degraded`/`tick_times`/`avg_tick`）——
+  这些是外部契约，逐项核对未变。
+
+### Notes
+- **`PerfScopeCommand` 曾在一路改造中被误用 `git checkout` 覆盖**，随后从文件历史快照完整还原，
+  并复核 9B-5 的 monitor 原子化等既有改动仍在、签名零差异。
+- **测试断言改为双语**：新增 100+ 处 `["English", "中文"]` 数组断言（正向任一命中 / 负向全部不出现）。
+  转换过程中出现过一次**嵌套数组**的脚本 bug（连续子串替换把已转换的数组又包了一层），
+  已加扁平化工具修复并全量校验 `nested=0`。
+- 尚未翻译：`config.yml` 注释（120 行）、`plugin.yml` 权限描述以外的少数字段、
+  以及 `DiagnosticEngine` 之外的日志。这些不影响"用户可见文案整页一致"。
+
+> **范围**：Phase 2（告警结构化）+ Phase 1 的第一批（24 个章节标题）。
+> 两者必须同时交付——只做一半会让 `/perfscope` 变成"英文标题 + 中文正文"的更糟混排。
+> 审计依据：`docs/01-reviews/I18N-AUDIT.md`；设计复核：9 路 Agent（规划/执行/红队/检索）。
+
+### Added
+- **`Metric` 枚举（9 个指标）**：`TPS`/`MSPT`/`PLAYERS`/`ENTITIES`/`ENTITIES_WORLD`/`CHUNKS_WORLD`/
+  `MEMORY`/`CPU_PROCESS`/`CPU_SYSTEM`。为什么不是 7 个：`cpu:process` 与 `cpu:system` 的标题、
+  阈值、迟滞提示都不同；按 key 前缀归并（旧的 `metricOf()` 两者都返回 `cpu`）恰恰会丢掉区分它们的信息。
+- **`AlertCatalog`**：把结构化 `Alert` 按当前语言渲染成文案。数值与单位由 `Metric.Unit` 决定，
+  **与语言无关**——同一份数据在两种语言下读出来是同一个数，只有描述文字在变。
+- **`DurationFormat`**：把仓库里 5 份互相矛盾的时长格式化器（`AlertService`/`DailySummaryService`/
+  `PerfScopeCommand`×2/`ReportGenerator`）收敛成一份本地化实现。
+- **24 个 `cmd.section.*` 标题键** + **43 个 `alert.*` 告警键**（含 8 个 `.title.scoped`），中英各一套。
+
+### Changed
+- **`Alert` 从"文案容器"改为"结构化测量记录"**。此前 `message`/`display` 是已渲染的中文串，
+  而三个解析器又反过来读它（`displayOf` 切冒号、`valueOf` 取值、`numericValueOf` 扫数字）。
+  本机实测这三种解析在文案改动后会**静默**失效：
+  - `"System CPU load high: 92.1% (threshold: 90%)"` → 值被解析成 **90.0**（阈值而非实测值）
+  - `"Entities: 3,000"` → 解析成 **3.0**（千分位截断，3000→8000 永不触发重推判定）
+  - 译文无冒号 → 值解析为 `null` → 重推抑制永久失效（每 300 秒一条，永不停止）
+
+  现在 `Alert` 只存 `metric`/`value`/`reference`/`scope`/`threshold`/`exitThreshold`，
+  文案在**展示的那一刻**按语言现渲染。`message()`/`display()` 保留为派生方法（调用点零改动），
+  但它们的返回值**随语言变化**——这正是想要的语义。
+- **`sameAlert` 改为比较结构**（级别 + 原始数值 + 阈值）。它此前比较 `message().equals()`，
+  而 9D 起 `message()` 是按语言现渲染的派生值，用字符串当身份会导致：
+  数值变化检测不到（`alerts.state` 停在旧值）、渲染精度把 92.11/92.14 抹成同一身份、
+  切语言让所有活跃告警都判为"变了"。
+- **`alerts.state` 升级到 v2 格式**：`key|level|firstSeen|lastSeen|value|scope|threshold|exit|module|state`。
+  加了显式版本头 `# perfscope-alert-state v=2`（此前只能靠列数猜格式，降级到旧版会把 `scope` 当
+  `display`、把 `threshold` 当 `module`，然后立刻用旧格式覆写，结构化数据永久丢失）。
+  **首次以 v2 覆写前会自动备份 `alerts.state.v1.bak-<时间戳>`**。
+
+### Fixed（红队复核后修掉的 3 个 Blocker）
+- **所有非世界维度告警丢失数值**（Blocker-1）。初版对所有模板一律传 `(scope, value)`，
+  但非世界维度模板只写 `{0}`（值是第 0 个参数），于是渲染成 `"Heap usage high: "`——数值没了，
+  而且零异常零日志，波及控制台/游戏内/webhook/`/ps`/HTML/TXT/**JSON 报告**全部表面。
+  改为按指标决定参数顺序：世界维度 `(scope, value)`、玩家数 `(value, reference)`、其余 `(value)`。
+  实测复核：`players` 现在是 `19/20`（初版是 `/19`——容量也丢了）。
+- **世界维度告警的恢复文案显示原始指标 id**（Blocker-2）。`title()` 会拼 `.title.scoped`，
+  但该键从未定义，于是恢复通知变成 `entities_world warning recovered`——在中文界面里冒出英文内部 id。
+  补了 8 个 `.title.scoped` 键（2 指标 × 2 级别 × 2 语言）。
+- **重启后重推抑制永久失效**（Blocker-3）。从 v1 状态文件恢复的告警 `value = NaN`，
+  构造函数把 `lastPushedValue` 置成 `null`；而 restore 分支只刷新 `alert`/`value`/`module`，
+  **没有刷新基准**，于是 `significant` 恒为 `true` → 每 300 秒重推一次，永不停止——
+  正是 9C-4 修掉的"σ=12 时每 6 小时 59 条"重新出现。两个 restore 分支（restart / suspended）都已补上基准重置。
+- **删除 `Alert.of(...)` 兼容工厂**：它唯一的运行时语义是把 `value` 置成 `NaN`，
+  进而**静默禁用一道生产安全网**。调用点已归零（项目无对外 API 契约），保留等于给下一个人挖坑。
+
+### Notes
+- **Phase 1 的命令层正文（约 129 条用户可见字面量）尚未翻译**：`/perfscope` 目前是
+  "英文标题 + 中文正文"。这是有意的中间态——命令层 129 条 + 报告 92 条 + `AlertService` 的
+  报警信封/下一步建议（111 条）需要各自独立的工作包与测试更新，按计划分批推进。
+- `alerts.jsonl` **尚未**迁移（仍存渲染串）。红队指出 CHANGELOG 早前称"历史会按当前语言重渲染"
+  对已写入的行是**不成立的**——该说法已在此更正。迁移方案（加 `v` + `value_raw`，读时重渲染）记入待办。
+- `activeWarnings`/`activeCriticals` 仍是采集时渲染的 `List<String>`；红队建议改为输出时渲染，
+  未在本轮实施。
+
+### Added（命令层正文，Phase 1 第二批）
+- **`CommandMessages`**（`cn.perfscope.command`）：命令面板正文的 252 条中英键，按 `cmd.<面板>.<元素>`
+  命名。跨面板共用的状态词收成 `cmd.state.*`——"不可用"在命令层出现 19 次、合计 62 处，
+  现在只有**一条**键（此前每处各写一份，改一处不可能改全）。
+- **`Messages.onFirstLoad(CommandMessages::init)`** 在 `PerfScope.onEnable` 登记；
+  `PerfScopeCommand` 的静态块再触碰一次（`registerModule` 幂等），漏登记时键也不会静默退化成键名。
+- 帮助行拆成 `cmd.help.<子命令>.display`（用法）/ `.desc`（描述）两组键。
+
+### Changed（命令层正文，Phase 1 第二批）
+- **`PerfScopeCommand` 的 354 条 CJK 用户可见字面量全部改为 `Messages.get(...)`**：
+  代码中的 CJK 字符数（不含注释）从 4327 降到 **0**。控制台诊断日志（世界实体扫描失败、
+  monitor 推送失败）一并转英文——它们与面板同属命令层输出，留着中文就是混排。
+- **`STATUS_MODULES` 的第二列从展示名改为消息键**（`cmd.status.module.*`），展示时经 `Messages.get`。
+- **`clickCmd` 参数明确不本地化**，并在 `sendHelpLine` 上写明理由：它是 `ClickEvent.runCommand` 的
+  实际执行内容，跟着语言变成 `/perfscope entities [世界]` 会把占位符当真实世界名查询
+  （A5/T5a 修过的原始 bug），译成描述文字则直接报未知命令。只有 display 与 desc 属于界面文案。
+- 帮助行的前导两空格仍留在代码里（`"  " + display`），不进消息值——它是排版而非文案。
+- 结构化差异（英文语序/单位/括号形态不同，不能靠拼接得到）：
+  `在线玩家: 0 / 20` → `Players online: 0 / 20`；
+  `覆盖: 近 N 分钟（M 个样本）` → `Coverage: last N min (M samples)`；
+  `已停止更新 {0}（最后采集 {1}）` → `Stopped updating {0} ago (last collection {1})`；
+  `预热中（首轮采集未就绪，稍候自动更新）` → `Warming up (first collection not ready; updates automatically)`；
+  `共 N 条（旧→新）；当前活跃 A 条，模块不可用转 unknown B 条` →
+  `N entries (oldest first); A currently active, B suspended because their module is unavailable`；
+  ActionBar 的 6 段由 `" | 玩家: "` 硬拼接改为 `cmd.actionbar.segment` + `cmd.unit.*` 组合。
+
+
+---
+
+## [Unreleased] — Wave 9D「i18n 机制」（Phase 0，不含命令层/告警翻译）
+
+> **范围**：只搭机制、翻译已有的 14 个文案键。**命令面板 / 告警 / 报告 / 控制台日志仍是中文**，
+> 按既定计划与 Phase 1（`PerfScopeCommand` 354 条）+ Phase 2（告警结构化）一起交付。
+> 审计依据：`docs/01-reviews/I18N-AUDIT.md`（3 路 Agent + 本机实证）。
+
+### Added
+- **`general.language` 配置键**（默认 `en`）。接受 `en`/`en_US`/`en-us`、`zh`/`zh_CN`/`zh-TW`，
+  按主语言归一；其余值告警后回退 `en`。改后 `/perfscope reload` 生效。
+- **`Messages.get(key, Object... args)`**：`{0}`/`{1}` 占位符。
+  **刻意不用 `java.text.MessageFormat`**——实测它会：把 `Server's TPS is {0}` 变成 `Servers TPS is {0}`
+  （单引号吞掉占位符且删掉撇号）、对 `{not-a-placeholder}` 与 JSON 片段抛
+  `IllegalArgumentException`。改用只匹配 `\{\d+\}` 的手写替换，其余花括号原样保留。
+- **双语断言支持**（harness）：`pattern`/`expect`/`expectNot`/`contains` 可写数组，
+  数组 = 正向任一命中、负向全部不得出现。单字符串行为逐字不变。
+  实现在 `scripts/lib/util.ps1` 的 `Get-MatchVariants`/`Select-MatchVariant`/`Format-MatchVariants`。
+  已验证 11 个语义用例（单值、任选、负向双向、空数组、正则）全通过。
+- **`util/DurationFormat`**：时长/运行时间的唯一实现（`duration(millis)` / `uptime(millis)`），
+  按 `Messages.activeLocale()` 输出中文（`2 天 5 时 12 分`）或英文（`2d 5h 12m`），
+  数字固定走 `Locale.ROOT`。取代原先散落 5 处的私有实现（`AlertService` / `DailySummaryService` /
+  `PerfScopeCommand` ×2 / `ReportGenerator`），后五者全部改为委托，硬编码中文副本删除。
+
+### Changed
+- **默认语言改为英文**。14 个文案键同时提供 en/zh 两套，**两种语言都不含「喵」口癖**
+  （面向服务器运维者，按专业工具口径书写）。
+- **`messages.yml` 改为带 `language:` 标签的单文件**（方案 a，而非 `messages_en.yml` + `messages_zh.yml` 方案 b）。
+  理由：两份文件意味着用户必须在"当前生效的那一份"里编辑，改错文件时插件不会给出任何反馈——
+  这正是本项目在 `config.yml` 未知键检测里反复避免的静默失效。单文件 + 显式标签只有一种编辑入口，
+  "文件不生效"必然伴随一条指名道姓的 WARNING。
+- **语言快照整体发布**：语言 + 默认表 + 覆盖表被打包成一个不可变 record，由 `volatile` 字段一次性替换。
+  读线程要么看到旧三元组、要么看到新三元组，**不可能**读到"英文默认 + 中文覆盖"这种撕裂组合。
+- `src/main/java/cn/perfscope/util/Messages.java` 的反射读配置**已移除**，改为直连
+  `ConfigData.general_language`——字段就位后反射只剩脆弱性（改名会静默退化成默认语言，而非编译失败）。
+
+### Fixed（红队复核后修掉的 4 个 Blocker）
+- **用户自定义的 `messages.yml` 不再被静默移走**。初版无条件把旧文件移进 `.bak` 并重新生成，
+  用户的定制文案**静默停止生效**。现在先逐键比对该文件与内置默认：完全一致才自动迁移，
+  有任何键不同就**原地保留 + 警告**，并把"该怎么修"写清楚。
+- **reload 回执不再谎报成功**。`messages.yml` 因语言标签不匹配/无法识别而未生效时，
+  回执追加一行「注意: …本次未生效」——此前玩家只会看到一句"配置已重载"，
+  而他的全部覆盖其实被丢弃了（控制台的 WARNING 他多半看不到）。
+- **删除死资源 `src/main/resources/messages.yml`**：新实现从代码表生成，该文件已无任何 `getResource` 引用，
+  却仍在 jar 里带着 12 处「喵」，会误导排查者。
+- **`plugin.yml` 的 `permission-message` 与插件 `description`、权限描述全部英文化**：
+  前者是 `Messages.load()` 之前的首帧兜底，在英文默认下留着中文自相矛盾。
+- **时长文案统一口径**（用户可见）：告警"持续"、`status` 停滞时长、`/perfscope` 运行时间、
+  报告运行时间改用同一套单位（`天/时/分/秒`）与省略规则。三处可见变化：
+  ①"3 分钟" → "3 分"、"1 小时" → "1 时"（与面板其余处一致）；
+  ②窗口内为 0 的分量不再打印（`2天 5时 12分 0秒` → `2 天 5 时 12 分`）；
+  ③运行时间最多三级，`duration` 最多两级（超出部分向下取整）。
+
+### Notes（诚实记录）
+- **Phase 0 交付后界面仍是"回执英文 + 面板中文"**。这是刻意的边界，不是遗漏：
+  14 个键无法承载整语言切换。已按拍板结论把 Phase 1（命令层）+ Phase 2（告警）
+  合并到同一次交付，届时 `/perfscope` 全页才真正整页切语言。
+- **切换语言后的 4 类"不可追回"表面**（已写入 README）：`plugin.yml` 插件简介、
+  已导出的报告文件、已写入的 `alerts.jsonl` 历史（会按当前语言重渲染）、
+  切换瞬间已排队发出的 webhook 消息。
+- **`alerts.state` / `alerts.jsonl` 目前存渲染串**。Phase 2 会改成存 `key`+`level`+`value`、
+  读时重渲染——这是"全有或全无"真正可达的前提。
+- 测试服 `config.yml` 曾被我早前的 PowerShell 改写损坏成 GBK 编码（中文注释乱码并把
+  `update_interval` 吞进注释行），已用插件自带默认配置重建。教训：**不要用 PowerShell
+  `Set-Content` 改写 UTF-8 的 YAML**。
+
+---
+
+## [Unreleased] — Wave 9C-4「停止刷屏」
+
+> **来源**：用户现场截图——`cpu:system` 在 `告警 → 恢复 → 复燃` 之间每 30 秒循环一次，
+> 5 分钟内 11 条消息，而配置里的 `alerts.cooldown-seconds: 300` 完全没生效。
+> **调查**：`docs/04-dev-reports/CPU-ALERT-SAWTOOTH-EXPERIMENT.md`（含真机实验数据）。
+
+**根因是三层叠加，缺一层都压不住：**
+
+| 层 | 缺陷 | 后果 |
+|---|---|---|
+| 采集层 | 进入与退出共用同一个阈值，无数值迟滞 | CPU 采样 σ≈12 个百分点，样本在 55%–100% 摆动，每秒都在穿越阈值 |
+| 决策层 | 复燃分支用 `!refire &&` 同时短路防抖与冷却 | "恢复→复燃"每几秒循环，300 秒冷却形同虚设 |
+| 决策层 | 恢复时 `cooldowns.remove(key)` | 即使复燃去查冷却，也永远查不到参照点 |
+| 决策层 | 同级别告警"冷却到期就重推" | 长期 92% 的告警每 5 分钟重说一遍同样的话 |
+
+**实测数据（6 小时轨迹，1Hz 采样）：**
+
+| 轨迹 | 修复前 | 修复后 |
+|---|---|---|
+| 均值 91.5%、σ=4（用户场景：阈值边界抖动） | **1333 条** | **4 条** |
+| 均值 97%、σ=2（真正的持续满载） | 72 条 | **1 条** |
+| 均值 60% + 20 秒尖峰（正常机器偶发） | 2 条 | 2 条（不变） |
+| 均值 70% + 1 小时真事故 | 13 条 | 2 条（`open@8002` / `resolve@11602`，时间点精确） |
+
+### Added
+- **`cpu.hysteresis_margin`（默认 5.0，合法 0–50）**：CPU 告警迟滞带宽度。
+  进入用阈值本身，退出用「阈值 − 本值」。落在带内的样本保持原状态，吸收采样噪声。
+  设 0 = 关闭（退回旧行为）。取值依据见实验报告：margin=0 时 1333 条，margin=3 降到 33 条，margin=5 降到 1 条。
+- **`alerts.flap-window-seconds`（默认 60）**：抖动窗口。该窗口内的"恢复→再次越界"视为同一次事故的中间态，
+  不推"已恢复正常"也不推"问题再次出现"。用户日志里 5 次恢复有 4 次发生在 2–40 秒内。
+- **`alerts.repush-delta`（默认 8）**：同级别重推的数值变化阈值。低于该幅度视为"没有新信息"。
+
+### Changed
+- **`cpu:system` 的告警按迟滞判定**：`MetricsCollector.collectCPU` 引入 `systemCpuLatched` / `processCpuLatched`
+  两个闩锁字段，`latched()` 纯函数实现状态转移。闩锁放在采集层而非决策层，
+  因为该类约定"采集层判定阈值、决策层只管投递"，且 7 类指标的阈值方向不同（TPS 是低值告警）。
+- **复燃不再无条件绕过冷却**：改为"绕过防抖、遵守抖动窗口"。参照点用**恢复时刻**而非"上次推送时刻"
+  （后者可能是几十分钟前的首次告警，用它做参照永远成立，等于没抑制）。
+  被抑制的复燃会**静默接管**为 active 状态（否则该 key 会进入"既不在 active 也不在待确认"的不可见状态，永远不再恢复）。
+- **恢复时不再清除冷却记录**：原先那一行让复燃路径上的冷却判定永远为 false。
+
+### Added（抖动升级）
+- **抖动计数与痊愈计时**：同一 key 在抖动窗口内被抑制 ≥3 次后，恢复判据从 3 个干净周期提高到 60 个
+  （`FLAPPING_RECOVERY_CYCLES`）。计数在**连续干净 300 周期**后才清零（`FLAP_HEAL_CYCLES`）——
+  若在每次恢复时清零，一条"每 20 分钟振荡一次"的告警永远攒不满 3 次，恢复判据永远停在 3 秒。
+  实测这一步把用户场景从 17 条进一步压到 4 条。
+- 新事件类型 `refire_suppressed` 记入 `alerts.jsonl`，便于事后审计"哪些通知被压掉了"。
+
+### Fixed（红队复核后追加）
+- **"稳定告警不重推"的比较基准写错**（红队 D1）。初版用 `rec.numericValue` 且每周期无条件更新，
+  比的是"相邻两个 1Hz 样本的差"——在 σ≈12 的机器上 `P(|Δ|≥8)=13.6%`，300 秒内必然触发，抑制形同虚设。
+  改成"上次推送值"作基准后**反而更差**（随机游走的差随 √Δt 单调增长，σ=12 时 59 条/6h）。
+  最终方案是**与滑动窗口均值比较**：均值把噪声压到 σ/√60，同时完整保留系统性漂移。
+  实测三个基准在 8 类轨迹上的对比见 `docs/04-dev-reports/CPU-ALERT-SAWTOOTH-EXPERIMENT.md` §7。
+- **`alerts.refire-min-interval-seconds` 是死配置**（红队 D4）：声明并解析校验，但全文无读取点，
+  复燃窗口实际用的是 `cooldown-seconds`。现已接上——复燃判定使用该键，与冷却语义解耦。
+- **`flap-window-seconds` 会被 `cooldown-seconds` 静默截断**（红队 D3）：`lastResolvedAt` 的保留期
+  用的是 `max(cooldown, 60s)`，用户把抖动窗口调到大于冷却秒数时抑制会静默失效。
+  改为 `max(cooldown, flapWindow, 60s)`。
+- **`/alerts` 显示原始英文事件名**（红队 D6）：`refire_suppressed` / `flap_suppressed` 无中文映射，
+  中文界面里会冒出 `[refire_suppressed]`。已补「抖动抑制」。
+- **迟滞带内告警文案自相矛盾**（红队 D7）：值 84.3% 却显示「阈值 > 90%」，因为退出线是 85%。
+  详情追加「（迟滞中：需跌破 85% 才解除）」，让"为什么 84% 还在告警"当场有答案。
+
+### Fixed（真实数据复核后追加 — 修正了本段上文的数字夸大）
+- **"稳定抖动"的恢复判据从"周期数"改为"持续时间"**。原实现要求连续 60 个干净周期，
+  但真实数据（30 分钟 1791 个 1Hz 样本）显示：跌破退出线的最长连续干净段**只有 24 个周期**，
+  扫遍阈值 86–98 也从未超过 42。于是判据**结构性不可达**，告警会永久挂在 active、永远关不掉。
+  更糟的是被抖动窗口挡下时 `recoveryCounts` 会清零重来，"数到 60"永远数不到。
+  改为"干净持续 ≥ `flap-window-seconds`"后，30 分钟消息数从 7 降到 **2**。
+  用时间而非周期数还顺带消除了一个隐患：`general.update_interval` 可配，
+  周期数判据的含义会随采样间隔漂移，时间判据不会。
+- **上文的合成轨迹数字需要按真实数据校准**。"1333 条 → 4 条"来自 σ=4.0 的合成轨迹；
+  真实背景 σ 是 **13.0**（3.2 倍），lag-60 自相关 0.413 而非 AR(1) 的 0.046。
+  真实数据回放是 **121 条 → 2 条（30 分钟）**——仍是数量级改善，但**不要引用合成轨迹的数字**。
+  另：真实数据上"仅迟滞"是 121→117（几乎无效果），"仅抖动窗口"是 121→7（主力）。
+  迟滞仍值得保留（成本为零、保护阈值双向抖动），但**不是主要机制**。
+
+### Notes（红队指出但本版未修，记入待办）
+- 抖动升级在"越界周期 ≥ 60 秒"时有断崖（59 秒 4 条 / 60 秒 91 条）。上一条已把恢复判据
+  改为时间维度，缓解了断崖的根源（判据不再依赖周期数）；但"越界段本身很长"时的行为仍未单独验证。
+- `numericValueOf()` 依赖"消息末尾最后一个冒号后是数字"。若将来给文案加 `(阈值: 90%)`，
+  会解析到常量 90 并静默永久抑制重推。根治需给 `Alert` 增加结构化数值字段。
+- **未在用户的真实 E5 服务器上验证**：本次实验在本机 E5-2660 v2 上做，但负载画像不同
+  （本机中位数 53%，用户机器中位数 > 90%）。合成轨迹是 AR(1) 近似，真实负载可能存在
+  分钟级相关性（那会让迟滞效果**更好**，不改变结论方向）。
+- **`repush-delta` 只作用于 `cpu:system`**（`REPUSH_SUPPRESSIBLE_KEYS` 白名单）。
+  内存/实体/区块/TPS 等可处置指标不受影响——抑制它们会让真实问题静默，
+  且会让 `alert02b` 这类正向断言失效（本次实现中实测到过这个回归并已修正）。
+- **未修改 `perfscope-alert` 等断言**：全部 11 个场景零改动通过。
+
+---
+
 ## [1.2.1] — 2026-10-25
 
 > **本版主题「说真话」**：不新增功能（仅 `/status`、`/alerts` 两个"让插件自己可见"的命令），
@@ -49,14 +344,64 @@
 | 9A-20 | 插件自身不可运维 | `isStale()`、`/status`、模块四态、Error supervisor |
 | 9A-22 | 性能自证 | 脚本按样本计数、README 写明 5 条限定 |
 | 9A-23 / 9A-24 | 对外材料 + i18n | LISTING-KIT 升 v1.2；2 个死键接线、两级回退如实 |
+| 9B-3 | Folia 跨 region 聚合 | entities/chunks/tile_entities/hotspots 整块跳过 + 平台限制标记（Paper 零影响） |
+| 9B-4 | chunk 实体数组含 null | `chunk.getEntities()` / `world.getEntities()` 跳过 null 元素（并发移除时曾 NPE → 整块采集失败） |
+| 9B-5 | monitorTask 非原子 | `AtomicReference` + 双重 CAS + starting 标志（Folia 上曾出现"提示已开但 ActionBar 不刷新"） |
+| 9B-6 | 启动期 TPS 误报 | Folia 启动抑制窗口（只抑制 `tps:` key，Paper 不启用，不影响 alert 场景） |
+| 9B-2 | 兼容矩阵文档失真 | 顶部加状态声明：196 条是 v1.1.0 构建、只验证可达性不验证数值 |
+| 9C-1 | 「Paper 1.20.4+ 仅编译期兼容」 | **已实机验证**：Paper 1.20.4 build 343 上跑通全部命令面（见下方证据） |
+| 9C-2 | Purpur/Leaf/Leaves 措辞 | 已降级为"可加载验证"，明确分支私有优化未覆盖 |
+| 9C-3 | 矩阵条数通胀 | 停止按条数扩张，改为按"断言了什么语义"分类（见文档） |
+
+**9C-1 实机证据**（Paper 1.20.4 build 343，2023-12-25 STABLE，sha256 `269aa013…`）：
+```
+[15:21:22] Enabling PerfScope v1.2.1
+[15:21:23]   MSPT精确采集: Paper API
+[15:21:23]   PerfScope 启动完成喵~
+```
+命令面实测：`/perfscope` 输出 `MSPT (avg/min/max): 0.52 ms / 0.29ms / 4.42ms`（三数不同 → 一级路径真实生效）、
+`/status` 11 模块全绿、`/diagnose` 三态输出（已评估 4/5 + 跳过原因）、`/hotspot` Top3 坐标、`/trend` 跨重启可查。
+
+**同一套 harness 断言在 1.20.4 上也全绿**（这是比"能启动"更强的证据）：
+`perfscope-boot` **6/6**、`perfscope-surface` **37/37**（完整命令面）——
+即 v1.2.1 在 1.21.4 与 1.20.4 上通过的是**同一批断言**，不是"看起来像跑通了"。
 
 **实机验证**：`release-check -WithServer` **12/12**；场景 boot 6/6、surface 37/37、config 11/11、
 alert 9/9、alertv2 6/6、diagnose 9/9、trend 10/10、history 7/7、hotspot 9/9、i18n 7/7、report 10/10 全绿。
+（以上场景为 **Paper 1.21.4**；9C-1 为 **Paper 1.20.4**；9B-3 的 Folia 分支与 9C-2 的分支语义仍**未实机验证**，
+见 `docs/07-guides/COMPAT-MATRIX-VERIFICATION.md` 顶部状态声明。）
 
 ---
 
 ### Changed
 
+- **9B-3 Folia 跨 region 聚合：整块跳过而不是猜**（`metrics/MetricsCollector.java`、`metrics/MetricsSnapshot.java`）：
+  `collectEntities` / `collectChunks` / `collectTileEntities` / `collectHotspots` 的数据源
+  （`World.getEntities()` / `getLoadedChunks()` / `getTileEntityCount()`、`Chunk.getEntities()` /
+  `getTileEntities()`）在 Folia 上**按 region 归属**，在 GlobalRegion 线程上调用既可能只看到部分
+  region（数字偏小、两秒之间跳变），也可能抛 `IllegalStateException`。此前这几个模块在 Folia 上
+  照常全服遍历，等于拿"不确定是否完整"的数字当全服读数展示。
+  - 选**方案 A（整块跳过）**而非 B（遍历 + try-catch 标"可能不完整"）：B 的 try-catch 只能兜住
+    "抛异常"这一半风险，**兜不住"不抛异常但只返回一部分 region"**——那正是 Folia 最典型的形态，
+    结果是一个不报错、无告警、看着正常的假数字。A 把"不知道"如实变成"不可用"，与 v1.2.1「说真话」
+    主题一致；且无法实机验证 Folia（本机只有 1.21.4 分支实例、无时序可控的跨 region 复现手段），
+    保守方案是唯一能自证的方案。
+  - 判定**只在 `ServerCompat`**（`foliaAggregationUnsafe()` 直接转调 `ServerCompat.isFolia()`，
+    本类零反射、零重复探测）。非 Folia 上该判定恒 false，四个 `refresh*Cache` 的
+    `else if` 分支永不进入 → **Paper 路径零行为变化**（11 个实机场景仍跑在 Paper 1.21.4 上）。
+  - 跳过时模块进 `unavailable` + `disabledModules`（规格 A 方案要求），并在**首次**跳过打一条 INFO
+    （`foliaSkipLogged`，不随 reload 重置）：说明 entities/chunks/tile_entities/hotspots 已自动跳过、
+    原因，以及"需要这些数据请用 AlmanacAPI 等 region 感知方案"。
+  - **新增 `MetricsSnapshot.platformSkipped`**（`disabledModules` 的精确子集，契约
+    `platformSkipped ⊆ disabledModules ⊆ unavailable`）：规格要求把 Folia 跳过的模块写进
+    `disabledModules`，但命令层 `/status` 对 `disabledModules` 渲染的是
+    「已禁用（config xxx.enabled=false）」——在 Folia 上这是**假话**（服主明明开着）。
+    新集合让展示层能区分"服主关掉"与"平台做不到"，且不改 `disabledModules` 既有语义（零回归）。
+    **展示层尚未接线**（`PerfScopeCommand` 属并行 agent 的文件）：接线前 `/status` 在 Folia 上
+    会把这 4 个模块显示成"已禁用（config …=false）"，需改为优先判 `platformSkipped` 并渲染
+    「平台限制（Folia 跨 region，已自动跳过）」。
+  - `TPS / MSPT / 玩家 / JVM` **不跳过**：它们的问题分别由 9A-2（Folia 标注 `(global region)`）
+    与 9A-1（MSPT 直接不可用）处理，不属于跨 region 聚合。
 - **9A-1 Folia MSPT 假精确**（`compat/ServerCompat.java`、`PerfScope.java`、`command/PerfScopeCommand.java`）：
   Folia 的 `CraftServer.getTickTimes()` / `getAverageTickTime()` **方法存在但恒返回全零**
   （jar 内 `TickTimes.add` 零调用点），而旧实现的能力探测只看方法存在性 → 能力位 true →

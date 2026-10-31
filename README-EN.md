@@ -41,9 +41,9 @@ Since v1.1, PerfScope focuses on the **Paper family** of servers and relies heav
 | Platform | Verification level | Notes |
 |----------|--------------------|-------|
 | **Paper 1.21.x** | **Verified on a real server** | Full command surface + threshold alerts + history persistence + diagnostic engine exercised on a live server |
-| **Paper 1.20.4+** | **Compile-time compatible** | Built against `paper-api 1.20.4` (`pom.xml`), **not yet boot-verified on a real 1.20.x server**; nothing below 1.20.4 is guaranteed |
+| **Paper 1.20.4** | **Verified on a real server** (since v1.2.1) | Measured on Paper 1.20.4 build 343: enables cleanly; `/perfscope` full diagnostics, `/status`, `/diagnose` (three-state output), `/hotspot`, `/trend` all work; MSPT uses `getTickTimes()` with real avg/min/max. Versions below 1.20.4 are not guaranteed |
 | **Purpur / Leaf / Leaves** | **Load-verified** | The same Paper code path starts and responds to commands; **fork-private optimizations (AI throttling, entity merging, chunk caching, etc.) are not covered** and may affect the absolute accuracy of entity/chunk counts |
-| **Folia** | **Loads, but metrics are limited** | Starts and responds to commands, but **MSPT is unavailable** (no global tick timing) and **TPS is a global-region-local value** (not server-wide throughput); entity/chunk/hotspot modules may report "unavailable" across regions |
+| **Folia** | **Loads, but metrics are limited** | Starts and responds to commands (commands/config work), but **MSPT is unavailable** (no global tick timing) and **TPS is a global-region-local value**; **the entity/chunk/tile-entity/hotspot modules are skipped automatically** (cross-region aggregation is unreliable — `/status` reports a "platform limit") |
 | **Plain Spigot / CraftBukkit** | Not supported | Requires Adventure rendering and cannot run without the Paper API |
 
 Additional notes:
@@ -136,6 +136,7 @@ Key configuration options (`config.yml`):
 general:
   update_interval: 20       # Data collection interval (ticks)
   debug: false
+  language: en              # UI language: en (default) / zh; takes effect on /perfscope reload
 
 tps:
   enabled: true
@@ -171,6 +172,7 @@ cpu:
   enabled: true
   process_warning_threshold: 80.0   # Process CPU usage warning threshold (%)
   system_warning_threshold: 90.0    # System CPU load warning threshold (%)
+  hysteresis_margin: 5.0            # Hysteresis band (percentage points): an alert clears only after load falls to threshold-minus-this value, preventing boundary flicker
 
 report:
   auto_export: false
@@ -185,6 +187,8 @@ alerts:
   cooldown-seconds: 300     # Cooldown per alert in seconds (0 = no cooldown, still throttled by the collection cycle)
   notify-recovery: true     # Recovery notice (sent when an alert clears)
   debounce-cycles: 3        # Debounce: N consecutive over-threshold cycles before the first push (1 = push immediately)
+  flap-window-seconds: 180  # Flap window: a "recovery → re-breach" inside this window is treated as the same incident (no duplicate notifications)
+  repush-delta: 8           # Re-push delta: an active alert is not re-pushed unless its value changes by at least this much (applies to cpu:system only)
   daily-summary:
     enabled: false          # Daily summary switch
     time: "08:00"           # Daily summary time (local HH:mm)
@@ -214,6 +218,23 @@ worlds:
 ```
 
 See `plugins/PerfScope/config.yml` for complete configuration details.
+
+### Language (i18n)
+
+The plugin ships **two complete message sets — English (default) and Simplified Chinese** — selected by `general.language`:
+
+```yaml
+general:
+  language: en        # en = English (default), zh = Simplified Chinese
+```
+
+- **Switching**: edit `general.language`, then `/perfscope reload`. `en_US`/`en-us` and `zh_CN`/`zh-TW` are normalized to their primary language; anything else warns on the console and falls back to `en`.
+- **All-or-nothing**: the active language is published as a single immutable snapshot on each reload, so no single output can mix languages.
+- **Custom text**: `plugins/PerfScope/messages.yml` overrides any built-in message. Its first line must declare `language: en` or `language: zh` — **a file whose tag does not match `general.language` is ignored entirely** (so Chinese overrides can never leak into an English UI), and both the console and the reload reply say so explicitly.
+- **Placeholders**: messages may contain `{0}`, `{1}`, … filled in by the plugin. Missing arguments leave the placeholder verbatim; nothing throws.
+- **Upgrading**: a legacy `messages.yml` with no `language` tag is backed up and regenerated for the current language **if you never customized it**; if it contains customizations it is left untouched and not applied this run (the reload reply tells you), so add the `language:` tag and translate the entries.
+
+> Exceptions (do not follow the language): the `plugin.yml` description, report files already exported, history entries already written (these are re-rendered in the current language), and webhook messages already queued at the moment of the switch.
 
 > Note (threshold direction): TPS is a low-is-bad metric — the lower the worse — so it requires `warning_threshold ≥ critical_threshold` (the opposite of high-is-bad metrics such as MSPT or memory; do not invert it by mistake). If inverted, `/perfscope reload` validates and falls back to the default values, logging a "配置校验：…设置倒置，已回退默认值" warning to the console — it will not take effect silently.
 >

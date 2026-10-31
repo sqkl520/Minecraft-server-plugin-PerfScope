@@ -19,8 +19,11 @@ package cn.perfscope.alert;
 
 import cn.perfscope.PerfScope;
 import cn.perfscope.compat.SchedulerAdapter;
+import cn.perfscope.compat.ServerCompat;
 import cn.perfscope.config.ConfigManager;
 import cn.perfscope.metrics.MetricsSnapshot;
+import cn.perfscope.util.DurationFormat;
+import cn.perfscope.util.Messages;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
@@ -84,11 +87,56 @@ public class AlertService {
     /** 9A-14：模块不可用转 unknown 的默认分钟数（配置 alerts.unknown-after-minutes 缺省值）。 */
     private static final int DEFAULT_UNKNOWN_AFTER_MINUTES = 5;
 
+    /**
+     * 9C-4：复燃最短重新通知间隔的默认值（秒）。
+     * 60 秒的依据：真机实测中"恢复→复燃"的锯齿间隔在 2–43 秒之间摆动，
+     * 60 秒能覆盖整段抖动周期，同时不会把"故障真的再次发生"压到用户无法感知。
+     */
+    private static final long DEFAULT_REFIRE_MIN_INTERVAL_MS = 60_000L;
+
+    /**
+     * 9C-4：抖动窗口默认值（秒）。
+     *
+     * <p>取值依据（真机 10 分钟波动负载实测）：恢复→再次越界的间隔落在 4–66 秒区间，
+     * 60 秒窗口漏掉了 66 秒那次。取 180 秒可以覆盖"阈值的呼吸"这一整类现象——
+     * 一条告警若在 3 分钟内反复起落，它的事实是"这个问题一直没好"，
+     * 中间那些"已恢复"对用户没有任何价值。</p>
+     *
+     * <p>为什么不是更长：超过 5 分钟会把"真实的短暂故障"也吞掉（故障发生→5 分钟内自愈→
+     * 用户从未收到过任何通知）。180 秒在两者之间。</p>
+     */
+    private static final long DEFAULT_FLAP_WINDOW_MS = 180_000L;
+
+    /**
+     * 9C-4：同级别重推的数值变化阈值默认值。
+     * 与迟滞带同量级（5–8）：小于它的变化本就不会改变状态机判定，重推只是重复噪音。
+     * 实测依据——该值在 6 小时合成轨迹上把重推从 65 条降到几乎为 0，而真满载轨迹的重推语义不变。
+     */
+    private static final double DEFAULT_REPUSH_DELTA = 8.0;
+
     /** 9A-14：告警历史文件单文件上限（超过即轮转为 alerts.jsonl.1），防止长期运行无限膨胀。 */
     private static final long MAX_EVENT_FILE_BYTES = 2L * 1024L * 1024L;
 
     /** 9A-14：内存中保留的最近事件条数（{@link #recent(int)} 的上限）。 */
     private static final int MAX_RECENT_EVENTS = 500;
+
+    /**
+     * 9B-6：启动抑制窗口的默认秒数（Folia 启动初期 global region 的 TPS 报表空窗）。
+     *
+     * <p>只用常量、不读 config.yml：本修复不新增配置键（config.yml 由其他改动占用中）。
+     * 建议后续在 {@code alerts} 段加 {@code startup-suppress-seconds}（0 = 关闭），
+     * 缺省仍为本值；接入点即 {@link #startupSuppressSeconds}。</p>
+     */
+    private static final int DEFAULT_STARTUP_SUPPRESS_SECONDS = 60;
+
+    /**
+     * 9B-6：启动抑制窗口的<b>下限</b>——窗口至少覆盖 {@code 3 × general.update_interval} 个采集周期，
+     * 保证"空窗期"内至少发生过若干个快照；配置的间隔越大，窗口相应拉长。
+     */
+    private static final int STARTUP_SUPPRESS_MIN_CYCLES = 3;
+
+    /** 9B-6：只抑制 TPS 指标的告警（key 形如 {@code tps:global}，证据见 perfscope-alert.json）。 */
+    private static final String STARTUP_SUPPRESS_METRIC = "tps:";
 
     private final PerfScope plugin;
 
@@ -123,6 +171,102 @@ public class AlertService {
 
     /** 9A-14：最近一次恢复信息：key → 复燃窗口判定（恢复时清冷却、这里记时刻与原始起始时间）。 */
     private final Map<String, ResolvedInfo> lastResolvedAt = new ConcurrentHashMap<>();
+
+    /**
+     * 9C-4：抖动计数——key → 在抖动窗口内被抑制的次数。
+     *
+     * <p>达到 {@link #FLAP_ESCALATE_THRESHOLD} 次后，该 key 进入"稳定抖动"状态：
+     * 恢复判据从"连续 {@code recoveryCycles} 个干净周期"改为"连续干净 {@code flapWindowMs} 毫秒"。
+     * 理由：一条 20 分钟振荡一次的告警若按 3 秒判恢复，会在 6 小时里产出 32 条消息；
+     * 而它的事实是"这个问题一直没好"。用户真正需要的是"真的好了"那一刻的通知，
+     * 不是每一次阈值的呼吸。</p>
+     *
+     * <p>该状态在"确实长时间干净并宣布恢复"后由 {@link #flapHealCycles} 计时清零。</p>
+     */
+    private final Map<String, Integer> flapCounts = new ConcurrentHashMap<>();
+
+    /** 9C-4：抖动窗口内被抑制多少次后判定为"稳定抖动"（恢复判据随之加严）。 */
+    private static final int FLAP_ESCALATE_THRESHOLD = 3;
+
+    /**
+     * 9C-4：抖动计数"痊愈"所需的干净周期数（默认 300 ≈ 5 分钟）。
+     *
+     * <p>为什么要这一层：抖动计数若在每次恢复时清零，一条"每 20 分钟振荡一次"的告警
+     * 永远攒不满 3 次，恢复判据永远停在 3 秒——这正是实测 A 轨迹还剩 16 条消息的原因。
+     * 只有在连续干净超过这个时长后，才认定"抖动真的平息了"，把计数清零。</p>
+     */
+    private static final int FLAP_HEAL_CYCLES = 300;
+
+    /** 9C-4：抖动痊愈计时表——key → 连续干净的周期数（用于决定何时清零 {@link #flapCounts}）。 */
+    private final Map<String, Integer> flapHealCycles = new ConcurrentHashMap<>();
+
+    /**
+     * 9C-4：本次连续干净段的起始时刻（epoch ms）——key → 时刻。
+     *
+     * <p>用于"抖动中的告警"按**时间**判定恢复（而不是数干净周期）：
+     * 实测真实 CPU 序列在 σ=13 的饱和背景下，跌破退出线的最长连续干净段只有 24 个周期，
+     * 任何超过该值的周期数判据都结构性不可达，会让告警永久挂在 active。
+     * 本周期重新越界时立即清除（干净段被打断）。</p>
+     */
+    private final Map<String, Long> cleanRunStartMs = new ConcurrentHashMap<>();
+
+    /**
+     * 9C-4：适用"稳定告警不重推"的 key 白名单。
+     *
+     * <p>只包含 {@code cpu:system}——它的分母是整机 CPU，包含 JVM 之外的一切占用。
+     * 服主看到"系统CPU负载偏高: 92%"第五次、第十次，能做的动作都是同一个。
+     * 其余指标（内存/实体/区块/TPS/MSPT/玩家）都排除在外：它们是服主可处置的，
+     * 重推是"问题还在"的有效提醒，抑制它们等于让真问题静默。</p>
+     */
+    private static final java.util.Set<String> REPUSH_SUPPRESSIBLE_KEYS = java.util.Set.of("cpu:system");
+
+    /**
+     * 9C-4：抖动抑制标记——该 key 的恢复被"刚恢复过"的窗口挡下了。
+     * 仅用于诊断日志与后续清理，不参与判定（判定只看 {@link #lastResolvedAt}）。
+     */
+    private final java.util.Set<String> flapSuppressed = ConcurrentHashMap.newKeySet();
+
+    /**
+     * 9C-4：复燃最短重新通知间隔（毫秒）。
+     *
+     * <p>与 {@code cooldown-seconds} 刻意的分离：两者的理想取值方向相反——
+     * 冷却要长（别刷屏），复燃窗口要短（几秒内又坏了确实该立即告知）。
+     * 复用同一个数会让"真复燃要立即到达"（9A-14 的初衷）与"别被抖动刷屏"（本次修复）
+     * 争抢同一个旋钮，无论调成多少都有一方受害。</p>
+     */
+    private volatile long refireMinIntervalMs = DEFAULT_REFIRE_MIN_INTERVAL_MS;
+
+    /**
+     * 9C-4：抖动窗口（毫秒）——距上次恢复不足该时长的"再次恢复"不推送、不移出 active。
+     * 0 = 关闭抖动抑制（退回旧行为）。
+     */
+    private volatile long flapWindowMs = DEFAULT_FLAP_WINDOW_MS;
+
+    /**
+     * 9C-4：同级别重推的数值变化阈值（百分点/同单位）。
+     * 低于该幅度的变化视为"没有新信息"，不再周期性重推——这是"E5 常态化满载"场景下
+     * 从 92 条/6 小时降到个位数的主因。0 = 关闭该抑制（退回旧行为：每冷却期重推一次）。
+     */
+    private volatile double repushDelta = DEFAULT_REPUSH_DELTA;
+
+    /**
+     * 9C-4：每个 key 的数值滑动窗口（最近 {@link #NOISE_WINDOW} 次观测），用于估计采样噪声 σ̂。
+     *
+     * <p>为什么需要它：{@code alerts.repush-delta} 是**绝对值**（默认 8 个百分点），
+     * 但不同机器的采样噪声差异极大——本机受控实验实测 σ≈12，而安静机器可能只有 1–2。
+     * 用一个固定值会让"噪声大的机器每个冷却周期都重推一次"（比不抑制还密），
+     * 或让"安静机器该报的变化被吞掉"。σ̂ 让阈值自适应：有效阈值 = delta × max(1, σ̂/margin)。</p>
+     */
+    private final Map<String, Deque<Double>> recentValues = new ConcurrentHashMap<>();
+
+    /** 9C-4：噪声估计窗口长度（样本数）。60 个 1Hz 样本 ≈ 1 分钟，足够稳定且能跟上负载画像变化。 */
+    private static final int NOISE_WINDOW = 60;
+
+    /** 9C-4：σ̂ 与 margin 的最小允许比值——避免噪声极小的机器把阈值压到 0（等于关闭抑制）。 */
+    private static final double MIN_NOISE_RATIO = 1.0;
+
+    /** 9C-4：σ̂/margin 比值的上限——防止一次极端尖峰把阈值抬到永远触发不了。 */
+    private static final double MAX_NOISE_RATIO = 4.0;
 
     /** 9A-14：模块长期不可用而被挂起（unknown 状态）的告警：key → 生命周期记录。 */
     private final Map<String, ActiveAlert> suspendedAlerts = new ConcurrentHashMap<>();
@@ -159,9 +303,47 @@ public class AlertService {
     private final Deque<AlertEvent> recentEvents = new ArrayDeque<>();
     private boolean recentSeeded = false;
 
+    /**
+     * 9B-6：插件启用时刻（构造时记录；reload 不重置——抑制窗口只针对"启动初期"，
+     * 运行中途 reload 不该把 TPS 告警静音 60 秒）。
+     */
+    private final long pluginEnabledAtMs = System.currentTimeMillis();
+
+    /**
+     * 9B-6：启动抑制窗口是否启用（仅 Folia）。
+     *
+     * <p>为什么只在 Folia 上启用：Paper/Spigot 的 {@code Bukkit.getTPS()} 从第一个 tick 起就有
+     * 有效滑动平均值，不存在"报表空窗"；只有 Folia 的 global region 在启动初期会短暂报空/接近 0。
+     * 在 Paper 上启用只会无收益地把真实 TPS 问题静音 60 秒。</p>
+     */
+    private final boolean startupSuppressEnabled;
+
+    /** 9B-6：启动抑制窗口结束时刻（epoch ms；未启用时为 {@link #pluginEnabledAtMs}）。 */
+    private final long startupSuppressUntilMs;
+
+    /** 9B-6：实际窗口秒数（日志/诊断使用）。 */
+    private final int startupSuppressSeconds;
+
+    /** 9B-6：窗口内是否有 TPS 推送被抑制（窗口结束时打一条汇总，避免"静音得无声无息"）。 */
+    private boolean startupSuppressedAnyPush = false;
+    /** 9B-6：窗口结束汇总是否已打（只打一次）。 */
+    private boolean startupSuppressSummaryLogged = false;
+    /** 9B-6：启动抑制说明是否已打（每进程一次；reload 会再次调用 start()，不重复刷屏）。 */
+    private boolean startupSuppressNoticeLogged = false;
+
     public AlertService(PerfScope plugin) {
         this.plugin = plugin;
         this.configManager = plugin.getConfigManager();
+
+        // 9B-6：窗口长度 = max(60 秒, 3 个采集周期)，且只在该服务端确实会报表空窗时启用
+        ConfigManager.ConfigData cfg = configManager == null ? null : configManager.get();
+        int intervalTicks = cfg == null ? 20 : Math.max(1, cfg.general_updateInterval);
+        long cycleSeconds = (intervalTicks + 19L) / 20L; // tick → 秒，向上取整
+        int seconds = (int) Math.max(DEFAULT_STARTUP_SUPPRESS_SECONDS,
+            STARTUP_SUPPRESS_MIN_CYCLES * cycleSeconds);
+        this.startupSuppressSeconds = seconds;
+        this.startupSuppressEnabled = ServerCompat.isFolia() && seconds > 0;
+        this.startupSuppressUntilMs = pluginEnabledAtMs + (startupSuppressEnabled ? seconds * 1000L : 0L);
     }
 
     /** Wave 7D：装配 webhook 出口（可空；null = 不发送）。 */
@@ -253,17 +435,55 @@ public class AlertService {
         loadState();     // 9A-14：rehydrate（每进程仅一次）
         ConfigManager.ConfigData cfg = configManager.get();
         if (!cfg.alerts_enabled) {
-            plugin.getLogger().info("[告警] 告警服务未启用（alerts.enabled=false）");
+            plugin.getLogger().info(logText("alert.log.disabled"));
             return;
         }
         long interval = Math.max(1, cfg.general_updateInterval);
         // 首查延迟一个采集周期：等采集器先产出首份快照；runGlobalTimer 在主线程执行，玩家消息发送天然安全
         timerHandle = SchedulerAdapter.runGlobalTimer(plugin, this::checkCycle, interval, interval);
         Options o = options;
-        plugin.getLogger().info("[告警] 告警服务已启动 (检查间隔: " + interval + " ticks, 冷却: "
-            + cfg.alerts_cooldownSeconds + " 秒, 防抖: " + Math.max(1, cfg.alerts_debounceCycles)
-            + " 周期, 恢复防抖: " + o.recoveryDebounceCycles + " 周期, digest: "
-            + (o.digestMode ? "开" : "关") + ")");
+        plugin.getLogger().info(logText("alert.log.started",
+            interval, cfg.alerts_cooldownSeconds, Math.max(1, cfg.alerts_debounceCycles),
+            o.recoveryDebounceCycles,
+            Messages.get(o.digestMode ? "alert.msg.digest-on" : "alert.msg.digest-off")));
+        // 9B-6：启动抑制窗口说明（仅 Folia；每进程只打一次，reload 不重复刷屏）
+        if (startupSuppressEnabled && !startupSuppressNoticeLogged) {
+            startupSuppressNoticeLogged = true;
+            plugin.getLogger().info(logText("alert.log.startup-suppress", startupSuppressSeconds));
+        }
+    }
+
+    /**
+     * 9B-6：启动抑制窗口是否正在生效（窗口内 + 仅 Folia + 仅 TPS 指标）。
+     *
+     * <p>窗口内的 TPS 告警<b>照常</b>走完状态机（activeAlerts / 冷却 / 历史事件），
+     * 只是不投递到控制台 / 游戏内 / webhook；窗口结束时也不补发——否则启动 60 秒后
+     * 会突然涌出一批"历史告警"，比误报本身更吵。</p>
+     */
+    private boolean startupSuppressed(ActiveAlert rec, long now) {
+        return startupSuppressEnabled
+            && now < startupSuppressUntilMs
+            && rec != null && rec.key != null && rec.key.startsWith(STARTUP_SUPPRESS_METRIC);
+    }
+
+    /** 9B-6：记录一次"被抑制的 TPS 推送"（窗口结束时汇总一条 INFO，静音不留白）。 */
+    private void noteStartupSuppressed(ActiveAlert rec) {
+        startupSuppressedAnyPush = true;
+        plugin.getLogger().log(Level.FINE, logText("alert.log.startup-suppress-skip", rec.key));
+    }
+
+    /** 9B-6：窗口结束时汇总一次被抑制的条数（只打一条，不补发任何告警）。 */
+    private void maybeLogStartupSuppressEnd() {
+        if (!startupSuppressEnabled || startupSuppressSummaryLogged) {
+            return;
+        }
+        if (System.currentTimeMillis() < startupSuppressUntilMs) {
+            return;
+        }
+        startupSuppressSummaryLogged = true;
+        if (startupSuppressedAnyPush) {
+            plugin.getLogger().info(logText("alert.log.startup-suppress-end"));
+        }
     }
 
     /**
@@ -318,8 +538,7 @@ public class AlertService {
             int debounce = cfg == null ? 3 : Math.max(1, cfg.alerts_debounceCycles);
             int rec = raw.getInt("alerts.recovery-debounce-cycles", debounce);
             if (rec < 1) {
-                plugin.getLogger().warning("[告警] alerts.recovery-debounce-cycles=" + rec
-                    + " 非法（需 ≥1），已按防抖周期数 " + debounce + " 处理");
+                plugin.getLogger().warning(logText("alert.log.bad-recovery-debounce", rec, debounce));
                 rec = debounce;
             }
             o.recoveryDebounceCycles = rec;
@@ -327,15 +546,39 @@ public class AlertService {
             o.notifyMitigation = raw.getBool("alerts.notify-mitigation", true);
             int unknown = raw.getInt("alerts.unknown-after-minutes", DEFAULT_UNKNOWN_AFTER_MINUTES);
             if (unknown < 1) {
-                plugin.getLogger().warning("[告警] alerts.unknown-after-minutes=" + unknown
-                    + " 非法（需 ≥1），已按 " + DEFAULT_UNKNOWN_AFTER_MINUTES + " 分钟处理");
+                plugin.getLogger().warning(logText("alert.log.bad-unknown-after", unknown,
+                    DEFAULT_UNKNOWN_AFTER_MINUTES));
                 unknown = DEFAULT_UNKNOWN_AFTER_MINUTES;
             }
             o.unknownAfterMinutes = unknown;
             String tz = raw.getString("alerts.daily-summary.timezone", "");
             o.dailyTimezone = tz == null ? "" : tz.trim();
+            // 9C-4：复燃最短间隔与抖动窗口（秒）。0 = 关闭对应抑制，负值/非数值回退默认。
+            int refireSec = raw.getInt("alerts.refire-min-interval-seconds",
+                (int) (DEFAULT_REFIRE_MIN_INTERVAL_MS / 1000L));
+            if (refireSec < 0) {
+                long def = DEFAULT_REFIRE_MIN_INTERVAL_MS / 1000L;
+                plugin.getLogger().warning(logText("alert.log.bad-refire", refireSec, def));
+                refireSec = (int) def;
+            }
+            this.refireMinIntervalMs = refireSec * 1000L;
+            int flapSec = raw.getInt("alerts.flap-window-seconds",
+                (int) (DEFAULT_FLAP_WINDOW_MS / 1000L));
+            if (flapSec < 0) {
+                long def = DEFAULT_FLAP_WINDOW_MS / 1000L;
+                plugin.getLogger().warning(logText("alert.log.bad-flap", flapSec, def));
+                flapSec = (int) def;
+            }
+            this.flapWindowMs = flapSec * 1000L;
+            // 9C-4：同级别重推的数值变化阈值。0 = 关闭抑制（退回"每冷却期重推一次"）。
+            double delta = raw.getDouble("alerts.repush-delta", DEFAULT_REPUSH_DELTA);
+            if (!Double.isFinite(delta) || delta < 0) {
+                plugin.getLogger().warning(logText("alert.log.bad-repush", delta, DEFAULT_REPUSH_DELTA));
+                delta = DEFAULT_REPUSH_DELTA;
+            }
+            this.repushDelta = delta;
         } catch (Exception | LinkageError e) {
-            plugin.getLogger().warning("[告警] 告警扩展配置读取失败（按默认值运行）: " + e.getMessage());
+            plugin.getLogger().warning(logText("alert.log.options-failed", e.getMessage()));
         }
         this.options = o;
     }
@@ -363,7 +606,7 @@ public class AlertService {
                 }
                 return new RawConfig(YamlConfiguration.loadConfiguration(f));
             } catch (Exception | LinkageError e) {
-                plugin.getLogger().warning("[告警] 扩展配置读取失败（全部使用默认值）: " + e.getMessage());
+                plugin.getLogger().warning(logText("alert.log.rawconfig-failed", e.getMessage()));
                 return new RawConfig(null);
             }
         }
@@ -407,6 +650,25 @@ public class AlertService {
             Object v = yaml.get(path);
             return v == null ? def : String.valueOf(v);
         }
+
+        /** 9C-4：小数读取（不存在的键返回默认值；无法解析同样返回默认值）。 */
+        double getDouble(String path, double def) {
+            if (yaml == null) {
+                return def;
+            }
+            Object v = yaml.get(path);
+            if (v instanceof Number n) {
+                return n.doubleValue();
+            }
+            if (v instanceof String s) {
+                try {
+                    return Double.parseDouble(s.trim());
+                } catch (NumberFormatException ignored) {
+                    return def;
+                }
+            }
+            return def;
+        }
     }
 
     // ==================== 周期入口 ====================
@@ -423,7 +685,7 @@ public class AlertService {
             MetricsSnapshot snap = plugin.getMetricsCollector().getLatest();
             onSnapshot(snap); // snap 为 null（启动初期）时由 onSnapshot 内部直接返回
         } catch (Exception | LinkageError e) {
-            plugin.getLogger().warning("[告警] 本轮检查失败: " + e.getMessage());
+            plugin.getLogger().warning(logText("alert.log.cycle-failed", e.getMessage()));
         }
     }
 
@@ -480,24 +742,56 @@ public class AlertService {
                     suspendedRec.lastSeen = now;
                     suspendedRec.value = valueOf(alert);
                     suspendedRec.module = moduleOf(alert);
+                    // 9D 修（同 BLOCKER-3）：重置重推基准，否则该 key 永久处于"无基准"状态
+                    suspendedRec.numericValue = numericValueOf(alert);
+                    suspendedRec.lastPushedValue = suspendedRec.numericValue;
                     suspendedRec.restored = false;
                     activeAlerts.put(key, suspendedRec);
                     moduleDownSince.remove(key);
                     recordEvent("restore", suspendedRec);
                     stateDirty = true;
-                    plugin.getLogger().log(Level.FINE,
-                        "[告警] 模块恢复，静默接管 unknown 告警: " + key + "（不重复推送）");
+                    plugin.getLogger().log(Level.FINE, logText("alert.log.resume-unknown", key));
                     continue;
                 }
                 // —— 待确认 / 复燃 ——
                 int count = debounceCounts.merge(key, 1, Integer::sum);
                 ResolvedInfo resolved = lastResolvedAt.get(key);
-                boolean refire = resolved != null && cooldownMs > 0 && now - resolved.atMs <= cooldownMs;
+                // 9C-4：复燃的判定窗口用 refireMinIntervalMs（配置 alerts.refire-min-interval-seconds），
+                // 不再复用 cooldownSeconds。两者语义相反：冷却要长（别刷屏），
+                // 复燃窗口要短（几秒内又坏了确实该立即告知）；复用同一个数会让一方受害。
+                // 该键此前被声明与解析但从未被读取（红队 D4：死配置），现接上。
+                long refireWindowMs = refireMinIntervalMs > 0 ? refireMinIntervalMs : cooldownMs;
+                boolean refire = resolved != null && refireWindowMs > 0
+                    && now - resolved.atMs <= refireWindowMs;
                 if (!refire && count < debounceCycles) {
                     continue; // 未达 N 周期：静默累计，暂不推送（防秒级抖动误报）
                 }
                 if (!refire && isCooling(key, now, cooldownMs)) {
                     continue; // 防抖已达但仍在冷却期：等冷却到期再推
+                }
+                // 9C-4：复燃不再无条件绕过冷却。
+                // 背景：refire 分支原先用 `!refire &&` 同时短路防抖与冷却，设计意图是"真复燃要立即到达"
+                // （9A-14 修的是"复燃被冷却静默 5 分钟"）。但指标在阈值附近抖动时，"恢复→复燃"会每几秒
+                // 循环一次，冷却完全失效——实测 6 小时 1333 条消息。折中：复燃仍绕过**防抖**（必须立即到达），
+                // 但遵守**最短重新通知间隔**。间隔取独立键而非复用 cooldown-seconds，因为两者语义相反：
+                // 抑制窗口要长（别刷屏），复燃窗口要短（几秒内又坏了 = 同一次事故）。
+                //
+                // 参照点必须是**恢复时刻**而不是"上次推送时刻"：恢复时已刻意保留冷却表，
+                // 但那条记录可能是几十分钟前的首次告警，用它做参照永远成立，等于没有抑制。
+                if (refire && flapWindowMs > 0 && now - resolved.atMs < flapWindowMs) {
+                    // 静默接管：问题确实存在，但这条通知刚发过。必须落 active 状态，
+                    // 否则该 key 会进入"既不在 active 也不在待确认"的不可见状态，永远不再恢复。
+                    // 刻意**保留** lastResolvedAt：下次再"干净"时它将触发抖动抑制，
+                    // 使"恢复→复燃→恢复→复燃"在第二次就收敛，而不是无限循环。
+                    ActiveAlert quiet = new ActiveAlert(key, alert, resolved.firstSeen, now, false);
+                    activeAlerts.put(key, quiet);
+                    debounceCounts.remove(key);
+                    recoveryCounts.remove(key);
+                    moduleDownSince.remove(key);
+                    noteFlap(key, now);
+                    recordEvent("refire_suppressed", quiet);
+                    stateDirty = true;
+                    continue;
                 }
                 // 复燃沿用该问题最初的 firstSeen：持续时长跨"恢复→复燃"连续累计，而不是重新计时
                 long firstSeen = refire ? resolved.firstSeen : now;
@@ -510,10 +804,17 @@ public class AlertService {
                 if (refire) {
                     lastResolvedAt.remove(key);
                     recordEvent("refire", fresh);
-                    pushRefire(fresh, now);
+                    // 9B-6：启动抑制窗口内（仅 Folia + 仅 tps:）不投递，但状态机与历史照常
+                    if (startupSuppressed(fresh, now)) {
+                        noteStartupSuppressed(fresh);
+                    } else {
+                        pushRefire(fresh, now);
+                    }
                 } else {
                     recordEvent("open", fresh);
-                    if (digest != null) {
+                    if (startupSuppressed(fresh, now)) {
+                        noteStartupSuppressed(fresh);   // 9B-6：不进 digest 批次，避免窗口末尾一次补发
+                    } else if (digest != null) {
                         digest.add(fresh);
                     } else {
                         pushAlert(fresh, now);
@@ -529,17 +830,25 @@ public class AlertService {
                 rec.lastSeen = now;
                 rec.value = valueOf(alert);
                 rec.module = moduleOf(alert);
+                // 9D 修（红队 BLOCKER-3）：重置重推基准。
+                // rehydrate 时若来自 v1 格式（没有结构化数值），Alert.value 是 NaN，
+                // 构造函数把 lastPushedValue 置成了 null。这里若只刷新 alert/value 而不刷新基准，
+                // 该 key 的 lastPushedValue 会**永久为 null** → significant 恒 true
+                // → 每 cooldown 周期重推一次，永不停止。那正是 9C-4 修掉的"σ=12 时每 6 小时 59 条"。
+                rec.numericValue = numericValueOf(alert);
+                rec.lastPushedValue = rec.numericValue;
                 rec.restored = false;
                 cooldowns.put(key, now);
                 recordEvent("restore", rec);
                 stateDirty = true;
-                plugin.getLogger().log(Level.FINE,
-                    "[告警] 重启后静默接管未恢复告警: " + key + "（不重复推送）");
+                plugin.getLogger().log(Level.FINE, logText("alert.log.resume-restored", key));
                 continue;
             }
 
             // 本周期仍越界：恢复计数归零（连续性由恢复流程保证）
             recoveryCounts.remove(key);
+            // 9C-4：干净段被打断——清除起始时刻，下次干净要重新计时
+            cleanRunStartMs.remove(key);
             moduleDownSince.remove(key);
 
             if (alert.critical() && !rec.alert.critical()) {
@@ -549,7 +858,11 @@ public class AlertService {
                 rec.value = valueOf(alert);
                 cooldowns.put(key, now); // 升级不受冷却限制（严重度上升应立即到达），推送后刷新冷却表
                 recordEvent("upgrade", rec);
-                pushUpgrade(rec, now);
+                if (startupSuppressed(rec, now)) {
+                    noteStartupSuppressed(rec);   // 9B-6
+                } else {
+                    pushUpgrade(rec, now);
+                }
                 stateDirty = true;
             } else if (!alert.critical() && rec.alert.critical()) {
                 // —— 9A-14 降级（critical→warning）：刷新记录 + 可选「已缓解」 ——
@@ -558,22 +871,70 @@ public class AlertService {
                 rec.value = valueOf(alert);
                 recordEvent("downgrade", rec);
                 // 降级不是恢复：不写冷却表、不清恢复计数（本周期仍越界，恢复计数已在上面归零）
-                if (opt.notifyMitigation && cfg.alerts_notifyRecovery) {
+                if (opt.notifyMitigation && cfg.alerts_notifyRecovery && !startupSuppressed(rec, now)) {
                     pushMitigated(rec, now);
                 }
                 stateDirty = true;
             } else {
                 // —— 同级别：刷新记录（数值随时间更新），冷却到期仍活跃则重推 ——
                 boolean changed = !sameAlert(rec.alert, alert);
+                // 9C-4：稳定告警不再周期性重推。判据是"数值变化幅度"而不是"等够 300 秒"——
+                // 一条长期 92% 的告警每 5 分钟重说一遍"系统CPU负载偏高: 92%"没有任何新信息；
+                // 反之从 92% 跳到 99% 是用户想知道的。阈值取 alerts.repush-delta。
+                //
+                // ⚠️ 基准必须是「**上次推送时**的值」，不是「上一个 1Hz 样本」。
+                // 最初实现把基准写成 rec.numericValue 并在每周期无条件更新，导致比较的是
+                // 「相邻两秒的差」——在 σ≈12 的机器上，相邻样本差 ≥8 的概率是 13.6%，
+                // 300 秒内几乎必然发生一次，于是这层抑制**完全失效**（仍是每 5 分钟一条）。
+                // 反过来，数值在几小时里从 88% 平滑爬到 100% 时，每步只变化 0.003，
+                // 永远够不到 delta —— 真正该通知的"持续恶化"被静默。
+                // 改为与"上次推送值"比较后，两个方向同时正确。
+                Double prevPushed = rec.lastPushedValue;
+                Double curVal = numericValueOf(alert);
+                // 变化是否"显著"。
+                //
+                // ⚠️ 这里踩过两个坑，都值得记下来：
+                //   坑 1（最初实现）：基准用 rec.numericValue，且每周期无条件更新 → 比的是"相邻两秒的差"。
+                //        在 σ≈12 的机器上 P(|Δ|≥8) = 13.6%，300 秒内必然触发 → 抑制完全失效。
+                //   坑 2（改成"上次推送值"后）：随机游走里单点与旧基准的差**随时间单调增大**，
+                //        300 秒后几乎必然超阈值 → 抑制仍然失效（模拟：σ=12 时 59 条/6h）。
+                //
+                // 正确的判据是"**窗口均值**相对上次推送值的变化"：均值的标准误是 σ/√n，
+                // 噪声被平均掉，而真实的系统性变化（88%→100%）会完整保留在均值里。
+                boolean significant;
+                if (prevPushed == null || curVal == null) {
+                    significant = true;   // 解析不出数值：不抑制（宁可多说一句，也不能静音）
+                } else {
+                    Double smoothed = movingAverage(key, curVal);
+                    double ref = smoothed == null ? curVal : smoothed;
+                    double absDelta = Math.abs(ref - prevPushed);
+                    double relDelta = prevPushed == 0 ? (ref == 0 ? 0 : 1.0)
+                        : Math.abs(ref - prevPushed) / Math.abs(prevPushed);
+                    significant = absDelta >= repushDelta || relDelta >= 0.5;
+                }
+                // 9C-4 的适用范围限定：只有"服主无从处置"的系统级指标才抑制重推。
+                // 依据——cpu:system 的分母是整机 CPU，包含 JVM 之外的一切占用；服主看到
+                // "系统CPU负载偏高: 92%" 第三次、第五次、第十次，回答都是同一个"哦，我知道"。
+                // 而内存/实体/区块/TPS 这些是服主能动手的指标，重推是"问题还在"的有效提醒，
+                // 抑制它们会让 alert02b 这类正向断言失效，也会让真实问题被静默。
+                boolean repushSuppressible = REPUSH_SUPPRESSIBLE_KEYS.contains(key);
+                boolean shouldRepush = !repushSuppressible || significant;
                 rec.alert = alert;
                 rec.lastSeen = now;
                 rec.value = valueOf(alert);
+                rec.numericValue = curVal;
                 if (changed) {
                     stateDirty = true;
                 }
-                if (!isCooling(key, now, cooldownMs)) {
+                if (shouldRepush && !isCooling(key, now, cooldownMs)) {
                     cooldowns.put(key, now);
-                    pushAlert(rec, now);
+                    // 9C-4：只有真正要推送时才推进"上次推送值"这个基准。
+                    rec.lastPushedValue = curVal;
+                    if (startupSuppressed(rec, now)) {
+                        noteStartupSuppressed(rec);   // 9B-6
+                    } else {
+                        pushAlert(rec, now);
+                    }
                 }
             }
         }
@@ -603,33 +964,71 @@ public class AlertService {
                     suspendedKeys.add(key);
                     recordEvent("suspend", rec);
                     stateDirty = true;
-                    plugin.getLogger().info("[告警] 模块 " + module + " 不可用超过 "
-                        + opt.unknownAfterMinutes + " 分钟，告警 " + key + " 转入 unknown 状态");
+                    plugin.getLogger().info(logText("alert.log.module-down",
+                        module, opt.unknownAfterMinutes, key));
                 }
                 continue;
             }
             if (module == null) {
-                plugin.getLogger().log(Level.FINE,
-                    "[告警] 恢复判定：key=" + key + " 未携带模块归因（按正常恢复处理）");
+                plugin.getLogger().log(Level.FINE, logText("alert.log.recovery-no-module", key));
             }
             moduleDownSince.remove(key);
             int clean = recoveryCounts.merge(key, 1, Integer::sum);
-            if (clean < recoveryCycles) {
-                continue; // 9A-14：恢复防抖——连续 N 个干净周期才宣布恢复
+            // 9C-4：稳定抖动中的告警需要更长的干净期才宣布恢复。
+            //
+            // ⚠️ 这里最初写成「连续 60 个干净**周期**」，在真实数据上是一条死路：
+            // 实测 30 分钟 1791 个 1Hz 样本，跌破退出线的最长连续干净段只有 **24 个周期**，
+            // 扫遍 86–98 全部阈值，最长也才 23–42 —— 永远数不到 60。
+            // 更致命的是：被抖动窗口挡下时 recoveryCounts 会被清零重来，
+            // 于是"数到 60"这件事在噪声背景下**结构性地不可达**，告警会永久挂在 active。
+            //
+            // 改为**按时间**判定：干净持续时间达到 flapWindow 即可宣布恢复。
+            // 这样判据与"阈值的呼吸周期"同尺度，而不是与采样频率绑定——
+            // 采样间隔改了（用户可配 update_interval），周期数判据的含义也会跟着漂移，时间判据不会。
+            boolean flapping = flapCounts.getOrDefault(key, 0) >= FLAP_ESCALATE_THRESHOLD;
+            boolean cleanEnough;
+            if (flapping) {
+                long cleanFor = now - cleanRunStartMs.computeIfAbsent(key, k -> now);
+                cleanEnough = cleanFor >= flapWindowMs;
+            } else {
+                cleanEnough = clean >= recoveryCycles;
             }
+            if (!cleanEnough) {
+                continue; // 9A-14：恢复防抖——连续 N 个干净周期（或抖动中的 M 毫秒）才宣布恢复
+            }
+            // 9C-4：抖动抑制——若该 key 刚刚才恢复过一次（在 flap 窗口内），这次"干净"极可能只是
+            // 阈值下方的一次回落。此时宣布恢复会造成「恢复→复燃→恢复→复燃」的锯齿。
+            // 做法：不推送恢复、不移出 active（问题在观测上仍活跃），把恢复计数清零重新累计；
+            // 若窗口过后确实一直干净，下一个 recoveryCycles 周期会正常宣布恢复——"已恢复"只会迟到，不会丢失。
+            ResolvedInfo lastResolved = lastResolvedAt.get(key);
+            if (lastResolved != null && flapWindowMs > 0 && now - lastResolved.atMs < flapWindowMs) {
+                recoveryCounts.remove(key);
+                noteFlap(key, now);
+                plugin.getLogger().log(Level.FINE, logText("alert.log.flap-suppressed",
+                    key, now - lastResolved.atMs, flapWindowMs));
+                continue;
+            }
+            flapSuppressed.remove(key);
             recordEvent("resolve", rec);
-            if (cfg.alerts_notifyRecovery) {
+            // 9C-4：宣布恢复。但抖动计数**保留**——由步骤 5b 的痊愈计时负责清零。
+            // 在这里清零会让"每 20 分钟振荡一次"的告警每次恢复后都回到 3 秒判据，永远压不住。
+            // 9B-6：窗口内连 TPS 的"已恢复正常"也不推——用户从未收到过那条告警，突然收到"已恢复"只会困惑
+            if (cfg.alerts_notifyRecovery && !startupSuppressed(rec, now)) {
                 pushRecovery(rec, now, clean);
             }
             resolvedKeys.add(key);
             stateDirty = true;
         }
-        // 真恢复：移出 active，记复燃窗口，清冷却（复燃不被旧冷却压掉）
+        // 真恢复：移出 active，记复燃窗口，冷却记录刻意保留
         for (String key : resolvedKeys) {
             ActiveAlert rec = activeAlerts.remove(key);
             recoveryCounts.remove(key);
             moduleDownSince.remove(key);
-            cooldowns.remove(key);
+            flapSuppressed.remove(key);
+            // 9C-4：flapCounts 刻意**不**在这里清零——由步骤 3b 的痊愈计时负责。
+            // 在这里清零会让"每 20 分钟振荡一次"的告警每次恢复后都回到 3 秒判据，永远压不住。
+            // 冷却记录同样**保留**：原先 cooldowns.remove(key) 让"复燃遵守最短间隔"
+            // 永远拿不到参照点（isCooling 恒 false），冷却表在这条路径上被架空。
             lastResolvedAt.put(key, new ResolvedInfo(now, rec == null ? now : rec.firstSeen));
         }
         // 9A-14：模块失效转 unknown——移出 active（不再算“活跃告警”），但**不算恢复**：
@@ -662,22 +1061,84 @@ public class AlertService {
         //    （模块不可用抑制期）保留恢复计数不动
         debounceCounts.keySet().removeIf(key -> !current.containsKey(key));
 
+        // 5b. 9C-4：抖动计数的"痊愈"计时。
+        //     一条告警进入稳定抖动后，恢复判据变成"连续干净 flapWindowMs 毫秒"；
+        //     若它此后连续干净超过 FLAP_HEAL_CYCLES 个周期，说明抖动真的平息了，才把计数清零。
+        //     关键：本周期仍在越界的 key 直接清零计时（它没有在痊愈）；本周期缺席的才累加。
+        if (!flapCounts.isEmpty()) {
+            for (Map.Entry<String, Integer> e : flapCounts.entrySet()) {
+                String key = e.getKey();
+                if (current.containsKey(key)) {
+                    flapHealCycles.remove(key);           // 又越界了：痊愈计时重来
+                } else {
+                    int healed = flapHealCycles.merge(key, 1, Integer::sum);
+                    if (healed >= FLAP_HEAL_CYCLES) {
+                        flapCounts.remove(key);
+                        flapHealCycles.remove(key);
+                        plugin.getLogger().log(Level.FINE, logText("alert.log.flap-healed", key, healed));
+                    }
+                }
+            }
+        }
+
         // 6. 复燃窗口过期清理（避免 lastResolvedAt 无限增长）
+        //    9C-4：保留期必须覆盖"抖动窗口"——否则用户把 flap-window-seconds 调到大于冷却秒数时，
+        //    窗口内的恢复记录会被提前清掉，抖动抑制静默失效（配置标着 600 秒，实际只生效 300 秒）。
         if (!lastResolvedAt.isEmpty()) {
-            lastResolvedAt.entrySet().removeIf(e -> now - e.getValue().atMs > Math.max(cooldownMs, 60_000L));
+            long retainMs = Math.max(Math.max(cooldownMs, flapWindowMs), 60_000L);
+            lastResolvedAt.entrySet().removeIf(e -> now - e.getValue().atMs > retainMs);
         }
 
         // 7. 9A-14：状态变化才写盘（不是每周期）
         if (stateDirty) {
             persistState();
         }
+
+        // 8. 9B-6：启动抑制窗口结束汇总（只打一条；不补发任何告警）
+        maybeLogStartupSuppressEnd();
     }
 
     /** 两条 Alert 是否"同一个观测"（数值与级别都没变）——用于减少无谓的状态落盘。 */
+    /**
+     * 两次观测是否"同一次"——用于决定是否需要落盘（{@code stateDirty}）。
+     *
+     * <p><b>9D 修正</b>：旧实现比较 {@code message().equals()}，而 9D 起 {@code message()}
+     * 是<b>按当前语言现渲染</b>的派生值。用字符串当身份有三个问题（红队 HIGH-1）：</p>
+     * <ol>
+     *   <li>数值变化若不改变渲染精度，就检测不到 → {@code alerts.state} 停止更新 value/lastSeen；</li>
+     *   <li>渲染精度（{@code %.1f}）把 92.11 与 92.14 抹成同一个身份；</li>
+     *   <li>切语言会让所有活跃告警都判为"变了"，触发一轮无意义的状态重写。</li>
+     * </ol>
+     *
+     * <p>改为比较<b>结构化字段</b>：级别、原始数值、阈值（阈值会随 reload 变化且会展示给用户，
+     * 所以变化时应当落盘）。注意<b>不能</b>把数值放进告警 key——那会让"数值变了"变成
+     * "换了一条告警"，重新引入"旧告警恢复 + 新告警开启"的双通知。</p>
+     */
     private static boolean sameAlert(Alert a, Alert b) {
-        return a == b || (a != null && b != null
-            && a.level().equals(b.level())
-            && a.message().equals(b.message()));
+        if (a == b) {
+            return true;
+        }
+        if (a == null || b == null) {
+            return false;
+        }
+        return a.level().equals(b.level())
+            && sameDouble(a.value(), b.value())
+            && sameDouble(a.threshold(), b.threshold())
+            && sameDouble(a.exitThreshold(), b.exitThreshold());
+    }
+
+    /** NaN 视为相等（两者都未知 = 同一次观测），其余按 {@code Double.compare}。 */
+    private static boolean sameDouble(double x, double y) {
+        return (Double.isNaN(x) && Double.isNaN(y)) || Double.compare(x, y) == 0;
+    }
+
+    /** 9C-4：记录一次抖动抑制（达到阈值后该 key 的恢复判据自动加严）。 */
+    private void noteFlap(String key, long now) {
+        int n = flapCounts.merge(key, 1, Integer::sum);
+        if (n == FLAP_ESCALATE_THRESHOLD) {
+            plugin.getLogger().info(logText("alert.log.flap-escalate", key, flapWindowMs / 1000L, n));
+        }
+        flapSuppressed.add(key);
     }
 
     // ==================== 推送通道 ====================
@@ -687,17 +1148,24 @@ public class AlertService {
      * 9A-14：统一加「服名 + key + 值/阈值 + 持续时长 + 下一步」前缀（不改采集层文案）。
      */
     private void pushAlert(ActiveAlert rec, long now) {
-        String levelCn = levelCn(rec.alert);
-        String consoleText = "[告警][" + levelCn + "][" + serverTag() + "] " + rec.alert.message() + fullDetail(rec, now);
-        String gameText = "[告警·" + levelCn + "] [" + serverTag() + "] " + rec.alert.message() + shortDetail(rec, now);
+        String level = levelText(rec.alert);
+        String consoleText = Messages.get("alert.prefix.console", level, serverTag())
+            + rec.alert.message() + fullDetail(rec, now);
+        String gameText = Messages.get("alert.prefix.game", level, serverTag())
+            + rec.alert.message() + shortDetail(rec, now);
         emit(consoleText, gameText, rec.alert.critical() ? NamedTextColor.RED : NamedTextColor.YELLOW,
             rec.alert.critical() ? Level.SEVERE : Level.WARNING, true);
     }
 
     /** 推送级别升级通知：{@code [告警][严重] <message>（级别升级）}。 */
     private void pushUpgrade(ActiveAlert rec, long now) {
-        String consoleText = "[告警][严重][" + serverTag() + "] " + rec.alert.message() + "（级别升级）" + fullDetail(rec, now);
-        String gameText = "[告警·严重] [" + serverTag() + "] " + rec.alert.message() + "（级别升级）" + shortDetail(rec, now);
+        String tag = serverTag();
+        String suffix = Messages.get("alert.msg.escalated");
+        // 升级通知的级别位恒为"严重"（升级只发生在 warning→critical，见状态机）
+        String consoleText = Messages.get("alert.prefix.console", levelText(rec.alert), tag)
+            + rec.alert.message() + suffix + fullDetail(rec, now);
+        String gameText = Messages.get("alert.prefix.game", levelText(rec.alert), tag)
+            + rec.alert.message() + suffix + shortDetail(rec, now);
         emit(consoleText, gameText, NamedTextColor.RED, Level.SEVERE, true);
     }
 
@@ -706,30 +1174,43 @@ public class AlertService {
      * 与「已恢复」严格区分：文案明确写"问题仍在，未恢复"。
      */
     private void pushMitigated(ActiveAlert rec, long now) {
-        String consoleText = "[告警][缓解·" + levelCn(rec.alert) + "][" + serverTag() + "] " + rec.alert.message()
-            + "（已由「严重」降为「警告」，问题仍在，未恢复）" + fullDetail(rec, now);
-        String gameText = "[告警·缓解] [" + serverTag() + "] " + rec.alert.message()
-            + "（已降为警告，问题仍在）" + shortDetail(rec, now);
+        String tag = serverTag();
+        String consoleText = Messages.get("alert.prefix.mitigated.console", levelText(rec.alert), tag)
+            + rec.alert.message()
+            + Messages.get("alert.msg.mitigated.console") + fullDetail(rec, now);
+        String gameText = Messages.get("alert.prefix.mitigated.game", tag)
+            + rec.alert.message()
+            + Messages.get("alert.msg.mitigated.game") + shortDetail(rec, now);
         emit(consoleText, gameText, NamedTextColor.YELLOW, Level.WARNING, false);
     }
 
     /** 9A-14：复燃通知——恢复窗口内同一 key 再次越界，绕过防抖与冷却。 */
     private void pushRefire(ActiveAlert rec, long now) {
-        String levelCn = levelCn(rec.alert);
-        String suffix = "（问题再次出现）";
-        String consoleText = "[告警][" + levelCn + "][" + serverTag() + "] " + rec.alert.message() + suffix + fullDetail(rec, now);
-        String gameText = "[告警·" + levelCn + "] [" + serverTag() + "] " + rec.alert.message() + suffix + shortDetail(rec, now);
+        String level = levelText(rec.alert);
+        String tag = serverTag();
+        String suffix = Messages.get("alert.msg.refire");
+        String consoleText = Messages.get("alert.prefix.console", level, tag)
+            + rec.alert.message() + suffix + fullDetail(rec, now);
+        String gameText = Messages.get("alert.prefix.game", level, tag)
+            + rec.alert.message() + suffix + shortDetail(rec, now);
         emit(consoleText, gameText, rec.alert.critical() ? NamedTextColor.RED : NamedTextColor.YELLOW,
             rec.alert.critical() ? Level.SEVERE : Level.WARNING, true);
     }
 
-    /** 推送恢复通知：控制台 info + 游戏内绿色；文案 = 最后一次真实观测的 display + " 已恢复正常"。 */
+    /**
+     * 推送恢复通知：控制台 info + 游戏内绿色。
+     *
+     * <p>文案 = 最后一次真实观测的分类名 + 本地化的"已恢复正常"。
+     * 9D 之前后缀是硬编码字符串拼接（{@code display + " 已恢复正常"}），
+     * 翻译正文后会出现"英文正文 + 中文后缀"的半吊子输出；现在后缀也走消息层。</p>
+     */
     private void pushRecovery(ActiveAlert rec, long now, int cleanCycles) {
-        String message = rec.alert.display() + " 已恢复正常";
-        String detail = " | key=" + rec.key
-            + " | 持续 " + formatDuration(now - rec.firstSeen) + " 后连续 " + cleanCycles + " 个检查周期未越界";
-        emit("[告警][恢复][" + serverTag() + "] " + message + detail,
-            "[告警·恢复] " + message + " | 持续 " + formatDuration(now - rec.firstSeen),
+        String message = rec.alert.display() + " " + AlertCatalog.recoveredSuffix();
+        String duration = DurationFormat.duration(now - rec.firstSeen);
+        emit(Messages.get("alert.prefix.recovery.console", serverTag())
+                + message + Messages.get("alert.msg.recovery.console", rec.key, duration, cleanCycles),
+            Messages.get("alert.prefix.recovery.game")
+                + message + Messages.get("alert.msg.recovery.game", duration),
             NamedTextColor.GREEN, Level.INFO, false);
     }
 
@@ -751,8 +1232,9 @@ public class AlertService {
             byModule.computeIfAbsent(metricOf(r.key), k -> new ArrayList<>()).add(r);
         }
         StringBuilder sb = new StringBuilder(256);
-        sb.append("[告警][").append(anyCritical ? "严重" : "警告").append("] [").append(serverTag())
-          .append("] 本周期新增 ").append(batch.size()).append(" 条告警");
+        sb.append(Messages.get("alert.prefix.digest",
+                Messages.get(anyCritical ? "alert.level.critical" : "alert.level.warning"), serverTag()))
+          .append(Messages.get("alert.msg.digest-header", batch.size()));
         int shown = 0;
         int total = batch.size();
         outer:
@@ -761,14 +1243,14 @@ public class AlertService {
                 if (shown >= 5) {
                     break outer;
                 }
-                sb.append('\n').append("  · ").append(e.getKey()).append(": ")
-                  .append(r.alert.message())
-                  .append(r.value == null || r.value.isEmpty() ? "" : "（" + r.value + "）");
+                sb.append('\n').append(r.value == null || r.value.isEmpty()
+                    ? Messages.get("alert.msg.digest-line", e.getKey(), r.alert.message())
+                    : Messages.get("alert.msg.digest-line-value", e.getKey(), r.alert.message(), r.value));
                 shown++;
             }
         }
         if (total > shown) {
-            sb.append('\n').append("  …等 ").append(total).append(" 条，执行 /perfscope alerts 查看");
+            sb.append('\n').append(Messages.get("alert.msg.digest-more", total));
         }
         String text = sb.toString();
         // 控制台多行输出（每行一个 Logger 调用，便于日志系统逐行采集）
@@ -791,7 +1273,7 @@ public class AlertService {
                 plugin.getLogger().log(logLevel, consoleText);
                 consoleOk = true;
             } catch (Exception | LinkageError e) {
-                plugin.getLogger().warning("[告警] 控制台推送失败: " + e.getMessage());
+                plugin.getLogger().warning(logText("alert.log.console-failed", e.getMessage()));
             }
         }
         if (cfg.alerts_in_game) {
@@ -799,7 +1281,7 @@ public class AlertService {
                 broadcastToAlertPlayers(Component.text(gameText, color));
                 gameOk = true;
             } catch (Exception | LinkageError e) {
-                plugin.getLogger().warning("[告警] 游戏内推送失败: " + e.getMessage());
+                plugin.getLogger().warning(logText("alert.log.game-failed", e.getMessage()));
             }
         }
         WebhookNotifier wn = webhookNotifier;
@@ -808,7 +1290,7 @@ public class AlertService {
                 wn.send(consoleText);
                 webhookQueued = wn.isReady();
             } catch (Exception | LinkageError e) {
-                plugin.getLogger().warning("[告警] webhook 入队失败: " + e.getMessage());
+                plugin.getLogger().warning(logText("alert.log.webhook-failed", e.getMessage()));
             }
         }
         if (counted) {
@@ -837,7 +1319,7 @@ public class AlertService {
                 }
                 consoleOk = true;
             } catch (Exception | LinkageError e) {
-                plugin.getLogger().warning("[告警] 控制台推送失败: " + e.getMessage());
+                plugin.getLogger().warning(logText("alert.log.console-failed", e.getMessage()));
             }
         }
         if (cfg.alerts_in_game) {
@@ -845,7 +1327,7 @@ public class AlertService {
                 broadcastToAlertPlayers(Component.text(text, color));
                 gameOk = true;
             } catch (Exception | LinkageError e) {
-                plugin.getLogger().warning("[告警] 游戏内推送失败: " + e.getMessage());
+                plugin.getLogger().warning(logText("alert.log.game-failed", e.getMessage()));
             }
         }
         WebhookNotifier wn = webhookNotifier;
@@ -854,7 +1336,7 @@ public class AlertService {
                 wn.send(text);
                 webhookQueued = wn.isReady();
             } catch (Exception | LinkageError e) {
-                plugin.getLogger().warning("[告警] webhook 入队失败: " + e.getMessage());
+                plugin.getLogger().warning(logText("alert.log.webhook-failed", e.getMessage()));
             }
         }
         if (counted) {
@@ -875,23 +1357,99 @@ public class AlertService {
     /** 9A-14：完整细节（控制台/webhook）：key + 值 + 阈值 + 持续时长 + 下一步（服名已在前缀里）。 */
     private String fullDetail(ActiveAlert rec, long now) {
         StringBuilder sb = new StringBuilder(128);
-        sb.append(" | key=").append(rec.key);
+        sb.append(Messages.get("alert.msg.key", rec.key));
         if (rec.value != null && !rec.value.isEmpty()) {
-            sb.append(" 值=").append(rec.value);
+            sb.append(Messages.get("alert.msg.value", rec.value));
         }
         String th = thresholdText(rec.key);
         if (!th.isEmpty()) {
-            sb.append(" 阈值(").append(th).append(")");
+            sb.append(Messages.get("alert.msg.threshold", th));
         }
-        sb.append(" | 持续 ").append(formatDuration(now - rec.firstSeen))
-          .append(" | 下一步: ").append(nextStep(metricOf(rec.key)));
+        // 9C-4：迟滞带内的告警，其显示值可能低于阈值本身（例如阈值 90、迟滞 5 时，
+        // 显示"84.3%"却仍在告警——因为退出线是 85）。不说明会自相矛盾（红队 D7）。
+        String latchNote = hysteresisNote(rec.key);
+        if (!latchNote.isEmpty()) {
+            sb.append(' ').append(latchNote);
+        }
+        sb.append(Messages.get("alert.msg.duration", DurationFormat.duration(now - rec.firstSeen)))
+          .append(Messages.get("alert.msg.next-step", nextStep(metricOf(rec.key))));
         return sb.toString();
+    }
+
+    /**
+     * 9C-4：迟滞提示（仅 CPU 两个指标）。
+     *
+     * <p>迟滞让"退出线"低于"进入线"，因此告警消息里的数值可能低于它自己写着的阈值。
+     * 不解释的话，用户看到「系统CPU负载偏高: 84.3% | 阈值(系统 > 90.0%)」会认为是 bug
+     * （红队 D7 指出的自相矛盾）。这里补一句退出线，让"为什么 84% 还在告警"当场有答案。</p>
+     *
+     * @return 空串表示该 key 不适用（非 CPU 指标 / 迟滞关闭）
+     */
+    private String hysteresisNote(String key) {
+        ConfigManager.ConfigData c = configManager.get();
+        if (c == null) {
+            return "";
+        }
+        double margin = c.cpu_hysteresisMargin;
+        if (!(margin > 0) || margin > 50) {
+            return "";
+        }
+        if ("cpu:system".equals(key)) {
+            return Messages.get("alert.msg.hysteresis",
+                fmtThreshold(c.cpu_systemWarningThreshold - margin));
+        }
+        if ("cpu:process".equals(key)) {
+            return Messages.get("alert.msg.hysteresis",
+                fmtThreshold(c.cpu_processWarningThreshold - margin));
+        }
+        return "";
+    }
+
+    /** 阈值展示格式化：去掉无意义的尾随 .0（90.0 → 90，87.5 → 87.5）。 */
+    private static String fmtThreshold(double v) {
+        if (v == Math.rint(v) && !Double.isInfinite(v)) {
+            return String.valueOf((long) v);
+        }
+        return String.format(Locale.ROOT, "%.1f", v);
+    }
+
+    /** 9C-4：记录一个观测值，用于滚动估计采样噪声 σ̂。 */
+    private void observeValue(String key, Double value) {
+        if (value == null || !Double.isFinite(value)) {
+            return;
+        }
+        Deque<Double> dq = recentValues.computeIfAbsent(key, k -> new ArrayDeque<>(NOISE_WINDOW));
+        dq.addLast(value);
+        while (dq.size() > NOISE_WINDOW) {
+            dq.removeFirst();
+        }
+    }
+
+    /**
+     * 9C-4：把单个观测压进滑动窗口并返回其均值（样本不足 10 个时返回 null，调用方退化为单点比较）。
+     *
+     * <p>为什么必须用均值而不是单点：随机游走下"当前值 − 上次推送值"的期望随 √Δt 增长，
+     * 任何固定阈值最终都会被噪声穿过（σ=12 时 300 秒后几乎必然）；
+     * 而均值把噪声压到 σ/√n，同时**完整保留系统性漂移**。
+     * 这是 9C-4 里唯一能同时满足"噪声大的机器不刷屏"和"缓慢恶化仍会通知"的判据。</p>
+     */
+    private Double movingAverage(String key, Double value) {
+        observeValue(key, value);
+        Deque<Double> dq = recentValues.get(key);
+        if (dq == null || dq.size() < 10) {
+            return null;
+        }
+        double sum = 0;
+        for (double v : dq) {
+            sum += v;
+        }
+        return sum / dq.size();
     }
 
     /** 9A-14：游戏内短细节（聊天栏宽度有限，只留服名/持续/下一步）。 */
     private String shortDetail(ActiveAlert rec, long now) {
-        return " | 持续 " + formatDuration(now - rec.firstSeen)
-            + " | 下一步: " + nextStep(metricOf(rec.key));
+        return Messages.get("alert.msg.duration", DurationFormat.duration(now - rec.firstSeen))
+            + Messages.get("alert.msg.next-step", nextStep(metricOf(rec.key)));
     }
 
     /**
@@ -908,8 +1466,19 @@ public class AlertService {
 
     // ==================== 9A-14：文案辅助 ====================
 
-    private static String levelCn(Alert alert) {
-        return alert.critical() ? "严重" : "警告";
+    /** 级别展示词（{@code 严重}/{@code 警告} → {@code Critical}/{@code Warning}）。令牌本身不翻译。 */
+    private static String levelText(Alert alert) {
+        return Messages.get(alert.critical() ? "alert.level.critical" : "alert.level.warning");
+    }
+
+    /**
+     * 控制台日志：文案 + 统一的 {@code [告警] } / {@code [Alert] } 前缀。
+     *
+     * <p>前缀由 {@code alert.log.prefix} 提供，调用点只写内容——这样"前缀长什么样"
+     * 只有一处定义，不会出现某条日志漏前缀、或两种语言下前缀不一致。</p>
+     */
+    private static String logText(String key, Object... args) {
+        return Messages.get("alert.log.prefix") + Messages.get(key, args);
     }
 
     /** key 的指标前缀（"tps:global" → "tps"）。 */
@@ -927,10 +1496,38 @@ public class AlertService {
     }
 
     /** 从 message 末尾冒号后提取"值"（"TPS 严重偏低: 12.3" → "12.3"）。 */
+    /**
+     * 9D：取告警值的<b>展示串</b>——由结构化数值 + 指标单位直接拼，<b>不再解析文案</b>。
+     *
+     * <p>旧实现切最后一个冒号取子串，本机实测在三种文案形态下会静默取错
+     * （见 {@link Metric} 类注释）。现在数值来自 {@code alert.value()}，
+     * 与文案里写了什么都无关，切语言也不会改变它。</p>
+     */
     private static String valueOf(Alert alert) {
-        String m = alert.message() == null ? "" : alert.message();
-        int i = Math.max(m.lastIndexOf(':'), m.lastIndexOf('：'));
-        return i >= 0 && i + 1 < m.length() ? m.substring(i + 1).trim() : "";
+        if (alert == null) {
+            return "";
+        }
+        Metric m = alert.metric();
+        if (m != null && alert.hasValue()) {
+            return AlertCatalog.formatValue(alert.value(), m.unit());
+        }
+        // 无法结构化（历史数据缺值/未知指标）：返回空串，调用方按"未知"处理
+        return "";
+    }
+
+    /**
+     * 9C-4：把 {@link #valueOf} 的结果解析成数值。
+     *
+     * <p>9D 起这是<b>直读</b>而不是解析：值本来就以 double 形式存在于 {@link Alert#value()}。
+     * 返回 {@code null} 仅表示"这条观测没有结构化数值"（历史数据），
+     * 调用方据此退化为"不抑制重推"——安全的 fail-open 方向。</p>
+     */
+    private static Double numericValueOf(Alert alert) {
+        if (alert == null || !alert.hasValue()) {
+            return null;
+        }
+        double v = alert.value();
+        return Double.isFinite(v) ? v : null;
     }
 
     /** 9A-14：按 key 反查当前阈值文案（采集层已判定，这里只用于"值/阈值"展示；不改判定口径）。 */
@@ -942,20 +1539,28 @@ public class AlertService {
         try {
             switch (metricOf(key)) {
                 case "tps":
-                    return "warning < " + c.tps_warningThreshold + " / critical < " + c.tps_criticalThreshold;
+                    return Messages.get("alert.threshold.tps",
+                        c.tps_warningThreshold, c.tps_criticalThreshold);
                 case "mspt":
-                    return "warning > " + c.mspt_warningThreshold + "ms / critical > " + c.mspt_criticalThreshold + "ms";
+                    return Messages.get("alert.threshold.mspt",
+                        c.mspt_warningThreshold, c.mspt_criticalThreshold);
                 case "players":
-                    return "warning > " + c.players_warningThreshold + " / critical > " + c.players_criticalThreshold;
+                    return Messages.get("alert.threshold.players",
+                        c.players_warningThreshold, c.players_criticalThreshold);
                 case "entities":
-                    return (key.startsWith("entities:world:") ? "世界阈值见 worlds 段" : "warning > "
-                        + c.entities_totalWarningThreshold + " / critical > " + c.entities_totalCriticalThreshold);
+                    return key.startsWith("entities:world:")
+                        ? Messages.get("alert.threshold.entities.world")
+                        : Messages.get("alert.threshold.entities",
+                            c.entities_totalWarningThreshold, c.entities_totalCriticalThreshold);
                 case "chunks":
-                    return "warning > " + c.chunks_loadedWarningThreshold + " / critical > " + c.chunks_loadedCriticalThreshold;
+                    return Messages.get("alert.threshold.chunks",
+                        c.chunks_loadedWarningThreshold, c.chunks_loadedCriticalThreshold);
                 case "memory":
-                    return "warning ≥ " + c.memory_heapWarningThreshold + "% / critical ≥ " + c.memory_heapCriticalThreshold + "%";
+                    return Messages.get("alert.threshold.memory",
+                        c.memory_heapWarningThreshold, c.memory_heapCriticalThreshold);
                 case "cpu":
-                    return "进程 > " + c.cpu_processWarningThreshold + "% / 系统 > " + c.cpu_systemWarningThreshold + "%";
+                    return Messages.get("alert.threshold.cpu",
+                        c.cpu_processWarningThreshold, c.cpu_systemWarningThreshold);
                 default:
                     return "";
             }
@@ -968,21 +1573,15 @@ public class AlertService {
     private static String nextStep(String metric) {
         switch (metric) {
             case "tps":
-                return "执行 /perfscope diagnose 找根因，优先看实体/区块与卡顿插件";
             case "mspt":
-                return "执行 /perfscope 看长耗时 tick，检查红石机器与区块加载";
             case "players":
-                return "处于高峰属正常；非高峰请检查登录抖动或压测流量";
             case "entities":
-                return "执行 /perfscope hotspot 定位实体密集区块，清理掉落物/村民";
             case "chunks":
-                return "检查 view-distance 与预生成插件（chunky 等）是否在跑";
             case "memory":
-                return "检查 -Xmx 与 GC 日志；持续高位可考虑扩容或排查内存泄漏";
             case "cpu":
-                return "检查宿主机邻居占用/备份任务；结合 /perfscope 看进程与系统 CPU";
+                return Messages.get("alert.next-step." + metric);
             default:
-                return "执行 /perfscope 查看全量诊断";
+                return Messages.get("alert.next-step.default");
         }
     }
 
@@ -1020,22 +1619,6 @@ public class AlertService {
         return tag;
     }
 
-    /** 9A-14：毫秒 → "12 秒" / "3 分 12 秒" / "1 小时 3 分"（恢复/告警文案共用）。 */
-    private static String formatDuration(long ms) {
-        long s = Math.max(0, ms / 1000L);
-        if (s < 60) {
-            return s + " 秒";
-        }
-        long m = s / 60;
-        long rs = s % 60;
-        if (m < 60) {
-            return rs == 0 ? m + " 分钟" : m + " 分 " + rs + " 秒";
-        }
-        long h = m / 60;
-        long rm = m % 60;
-        return rm == 0 ? h + " 小时" : h + " 小时 " + rm + " 分";
-    }
-
     // ==================== 去重 / 冷却 ====================
 
     /** 判断某 key 是否仍在冷却期内；冷却 <=0 视为无冷却（天然受采集周期节流，不会刷屏） */
@@ -1070,6 +1653,23 @@ public class AlertService {
         boolean restored;
         String value;
         String module;
+        /**
+         * 9C-4：上一次推送时的<b>数值</b>（从 message 末尾解析 ，解析不出为 null）。
+         * 用于"稳定告警不重推"判据——数值变化小于 alerts.repush-delta 时视为没有新信息。
+         * 不做持久化：重启后首次重推是合理的（用户确实很久没收到了）。
+         */
+        Double numericValue;
+
+        /**
+         * 9C-4：<b>上次真正推送</b>时的数值——{@link #numericValue} 无法替代它。
+         *
+         * <p>区别很关键：{@code numericValue} 每周期都更新（记录"最近一次观测"），
+         * 而本字段只在 {@code pushAlert} 真正发生时更新。抑制判据必须用后者：
+         * 若用前者，"相邻两秒的差"在 σ≈12 的机器上有 13.6% 概率 ≥8，
+         * 300 秒内几乎必然触发一次重推——抑制形同虚设；
+         * 同时"几小时内从 88% 平滑爬到 100%"这种真正该通知的恶化因为每步变化太小而永不触发。</p>
+         */
+        Double lastPushedValue;
 
         ActiveAlert(String key, Alert alert, long firstSeen, long lastSeen, boolean restored) {
             this.key = key;
@@ -1079,6 +1679,11 @@ public class AlertService {
             this.restored = restored;
             this.value = valueOf(alert);
             this.module = moduleOf(alert);
+            this.numericValue = numericValueOf(alert);
+            // 9C-4：新建记录即视为"这条观测即将被推送"，故基准与当前值一致。
+            // open 路径会立刻推送；被 startupSuppressed 吞掉的推送不更新基准也无妨
+            // （下一周期 significant 仍为 false，与"已推过"的效果一致）。
+            this.lastPushedValue = this.numericValue;
         }
     }
 
@@ -1108,13 +1713,18 @@ public class AlertService {
             File f = stateFile();
             File dir = f.getParentFile();
             if (dir != null && !dir.isDirectory() && !dir.mkdirs()) {
-                plugin.getLogger().warning("[告警] 告警状态目录创建失败，状态仅在内存生效");
+                plugin.getLogger().warning(logText("alert.log.state-dir-failed"));
                 return;
             }
             StringBuilder sb = new StringBuilder(256);
-            sb.append("# PerfScope 9A-14 告警状态（自动生成，请勿手改）\n");
-            sb.append("# key|level|firstSeen|lastSeen|value|display|module|state\n");
-            sb.append("# state: active | unknown（模块长期不可用被挂起；重启后同样不重报）\n");
+            sb.append(Messages.get("alert.state.header")).append('\n');
+            // 9D：显式版本头。以前只有列数可用来区分格式，降级到旧版会把 v2 文件
+            // 按 v1 解析（display 变成世界名、module 变成数字），然后立刻用旧格式覆写，
+            // 结构化数据永久丢失（红队 HIGH-3）。
+            sb.append("# ").append(STATE_HEADER_V2).append('\n');
+            // 列名行是**格式契约**，不随语言变：解析端按列序读，人不读它
+            sb.append("# key|level|firstSeen|lastSeen|value|scope|threshold|exitThreshold|module|state\n");
+            sb.append(Messages.get("alert.state.legend")).append('\n');
             for (ActiveAlert r : activeAlerts.values()) {
                 appendStateLine(sb, r, "active");
             }
@@ -1123,7 +1733,7 @@ public class AlertService {
             }
             payload = sb.toString();
         } catch (Exception | LinkageError e) {
-            plugin.getLogger().warning("[告警] 告警状态序列化失败: " + e.getMessage());
+            plugin.getLogger().warning(logText("alert.log.state-serialize-failed", e.getMessage()));
             return;
         }
         try {
@@ -1138,6 +1748,9 @@ public class AlertService {
     private void writeStateFile(String payload) {
         try {
             File f = stateFile();
+            // 9D：首次以 v2 覆写前，保留一份旧格式原件（红队 HIGH-3：
+            // 旧版读到 v2 文件会按 v1 解析并把结构化字段永久覆盖掉）。
+            backupLegacyStateOnce(f);
             File tmp = new File(f.getParentFile(), "alerts.state.tmp");
             Files.write(tmp.toPath(), payload.getBytes(StandardCharsets.UTF_8));
             try {
@@ -1147,7 +1760,47 @@ public class AlertService {
                 Files.move(tmp.toPath(), f.toPath(), StandardCopyOption.REPLACE_EXISTING);
             }
         } catch (Exception | LinkageError e) {
-            plugin.getLogger().warning("[告警] 告警状态写入失败（重启后可能重复评估，不影响运行）: " + e.getMessage());
+            plugin.getLogger().warning(logText("alert.log.state-write-failed", e.getMessage()));
+        }
+    }
+
+    /** 9D：状态文件格式版本标记（出现在第 2 行注释里）。 */
+    private static final String STATE_HEADER_V2 = "perfscope-alert-state v=2";
+
+    /** 9D：v1 文件的列数上限（8 列；6-8 都算合法 v1）。 */
+    private static final int STATE_V1_MAX_COLUMNS = 8;
+
+    /** 9D：是否已经为本次进程做过"首写前备份 v1 文件"。 */
+    private boolean stateBackedUp = false;
+
+    /** 9D：解析出的格式版本（loadState 时确定；缺头 = v1）。 */
+    private int stateFormatVersion = 1;
+
+    /**
+     * 9D：首次以 v2 覆写前，把已存在的 v1 状态文件复制为 {@code alerts.state.v1.bak-<时间戳>}。
+     *
+     * <p>为什么必须备份：旧版本（≤1.2.1）读 v2 文件时只按列数猜测格式，会把
+     * {@code scope} 当 {@code display}、把 {@code threshold} 当 {@code module}，
+     * 然后立刻用旧格式覆写整个文件——结构化数据就此永久消失。有了这份备份，
+     * 用户降级后升级回来仍能还原。</p>
+     *
+     * <p>只在{@code stateFormatVersion < 2}（即本次是迁移）且旧文件存在时执行一次；
+     * 每进程只做一次，避免反复堆积备份。</p>
+     */
+    private void backupLegacyStateOnce(File f) {
+        if (stateBackedUp || stateFormatVersion >= 2 || !f.isFile()) {
+            return;
+        }
+        stateBackedUp = true;
+        String stamp = new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.ROOT)
+            .format(new java.util.Date());
+        File bak = new File(f.getParentFile(), "alerts.state.v1.bak-" + stamp);
+        try {
+            java.nio.file.Files.copy(f.toPath(), bak.toPath(),
+                StandardCopyOption.REPLACE_EXISTING);
+            plugin.getLogger().info(logText("alert.log.state-migrated", bak.getName()));
+        } catch (Exception | LinkageError e) {
+            plugin.getLogger().warning(logText("alert.log.state-backup-failed", e.getMessage()));
         }
     }
 
@@ -1157,10 +1810,35 @@ public class AlertService {
           .append(escape(r.alert.level())).append('|')
           .append(r.firstSeen).append('|')
           .append(r.lastSeen).append('|')
-          .append(escape(r.value)).append('|')
-          .append(escape(r.alert.display())).append('|')
+          // 9D v2：存**数值**而非渲染串。旧格式把中文 display 存盘，
+          // 切语言后历史记录会一直显示旧语言，而且是恢复文案的锚点来源。
+          .append(fmtNum(r.alert.value())).append('|')
+          .append(escape(r.alert.scope() == null ? "" : r.alert.scope())).append('|')
+          .append(fmtNum(r.alert.threshold())).append('|')
+          .append(fmtNum(r.alert.exitThreshold())).append('|')
           .append(escape(r.module == null ? "" : r.module)).append('|')
           .append(state).append('\n');
+    }
+
+    /** 9D：数值落盘格式——NaN 写成空串（避免 "-1" 与真实负值混淆）。 */
+    private static String fmtNum(double v) {
+        if (Double.isNaN(v) || !Double.isFinite(v)) {
+            return "";
+        }
+        // 用 ROOT：状态文件的字节表示不应随操作系统区域设置变化
+        return String.format(java.util.Locale.ROOT, "%.6f", v);
+    }
+
+    /** 9D：读回数值（空串/非法 → NaN）。 */
+    private static double parseNum(String s) {
+        if (s == null || s.isEmpty()) {
+            return Double.NaN;
+        }
+        try {
+            return Double.parseDouble(s.trim());
+        } catch (NumberFormatException e) {
+            return Double.NaN;
+        }
     }
 
     /** 9A-14：启动 rehydrate（每进程一次；reload 不重读，避免覆盖 reload 期间新的状态）。 */
@@ -1177,7 +1855,20 @@ public class AlertService {
         try {
             for (String line : Files.readAllLines(f.toPath(), StandardCharsets.UTF_8)) {
                 String s = line.trim();
-                if (s.isEmpty() || s.startsWith("#")) {
+                if (s.isEmpty()) {
+                    continue;
+                }
+                if (s.startsWith("#")) {
+                    // 9D：读版本头。没有头的文件按 v1 处理（兼容既有部署）。
+                    if (s.contains("perfscope-alert-state v=")) {
+                        int eq = s.indexOf("v=");
+                        try {
+                            stateFormatVersion = Integer.parseInt(s.substring(eq + 2).trim());
+                        } catch (NumberFormatException ignored) {
+                            // 头损坏：保守当作 v1（只读不毁）
+                            stateFormatVersion = 1;
+                        }
+                    }
                     continue;
                 }
                 String[] p = s.split("\\|", -1);
@@ -1188,19 +1879,48 @@ public class AlertService {
                 String level = unescape(p[1]);
                 long firstSeen = parseLong(p[2], 0L);
                 long lastSeen = parseLong(p[3], 0L);
-                String value = unescape(p[4]);
-                String display = unescape(p[5]);
-                String module = p.length >= 7 ? unescape(p[6]) : "";
-                String state = p.length >= 8 ? unescape(p[7]).trim() : "active";
                 if (key.isEmpty()) {
                     continue;
                 }
-                // 用持久化的 level/display 重建 Alert（message 用 display 兜底：restored 记录不参与推送文案）
-                String msg = display.isEmpty() ? key : display;
-                Alert alert = new Alert(key, level, msg, display.isEmpty() ? Alert.displayOf(msg) : display,
-                    module.isEmpty() ? metricOf(key) : module, lastSeen);
+                // 9D：两种格式共存读取。
+                //   v1（旧）：key|level|firstSeen|lastSeen|value(文本)|display|module|state   —— 8 列
+                //   v2（新）：key|level|firstSeen|lastSeen|value(数值)|scope|threshold|exit|module|state —— 10 列
+                // 判定依据是列数：v1 的 module 位于第 7 列且总是 ASCII 模块名；
+                // v2 一定 ≥10 列。用列数区分比嗅探内容更可靠。
+                boolean v2 = p.length >= 10;
+                double value;
+                String scope;
+                double threshold;
+                double exitThreshold;
+                String module;
+                String state;
+                if (v2) {
+                    value = parseNum(p[4]);
+                    scope = unescape(p[5]);
+                    threshold = parseNum(p[6]);
+                    exitThreshold = parseNum(p[7]);
+                    module = unescape(p[8]);
+                    state = unescape(p[9]).trim();
+                } else {
+                    // 旧格式：数值藏在一段中文文本里（"92.1%"），不再解析文案——
+                    // 置 NaN，于是该条告警的"数值比较"降级为 fail-open（不抑制重推）。
+                    value = Double.NaN;
+                    scope = Metric.scopeOf(key);
+                    threshold = Double.NaN;
+                    exitThreshold = Double.NaN;
+                    module = p.length >= 7 ? unescape(p[6]) : "";
+                    state = p.length >= 8 ? unescape(p[7]).trim() : "active";
+                }
+                if (state.isEmpty()) {
+                    state = "active";
+                }
+                // 9D：用结构化字段重建 Alert。不再有 display 列，文案一律按当前语言现渲染——
+                // 这正是"切换语言后历史告警也跟着变语言"的实现方式。
+                Alert alert = new Alert(key, level, Metric.ofKey(key),
+                    module.isEmpty() ? metricOf(key) : module, lastSeen,
+                    value, Double.NaN, scope, threshold, exitThreshold);
                 ActiveAlert rec = new ActiveAlert(key, alert, firstSeen <= 0 ? lastSeen : firstSeen, lastSeen, true);
-                rec.value = value;
+                rec.value = valueOf(alert);
                 rec.module = module.isEmpty() ? metricOf(key) : module;
                 if ("unknown".equals(state)) {
                     // 关服前就处于 unknown：原样恢复为 unknown，等模块回来再决定静默接管/静默解决
@@ -1213,11 +1933,10 @@ public class AlertService {
                 restored++;
             }
             if (restored > 0) {
-                plugin.getLogger().info("[告警] 已从 alerts.state 恢复 " + restored
-                    + " 条未恢复告警（重启后首次观测不重复推送）");
+                plugin.getLogger().info(logText("alert.log.state-restored", restored));
             }
         } catch (Exception | LinkageError e) {
-            plugin.getLogger().warning("[告警] 告警状态读取失败（按全新状态运行）: " + e.getMessage());
+            plugin.getLogger().warning(logText("alert.log.state-read-failed", e.getMessage()));
         }
     }
 
@@ -1328,7 +2047,7 @@ public class AlertService {
             Files.write(f.toPath(), line.getBytes(StandardCharsets.UTF_8),
                 StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         } catch (Exception | LinkageError e) {
-            plugin.getLogger().warning("[告警] 告警历史写入失败（告警本身不受影响）: " + e.getMessage());
+            plugin.getLogger().warning(logText("alert.log.events-write-failed", e.getMessage()));
         }
     }
 
@@ -1364,7 +2083,7 @@ public class AlertService {
                 }
             }
         } catch (Exception | LinkageError e) {
-            plugin.getLogger().warning("[告警] 告警历史读取失败（本次仅显示进程内事件）: " + e.getMessage());
+            plugin.getLogger().warning(logText("alert.log.events-read-failed", e.getMessage()));
         }
     }
 

@@ -41,9 +41,9 @@ PerfScope 自 v1.1 起专注 **Paper 系**服务端，深度依赖 Paper 原生 
 | 平台 | 验证强度 | 说明 |
 |------|----------|------|
 | **Paper 1.21.x** | **已实机验证** | 全部命令面 + 阈值告警 + 历史持久化 + 诊断引擎在真实服务端跑通 |
-| **Paper 1.20.4+** | **编译期兼容** | 以 `paper-api 1.20.4` 编译（`pom.xml`），**尚未在 1.20.x 实机启动验证**；1.20.4 以下无保证 |
+| **Paper 1.20.4** | **已实机验证**（v1.2.1 起） | 在 Paper 1.20.4 build 343 上实测：正常启用、`/perfscope` 全量诊断、`/status`、`/diagnose`（三态输出）、`/hotspot`、`/trend` 全部正常；MSPT 走 `getTickTimes()` 取得真实 avg/min/max。1.20.4 以下版本无保证 |
 | **Purpur / Leaf / Leaves** | **可加载验证** | 同一份 Paper 代码路径能启动、命令可响应；**分支私有优化（AI 限速、实体合并、区块缓存等）未覆盖**，可能影响实体/区块计数的绝对准确性 |
-| **Folia** | **可加载，指标受限** | 能启动并响应命令，但 **MSPT 不可用**（无全局 tick 时间），**TPS 为 global region 局部值**（不是全服吞吐）；实体/区块/热点在跨 region 场景下可能显示"不可用" |
+| **Folia** | **可加载，指标受限** | 能启动并响应命令（命令与配置层可用），但 **MSPT 不可用**（无全局 tick 时间），**TPS 为 global region 局部值**（不是全服吞吐）；**实体/区块/方块实体/热点四个模块已自动跳过**（跨 region 聚合不可靠，`/status` 显示"平台限制"） |
 | **纯 Spigot / CraftBukkit** | 不支持 | 依赖 Adventure 渲染，无法在无 Paper API 的服务端运行 |
 
 补充说明：
@@ -143,6 +143,7 @@ GC: 42 次 / 5.23 秒
 general:
   update_interval: 20       # 数据采集间隔 (tick)
   debug: false
+  language: en              # 界面语言: en（默认）/ zh；改后 /perfscope reload 生效
 
 tps:
   enabled: true
@@ -178,6 +179,7 @@ cpu:
   enabled: true
   process_warning_threshold: 80.0   # 进程 CPU 使用率告警阈值 (%)
   system_warning_threshold: 90.0    # 系统 CPU 负载告警阈值 (%)
+  hysteresis_margin: 5.0            # 迟滞带 (百分点)：跌到阈值-本值才解除告警，防止边界抖动刷屏
 
 report:
   auto_export: false
@@ -192,6 +194,8 @@ alerts:
   cooldown-seconds: 300     # 同一告警的冷却秒数 (0 = 无冷却，仍受采集周期节流)
   notify-recovery: true     # 恢复通知 (告警消失时推送恢复消息)
   debounce-cycles: 3        # 防抖：连续 N 个采集周期超标才首次推送 (1 = 首次出现即推)
+  flap-window-seconds: 180  # 抖动窗口：该窗口内的「恢复→再越界」视为同一次事故，不重复通知
+  repush-delta: 8           # 同级别重推的数值变化阈值：变化小于它时不重推（只作用于 cpu:system）
   daily-summary:
     enabled: false          # 每日摘要开关
     time: "08:00"           # 每日摘要时刻 (本地时区 HH:mm)
@@ -221,6 +225,23 @@ worlds:
 ```
 
 完整配置说明请参考 `plugins/PerfScope/config.yml`。
+
+### 界面语言（i18n）
+
+插件内置 **英文（默认）** 与 **简体中文** 两套完整文案，通过 `general.language` 切换：
+
+```yaml
+general:
+  language: en        # en = English（默认）, zh = 简体中文
+```
+
+- **切换方式**：改 `general.language` → `/perfscope reload`。也接受 `en_US`/`en-us`、`zh_CN`/`zh-TW` 等写法（按主语言归一）；其他值会在控制台告警并回退 `en`。
+- **整体切换，不会中英混排**：语言在每次 reload 时作为一份快照整体替换，任何一条输出都只可能来自同一份语言。
+- **自定义文案**：`plugins/PerfScope/messages.yml` 可覆盖任何一条内置文案。文件首行必须写 `language: en` 或 `language: zh`——**标签与 `general.language` 不一致时整份文件会被忽略**（避免中文覆盖文案混进英文界面），并在控制台与 reload 回执里明确告知。
+- **占位符**：文案里可写 `{0}`、`{1}`，由插件填入；参数不足时占位符原样保留，不会报错。
+- **升级说明**：旧版 `messages.yml`（没有 `language` 标签）若**未做自定义**会被自动备份并按当前语言重新生成；若**含自定义**则原文件保留不动、本次不生效（回执会提示），请手动补上 `language:` 标签并翻译。
+
+> 例外（不随语言变化）：插件的 `plugin.yml` 简介、切换前已导出的报告文件、已写入的历史告警记录（会按当前语言重新渲染）、切换瞬间已排队发出的 webhook 消息。
 
 > 注（阈值方向）：TPS 是低值指标——数值越低越差，因此要求 `warning_threshold ≥ critical_threshold`（与 MSPT/内存等"高值差"指标相反，别配反）；若倒置，`/perfscope reload` 会校验并回退为默认值，同时在控制台输出"配置校验：…设置倒置，已回退默认值"的告警，不会静默生效。
 >

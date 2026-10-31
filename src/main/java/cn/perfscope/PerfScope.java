@@ -74,8 +74,8 @@ public final class PerfScope extends JavaPlugin {
         instance = this;
 
         getLogger().info("========================================");
-        getLogger().info("  PerfScope v" + getDescription().getVersion() + " 启动中...");
-        getLogger().info("  服务端: " + ServerCompat.getServerName());
+        getLogger().info(Messages.get("core.banner.starting", getDescription().getVersion()));
+        getLogger().info(Messages.get("core.banner.server", ServerCompat.getServerName()));
         getLogger().info("========================================");
 
         // 初始化配置
@@ -83,6 +83,15 @@ public final class PerfScope extends JavaPlugin {
         configManager.load();
 
         // Wave 8D：消息层（messages.yml 覆盖 + 内置默认回退）
+        // 9D Phase 1：先登记"触碰各模块文案表"的动作，再 load——load 内部会逐一触发它们，
+        // 保证本模块与各子模块（命令/报告/告警/诊断）的键都进入默认表。
+        Messages.onFirstLoad(CoreMessages::init);
+        Messages.onFirstLoad(cn.perfscope.alert.AlertMessages::init);
+        Messages.onFirstLoad(cn.perfscope.diagnose.DiagnoseMessages::init);
+        Messages.onFirstLoad(cn.perfscope.command.CommandMessages::init);
+        // 报告层：本类仿 Colleague 方式自注册（ensureRegistered），但在 load 之前若有人
+        // 读 report.* 会拿到键名。显式登记一次，保证与其它模块时序一致。
+        Messages.onFirstLoad(cn.perfscope.report.ReportMessages::init);
         Messages.saveDefault(this);
         Messages.load(this);
 
@@ -129,7 +138,7 @@ public final class PerfScope extends JavaPlugin {
             pluginCommand.setExecutor(command);
             pluginCommand.setTabCompleter(command);
         } else {
-            getLogger().severe("指令 perfscope 注册失败：plugin.yml 缺少命令定义！");
+            getLogger().severe(Messages.get("core.log.command-register-failed"));
         }
 
         // 注册监听器（P0-12：monitor 退出清理）
@@ -141,25 +150,29 @@ public final class PerfScope extends JavaPlugin {
         }
 
         if (configManager.get().general_verboseStartup) {
-            getLogger().info("  [+] 配置系统已加载");
-            getLogger().info("  [+] 性能采集器已启动 (间隔: " +
-                configManager.get().general_updateInterval + " ticks)");
-            getLogger().info("  [+] 指令系统已注册 (/perfscope, /pscope, /perf)");
-            getLogger().info("  [+] 报告系统就绪 (格式: " +
-                configManager.get().report_format + ")");
+            // 9D：横幅全部走消息层。参数化而非拼接，让两种语言的词序都能自然。
+            getLogger().info(Messages.get("core.banner.config-loaded"));
+            getLogger().info(Messages.get("core.banner.collector-started",
+                configManager.get().general_updateInterval));
+            getLogger().info(Messages.get("core.banner.commands-registered"));
+            getLogger().info(Messages.get("core.banner.report-ready",
+                configManager.get().report_format));
             // MC-1 标注层 / 9A-1 条件输出：只有"实测可信"才宣称精确。
             // 能力位自 9A-1 起在 Folia 上恒 false（getTickTimes 方法存在但恒返回全零），
-            // 因此本行在 Folia 上不打 "Paper API"（避免假精确），改为如实说明；
-            // Paper 系保持原样（harness 断言 perfscope-surface.json 依赖此行原文）。
+            // 因此本行在 Folia 上不打 "Paper API"（避免假精确），改为如实说明。
+            // 两种语言都保留 "Paper API" 这一稳定检索锚点。
             if (ServerCompat.isMsptTrustworthy()) {
-                getLogger().info("  MSPT精确采集: Paper API");
+                getLogger().info(Messages.get("core.banner.mspt-exact"));
             } else {
                 // reason 理论上此时已由类初始化置好；null 兜底避免打出 "null"
                 String reason = ServerCompat.msptUnavailableReason();
-                getLogger().info("  MSPT精度: 不可用"
-                    + (reason == null || reason.isEmpty() ? "" : "（" + reason + "）"));
+                getLogger().info(reason == null || reason.isEmpty()
+                    ? Messages.get("core.banner.mspt-exact-unavailable-only")
+                    : Messages.get("core.banner.mspt-unavailable", reason));
             }
-            getLogger().info("  ActionBar: " + (ServerCompat.PAPER_ACTION_BAR_AVAILABLE ? "可用" : "不可用"));
+            getLogger().info(Messages.get("core.banner.actionbar",
+                Messages.get(ServerCompat.PAPER_ACTION_BAR_AVAILABLE
+                    ? "core.banner.available" : "core.banner.unavailable")));
         }
 
         // bStats 匿名统计（Wave 6D）：占位 ID 不发送任何数据；整段兜底，遥测失败绝不影响插件本体
@@ -213,7 +226,7 @@ public final class PerfScope extends JavaPlugin {
             try {
                 historyFileStore.shutdown();
             } catch (Exception | LinkageError e) {
-                getLogger().warning("[PerfScope] 历史写线程关闭失败: " + e.getMessage());
+                getLogger().warning(Messages.get("core.log.history-writer-shutdown-failed", e.getMessage()));
             }
         }
     }
@@ -223,7 +236,7 @@ public final class PerfScope extends JavaPlugin {
             try {
                 reportGenerator.shutdown();
             } catch (Exception | LinkageError e) {
-                getLogger().warning("[PerfScope] 报告执行器关闭失败: " + e.getMessage());
+                getLogger().warning(Messages.get("core.log.report-executor-shutdown-failed", e.getMessage()));
             }
         }
     }
@@ -235,8 +248,8 @@ public final class PerfScope extends JavaPlugin {
         try {
             metricsCollector.start();
         } catch (Exception | LinkageError e) {
-            getLogger().severe("[PerfScope] 采集任务启动失败: " + e.getMessage());
-            getLogger().log(java.util.logging.Level.SEVERE, "[PerfScope] 采集任务启动异常堆栈", e);
+            getLogger().severe(Messages.get("core.log.collector-start-failed", e.getMessage()));
+            getLogger().log(java.util.logging.Level.SEVERE, Messages.get("core.log.collector-start-stack"), e);
         }
         // 9A-20 #4：采集启动后立刻挂 supervisor（含 start 失败的分支——那正是最需要它的场景）
         startHealthWatch();
@@ -273,8 +286,7 @@ public final class PerfScope extends JavaPlugin {
                 HEALTH_WATCH_PERIOD_TICKS, HEALTH_WATCH_PERIOD_TICKS);
         } catch (Exception | LinkageError e) {
             healthWatchTask = null;
-            getLogger().warning("[PerfScope] 采集健康看门狗启动失败（不影响采集本体，/perfscope status 仍可用）: "
-                + e.getMessage());
+            getLogger().warning(Messages.get("core.log.watchdog-start-failed", e.getMessage()));
         }
     }
 
@@ -296,7 +308,7 @@ public final class PerfScope extends JavaPlugin {
             checkJvmTickHealth(mc);
         } catch (Exception | LinkageError e) {
             // 看门狗自身绝不因单轮异常而退出
-            getLogger().warning("[PerfScope] 采集健康检查异常（已跳过本轮）: " + e.getMessage());
+            getLogger().warning(Messages.get("core.log.watchdog-cycle-failed", e.getMessage()));
         }
     }
 
@@ -308,15 +320,15 @@ public final class PerfScope extends JavaPlugin {
         }
         lastStaleState = stale;
         if (stale) {
-            getLogger().severe("[PerfScope] 采集已停止更新 " + (mc.staleForMs() / 1000L)
-                + " 秒（最后成功采集 " + clockOf(mc.lastCollectAtMs()) + "，连续失败 "
-                + mc.consecutiveCollectFailures() + " 次）——"
-                + "/perfscope 显示的数据已过期，请执行 /perfscope reload，仍无效则重启服务器");
+            getLogger().severe(Messages.get("core.health.stale",
+                mc.staleForMs() / 1000L,
+                clockOf(mc.lastCollectAtMs()),
+                mc.consecutiveCollectFailures()));
         } else {
             long lastAt = mc.lastCollectAtMs();
-            getLogger().info("[PerfScope] 采集已恢复" + (lastAt > 0L
-                ? "（最后成功采集 " + clockOf(lastAt) + "）"
-                : "（已进入新任务的预热窗口，尚未产出首轮数据）"));
+            getLogger().info(lastAt > 0L
+                ? Messages.get("core.health.recovered", clockOf(lastAt))
+                : Messages.get("core.health.recovered-warmup"));
         }
     }
 
@@ -332,17 +344,16 @@ public final class PerfScope extends JavaPlugin {
         lastJvmStaleState = jvmStale;
         long jvmAt = mc.jvmSnapshotTimestamp();
         if (jvmStale) {
-            getLogger().warning("[PerfScope] JVM 异步采集已停止更新（内存/CPU/GC 停留在 "
-                + clockOf(jvmAt) + " 的数值）——请执行 /perfscope reload，仍无效则重启服务器");
+            getLogger().warning(Messages.get("core.health.jvm-stale", clockOf(jvmAt)));
         } else {
-            getLogger().info("[PerfScope] JVM 异步采集已恢复（最后更新 " + clockOf(jvmAt) + "）");
+            getLogger().info(Messages.get("core.health.jvm-recovered-at", clockOf(jvmAt)));
         }
     }
 
     /** 9A-20：epoch ms → "HH:mm:ss"（本地时区，与命令层"采集时间"同口径）；0 → "从未"。 */
     private static String clockOf(long epochMs) {
         if (epochMs <= 0L) {
-            return "从未";
+            return Messages.get("core.time.never");
         }
         return java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")
             .withZone(java.time.ZoneId.systemDefault())
@@ -366,11 +377,11 @@ public final class PerfScope extends JavaPlugin {
             autoReportTask = SchedulerAdapter.runAsyncTimer(
                 this, () -> reportGenerator.generateAndSave(), intervalTicks, intervalTicks);
         } catch (Exception | LinkageError e) {
-            getLogger().severe("[PerfScope] 自动报告任务启动失败: " + e.getMessage());
+            getLogger().severe(Messages.get("core.log.auto-report-failed", e.getMessage()));
             autoReportTask = null;
             return;
         }
-        getLogger().info("  [+] 自动报告已启用 (间隔: " + intervalMinutes + " 分钟)");
+        getLogger().info(Messages.get("core.banner.auto-report", intervalMinutes));
     }
 
     private void stopAutoReport() {
@@ -400,7 +411,7 @@ public final class PerfScope extends JavaPlugin {
             try {
                 alertService.shutdown();
             } catch (Exception | LinkageError e) {
-                getLogger().warning("[PerfScope] 告警状态写线程关闭失败: " + e.getMessage());
+                getLogger().warning(Messages.get("core.log.alert-writer-shutdown-failed", e.getMessage()));
             }
         }
     }
@@ -433,23 +444,23 @@ public final class PerfScope extends JavaPlugin {
      */
     private void startBstats() {
         if (!configManager.get().general_bstatsEnabled) {
-            getLogger().info("[PerfScope] bStats 匿名统计未启用 (general.bstats-enabled=false)");
+            getLogger().info(Messages.get("core.bstats.disabled-by-config"));
             return;
         }
         int bstatsPluginId = BSTATS_PLUGIN_ID; // 防常量折叠，见方法注释
         if (bstatsPluginId <= 0) {
-            getLogger().info("[PerfScope] bStats 匿名统计未启用 (pluginId 占位为 0，作者注册 bstats.org 后替换生效)");
+            getLogger().info(Messages.get("core.banner.bstats-disabled"));
             return;
         }
         try {
             new Metrics(this, bstatsPluginId);
-            getLogger().info("[PerfScope] bStats 匿名统计已启用 (pluginId=" + bstatsPluginId + ")");
+            getLogger().info(Messages.get("core.bstats.enabled", bstatsPluginId));
         } catch (Exception | LinkageError e) {
             // general.debug 门控堆栈（与 safeCollect / monitor 推送同款日志口径）
             if (configManager.get().general_debug) {
-                getLogger().log(java.util.logging.Level.WARNING, "[PerfScope] bStats 匿名统计初始化失败（已跳过，不影响插件本体）", e);
+                getLogger().log(java.util.logging.Level.WARNING, Messages.get("core.bstats.init-failed-detail", e.getMessage()), e);
             } else {
-                getLogger().warning("[PerfScope] bStats 匿名统计初始化失败（已跳过，不影响插件本体）: " + e.getMessage());
+                getLogger().warning(Messages.get("core.bstats.init-failed-detail", e.getMessage()));
             }
         }
     }
@@ -475,8 +486,8 @@ public final class PerfScope extends JavaPlugin {
             configManager.load();
         } catch (Exception | LinkageError e) {
             loadFailed = true;
-            getLogger().severe("[PerfScope] 配置加载失败，将按旧配置继续运行: " + e.getMessage());
-            getLogger().log(java.util.logging.Level.SEVERE, "[PerfScope] 配置加载异常堆栈", e);
+            getLogger().severe(Messages.get("core.log.config-load-failed", e.getMessage()));
+            getLogger().log(java.util.logging.Level.SEVERE, Messages.get("core.log.config-load-stack"), e);
         }
         Messages.load(this); // Wave 8D：消息层随 reload 刷新（缺失/损坏自动回退默认）
 
@@ -494,13 +505,13 @@ public final class PerfScope extends JavaPlugin {
         try {
             reportGenerator.cleanOldReports();
         } catch (Exception | LinkageError e) {
-            getLogger().warning("[PerfScope] 旧报告清理失败: " + e.getMessage());
+            getLogger().warning(Messages.get("core.log.report-cleanup-failed", e.getMessage()));
         }
         // 9A-18：保留天数可能被改过；清理已从写入路径剥离，reload 时显式跑一次
         try {
             historyFileStore.runRetention(configManager.get().history_persistRetentionDays);
         } catch (Exception | LinkageError e) {
-            getLogger().warning("[PerfScope] 历史文件清理失败: " + e.getMessage());
+            getLogger().warning(Messages.get("core.log.history-cleanup-failed", e.getMessage()));
         }
         if (loadFailed) {
             getLogger().warning(Messages.get("reload-failed-old-config")); // 9A-24：接线死键

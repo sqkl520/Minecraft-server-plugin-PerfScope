@@ -17,6 +17,8 @@
  */
 package cn.perfscope.compat;
 
+import cn.perfscope.util.Messages;
+
 import org.bukkit.Bukkit;
 
 import java.lang.reflect.Method;
@@ -60,7 +62,15 @@ public final class ServerCompat {
     public static volatile boolean PAPER_AVG_TICK_AVAILABLE;
 
     /** 9A-1：MSPT 不可用的原因（展示层直接引用，避免各处自造文案；可用时为 null）。 */
-    private static volatile String msptUnavailableReason;
+    /**
+     * 9D：MSPT 不可用的**消息键**（不是渲染后的文案）。
+     *
+     * <p>为什么存键而不是存串：本字段在**类静态初始化**时赋值，而那时 {@code Messages.load()}
+     * 可能还没跑（ServerCompat 会在 onEnable 早期被第一次触碰）。若当场渲染，拿到的会是
+     * 键名本身（{@code compat.mspt.folia-no-global-tick}），并且被永久缓存在这个字段里——
+     * 之后即使切了语言也不会更新。存键、读时渲染，两个问题一起消失。</p>
+     */
+    private static volatile String msptUnavailableReasonKey;
     /** 9A-1：运行期探针是否已定案（一旦降级即置位，之后调用直接返回 false，不重复采样）。 */
     private static volatile boolean runtimeProbed;
     /** 9A-1：连续"实测全零"次数——达到 {@link #ZERO_SAMPLE_CONFIRMATIONS} 才降级，防一次瞬态误判。 */
@@ -100,11 +110,11 @@ public final class ServerCompat {
         if (folia) {
             PAPER_MSPT_AVAILABLE = false;
             PAPER_AVG_TICK_AVAILABLE = false;
-            msptUnavailableReason = "Folia 无全局 tick 时间（getTickTimes 恒空）";
+            msptUnavailableReasonKey = "compat.mspt.folia-no-global-tick";
         } else {
             PAPER_MSPT_AVAILABLE = TICK_TIMES_METHOD_PRESENT;
             PAPER_AVG_TICK_AVAILABLE = AVG_TICK_METHOD_PRESENT;
-            msptUnavailableReason = null;
+            msptUnavailableReasonKey = null;
         }
         PAPER_TILE_ENTITY_COUNT_AVAILABLE = checkPaperTileEntityCount();
         // Paper 系原生自带 Adventure，sendActionBar(Component) 恒可用；
@@ -254,13 +264,13 @@ public final class ServerCompat {
             boolean wasAvailable = PAPER_MSPT_AVAILABLE || PAPER_AVG_TICK_AVAILABLE;
             PAPER_MSPT_AVAILABLE = false;
             PAPER_AVG_TICK_AVAILABLE = false;
-            msptUnavailableReason = "Folia 无全局 tick 时间（getTickTimes 恒空）";
+            msptUnavailableReasonKey = "compat.mspt.folia-no-global-tick";
             if (wasAvailable) {
                 // 只有"此前被误判为可用"时才需要解释——否则是噪音
-                log.info("[PerfScope] Folia 无全局 tick 时间（getTickTimes 恒空），MSPT 标记为不可用");
+                log.info("[PerfScope] " + Messages.get("compat.mspt.folia-no-global-tick") + ", MSPT marked unavailable");
             } else {
-                log.info("[PerfScope] Folia 无全局 tick 时间（getTickTimes 恒空），MSPT 不可用 "
-                    + "（TPS 为 global region 局部值）");
+                log.info("[PerfScope] " + Messages.get("compat.mspt.folia-no-global-tick")
+                    + Messages.get("compat.mspt.tps-scope-note"));
             }
             return;
         }
@@ -288,7 +298,7 @@ public final class ServerCompat {
             // 一级实测有非零样本 → 能力确认，定案（不再采样，避免抖动）
             runtimeProbed = true;
             zeroSampleStreak = 0;
-            msptUnavailableReason = null;
+            msptUnavailableReasonKey = null;
             return;
         }
         // 一级不可用（全零或方法缺失）。可能是"采样窗口尚未填充"的瞬态——
@@ -304,7 +314,7 @@ public final class ServerCompat {
             // 一级实测恒空、但二级有值：只降一级，仍算"精确"（getAverageTickTime 非估算 API）。
             // 二级能力位保持 true，msptUnavailableReason 依契约置 null（可用时无原因）。
             PAPER_MSPT_AVAILABLE = false;
-            msptUnavailableReason = null;
+            msptUnavailableReasonKey = null;
             if (wasPrimaryAvailable) {
                 log.info("[PerfScope] getTickTimes() 实测恒为空，MSPT 降级为 getAverageTickTime"
                     + "（仅平均值，无 min/max）");
@@ -315,7 +325,7 @@ public final class ServerCompat {
         boolean wasAvailable = PAPER_MSPT_AVAILABLE || PAPER_AVG_TICK_AVAILABLE;
         PAPER_MSPT_AVAILABLE = false;
         PAPER_AVG_TICK_AVAILABLE = false;
-        msptUnavailableReason = "getTickTimes/getAverageTickTime 实测恒为空";
+        msptUnavailableReasonKey = "compat.mspt.tick-times-empty";
         if (wasAvailable) {
             log.info("[PerfScope] getTickTimes() 与 getAverageTickTime() 连续 "
                 + ZERO_SAMPLE_CONFIRMATIONS + " 次实测全零/空数组，MSPT 标记为不可用"
@@ -436,7 +446,9 @@ public final class ServerCompat {
      * 例：{@code "Folia 无全局 tick 时间（getTickTimes 恒空）"}。
      */
     public static String msptUnavailableReason() {
-        return msptUnavailableReason;
+        String key = msptUnavailableReasonKey;
+        // 读时渲染：语言在运行期可能已被 /perfscope reload 切走
+        return key == null ? null : Messages.get(key);
     }
 
     /**

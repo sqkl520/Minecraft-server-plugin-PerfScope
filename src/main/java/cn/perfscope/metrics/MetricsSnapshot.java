@@ -139,6 +139,18 @@ public class MetricsSnapshot {
     // 展示层可优先判 disabledModules，渲染"已禁用（config xxx.enabled=false）"。
     public Set<String> disabledModules = ConcurrentHashMap.newKeySet();
 
+    // === 平台限制标记（9B-3） ===
+    // unavailable 中属于"当前服务端平台使该指标不可信/不可采"的子集。
+    // 背景：Folia 是 region 化多线程，World.getEntities()/getLoadedChunks()、Chunk.getEntities()/
+    // getTileEntities() 这些"全服聚合"API 的语义不保证跨 region 一致，且可能抛 IllegalStateException。
+    // 采集层在 Folia 上整块跳过 entities/chunks/tile_entities/hotspots，并按规格同时写入
+    // disabledModules（规格 9B-3 A 方案的字面要求）——但那样展示层会误渲染成
+    // "已禁用（config xxx.enabled=false）"，与事实相反（服主明明开着）。
+    // 本集合是 disabledModules 的**更精确子集**：命中本集合的模块应优先渲染
+    // "平台限制（Folia 跨 region，已自动跳过）"，而不是"配置禁用"。
+    // 契约：platformSkipped ⊆ disabledModules ⊆ unavailable；非 Folia 上恒为空（Paper 零行为变化）。
+    public Set<String> platformSkipped = ConcurrentHashMap.newKeySet();
+
     // === 时间戳 ===
     public long timestamp;
 

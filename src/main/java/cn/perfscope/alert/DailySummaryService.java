@@ -22,6 +22,8 @@ import cn.perfscope.compat.SchedulerAdapter;
 import cn.perfscope.config.ConfigManager;
 import cn.perfscope.history.HistorySample;
 import cn.perfscope.history.HistoryStore;
+import cn.perfscope.util.DurationFormat;
+import cn.perfscope.util.Messages;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
@@ -108,7 +110,7 @@ public class DailySummaryService {
         try {
             spec = AlertService.RawConfig.load(plugin).getString("alerts.daily-summary.timezone", "");
         } catch (Exception | LinkageError e) {
-            plugin.getLogger().warning("[告警] 时区配置读取失败（改用系统时区）: " + e.getMessage());
+            plugin.getLogger().warning(logText("daily.log.zone-read-failed", e.getMessage()));
         }
         if (spec == null) {
             spec = "";
@@ -121,9 +123,7 @@ public class DailySummaryService {
         try {
             cachedZone = ZoneId.of(spec);
         } catch (Exception e) {
-            plugin.getLogger().warning("[告警] alerts.daily-summary.timezone=\"" + spec
-                + "\" 无法识别（需 IANA 名如 Asia/Shanghai），已改用系统时区 "
-                + ZoneId.systemDefault());
+            plugin.getLogger().warning(logText("daily.log.zone-bad", spec, ZoneId.systemDefault()));
             cachedZone = ZoneId.systemDefault();
         }
     }
@@ -155,7 +155,7 @@ public class DailySummaryService {
             return LocalDate.parse(s);
         } catch (Exception e) {
             // 不阻断启动：状态文件坏掉最多导致今天多收一份摘要
-            plugin.getLogger().warning("[告警] 每日摘要已发状态读取失败（将视为今日未发）: " + e.getMessage());
+            plugin.getLogger().warning(logText("daily.log.sent-date-read-failed", e.getMessage()));
             return null;
         }
     }
@@ -165,13 +165,13 @@ public class DailySummaryService {
             java.io.File f = sentDateFile();
             java.io.File dir = f.getParentFile();
             if (dir != null && !dir.isDirectory() && !dir.mkdirs()) {
-                plugin.getLogger().warning("[告警] 每日摘要状态目录创建失败，本次去重仅在内存生效");
+                plugin.getLogger().warning(logText("daily.log.state-dir-failed"));
                 return;
             }
             java.nio.file.Files.write(f.toPath(),
                 (date.toString() + System.lineSeparator()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         } catch (Exception e) {
-            plugin.getLogger().warning("[告警] 每日摘要已发状态写入失败（重启后可能重复推送）: " + e.getMessage());
+            plugin.getLogger().warning(logText("daily.log.sent-date-write-failed", e.getMessage()));
         }
     }
 
@@ -183,21 +183,23 @@ public class DailySummaryService {
         stop();
         ConfigManager.ConfigData cfg = configManager.get();
         if (cfg == null || !cfg.alerts_dailySummaryEnabled) {
-            plugin.getLogger().info("[告警] 每日摘要未启用（alerts.daily-summary.enabled=false）");
+            plugin.getLogger().info(logText("daily.log.disabled"));
             return;
         }
         refreshZone(); // 9A-14：reload 后时区变更即时生效
         // 每分钟检查（1200 ticks = 60 秒）；首查延迟 5 秒（等采集器与历史环就绪）
         timerHandle = SchedulerAdapter.runGlobalTimer(plugin, this::checkCycle, 100L, 1200L);
-        plugin.getLogger().info("[告警] 每日摘要已启用 (时刻: " + cfg.alerts_dailySummaryTime
-            + ", 时区: " + zone() + distinctZoneNote() + ")");
+        plugin.getLogger().info(logText("daily.log.enabled",
+            cfg.alerts_dailySummaryTime, zone(), distinctZoneNote()));
     }
 
     /** 9A-14：时区与系统时区不一致时，启动日志里点名，省得服主对不上表。 */
     private String distinctZoneNote() {
         ZoneId z = zone();
         ZoneId sys = ZoneId.systemDefault();
-        return z.equals(sys) ? "（系统时区）" : "（系统时区为 " + sys + "，二者不同）";
+        return z.equals(sys)
+            ? Messages.get("daily.zone.system")
+            : Messages.get("daily.zone.differs", sys);
     }
 
     /** 停止：取消定时器（幂等）。不清 lastSentDate——reload 后同日不重发。 */
@@ -233,7 +235,7 @@ public class DailySummaryService {
             }
         } catch (Exception | LinkageError e) {
             // 与告警服务同款：任务边界吞异常记日志，绝不让调度器因异常中断后续轮次
-            plugin.getLogger().warning("[告警] 每日摘要本轮检查失败: " + e.getMessage());
+            plugin.getLogger().warning(logText("daily.log.cycle-failed", e.getMessage()));
         }
     }
 
@@ -271,14 +273,12 @@ public class DailySummaryService {
         String title;
         String coverageText;
         if (thinCoverage) {
-            title = "[PerfScope] 每日摘要 | 自 "
-                + java.time.Instant.ofEpochMilli(bootMs > 0 ? bootMs : now).atZone(zone).toLocalTime().format(HH_MM)
-                + " 重启以来（数据不足）";
-            coverageText = "覆盖 " + coverageMinutes + " 分钟，不足 "
-                + (sinceBootMs > 0 ? formatDuration(sinceBootMs) : "24 小时")
-                + " 的 50%——趋势结论仅供参考，重启前的数据已丢失";
+            title = Messages.get("daily.title.thin",
+                java.time.Instant.ofEpochMilli(bootMs > 0 ? bootMs : now).atZone(zone).toLocalTime().format(HH_MM));
+            coverageText = Messages.get("daily.note.thin", coverageMinutes,
+                sinceBootMs > 0 ? DurationFormat.duration(sinceBootMs) : Messages.get("daily.note.24h"));
         } else {
-            title = "[PerfScope] 每日摘要 | 覆盖: 近 " + coverageMinutes + " 分钟";
+            title = Messages.get("daily.title.full", coverageMinutes);
             coverageText = null;
         }
 
@@ -286,12 +286,19 @@ public class DailySummaryService {
         double p95 = percentile(window, 0.95);
         int overThresholdMinutes = overThresholdMinutes(window, cfg);
 
+        String lowestText = lowest == null
+            ? "--"
+            : Messages.get("daily.metrics.lowest-at", formatTps(lowest.tps1m()),
+                formatTime(lowest.timestamp(), zone));
+
         String line1 = title;
-        String line2 = "最低 TPS: " + (lowest == null ? "--" : formatTps(lowest.tps1m()) + "（" + formatTime(lowest.timestamp(), zone) + "）")
-            + " | p95 TPS: " + (p95 < 0 ? "--" : formatTps(p95))
-            + " | 低于 " + (cfg == null ? 18.0 : cfg.tps_warningThreshold) + " 的累计时长: " + overThresholdMinutes + " 分钟"
-            + " | 峰值实体: " + (peakEntities == null ? "--" : String.valueOf(peakEntities.totalEntities()))
-            + " | 峰值内存: " + (peakHeap == null ? "--" : peakHeap.heapUsagePercent() + "%");
+        String line2 = Messages.get("daily.metrics",
+            lowestText,
+            p95 < 0 ? "--" : formatTps(p95),
+            cfg == null ? 18.0 : cfg.tps_warningThreshold,
+            overThresholdMinutes,
+            peakEntities == null ? "--" : String.valueOf(peakEntities.totalEntities()),
+            peakHeap == null ? "--" : peakHeap.heapUsagePercent() + "%");
 
         int pushedToday = alertService == null ? 0 : alertService.getPushedTodayCount();
         int active = alertService == null ? 0 : alertService.getActiveCount();
@@ -299,21 +306,26 @@ public class DailySummaryService {
         int ok = alertService == null ? 0 : alertService.getPushOkTodayCount();
         int fail = alertService == null ? 0 : alertService.getPushFailTodayCount();
         int queued = alertService == null ? 0 : alertService.getWebhookQueuedTodayCount();
-        String line3 = "告警统计: 推送 " + pushedToday + " 条（成功 " + ok + " / 失败 " + fail + "）"
-            + (queued > 0 ? "，webhook 已排队 " + queued + " 条（异步出口，送达结果不可观测）" : "")
-            + " / 当前活跃 " + active + " 条"
-            + (suspended > 0 ? " / unknown（模块不可用）" + suspended + " 条" : "");
+        StringBuilder alertStats = new StringBuilder(Messages.get("daily.alerts.base", pushedToday, ok, fail));
+        if (queued > 0) {
+            alertStats.append(Messages.get("daily.alerts.webhook", queued));
+        }
+        alertStats.append(Messages.get("daily.alerts.active", active));
+        if (suspended > 0) {
+            alertStats.append(Messages.get("daily.alerts.suspended", suspended));
+        }
+        String line3 = alertStats.toString();
 
         List<String> body = new ArrayList<>();
         body.add(line1);
         body.add(line2);
         body.add(line3);
         if (coverageText != null) {
-            body.add("数据说明: " + coverageText);
+            body.add(Messages.get("daily.note.label", coverageText));
         }
 
-        // 控制台（=== 每日摘要 === 为 harness 锚点）
-        plugin.getLogger().info("=== 每日摘要 ===");
+        // 控制台（=== 每日摘要 === 为 harness 锚点；两种语言各自保留自己的三连等号结构）
+        plugin.getLogger().info(Messages.get("daily.console-header"));
         for (String line : body) {
             plugin.getLogger().info(line);
         }
@@ -416,25 +428,15 @@ public class DailySummaryService {
         return String.format(Locale.ROOT, "%.2f", tps);
     }
 
+    /** 日志：内容 + 统一的 {@code [告警] } / {@code [Alert] } 前缀（与其他告警层日志同口径）。 */
+    private static String logText(String key, Object... args) {
+        return Messages.get("alert.log.prefix") + Messages.get(key, args);
+    }
+
     private static String formatTime(long epochMs, ZoneId zone) {
         return java.time.Instant.ofEpochMilli(epochMs)
             .atZone(zone)
             .toLocalTime()
             .format(HH_MM);
-    }
-
-    /** 9A-14：时长文案（与 AlertService 同口径，独立实现避免跨类耦合）。 */
-    private static String formatDuration(long ms) {
-        long s = Math.max(0, ms / 1000L);
-        if (s < 60) {
-            return s + " 秒";
-        }
-        long m = s / 60;
-        if (m < 60) {
-            return m + " 分钟";
-        }
-        long h = m / 60;
-        long rm = m % 60;
-        return rm == 0 ? h + " 小时" : h + " 小时 " + rm + " 分";
     }
 }

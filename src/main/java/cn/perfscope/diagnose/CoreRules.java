@@ -21,6 +21,8 @@ import cn.perfscope.config.ConfigManager;
 import cn.perfscope.history.HistorySample;
 import cn.perfscope.history.HistoryStore;
 import cn.perfscope.metrics.MetricsSnapshot;
+import cn.perfscope.util.DurationFormat;
+import cn.perfscope.util.Messages;
 
 import java.util.List;
 
@@ -71,7 +73,7 @@ public final class CoreRules {
     private static String coverageProblem(List<HistorySample> window, long windowMs, int minSamples,
                                           String what) {
         if (window.size() < minSamples) {
-            return what + "样本不足（" + window.size() + "/" + minSamples + " 条）";
+            return Messages.get("diag.skip.coverage-samples", what, window.size(), minSamples);
         }
         long span = window.get(window.size() - 1).timestamp() - window.get(0).timestamp();
         // 用窗口内样本的实际中位间隔推"这批样本本应跨越多长时间"
@@ -87,12 +89,9 @@ public final class CoreRules {
         long absoluteFloor = (long) (windowMs * 0.10);
         long needed = Math.max(expected, absoluteFloor);
         if (span < needed) {
-            long haveSec = span / 1000L;
-            long needSec = needed / 1000L;
-            String have = haveSec >= 60 ? (haveSec / 60) + " 分 " + (haveSec % 60) + " 秒" : haveSec + " 秒";
-            String need = needSec >= 60 ? (needSec / 60) + " 分" : needSec + " 秒";
-            return what + "覆盖不足（已覆盖 " + have + " / 需要 " + need
-                + "；请让服务器继续运行一段时间再诊断）";
+            // 时长文案统一走 DurationFormat：单位词随语言切换，数值不受本地化影响
+            return Messages.get("diag.skip.coverage-span", what,
+                DurationFormat.duration(span), DurationFormat.duration(needed));
         }
         return null;
     }
@@ -119,22 +118,22 @@ public final class CoreRules {
         @Override
         public Evaluation evaluate(MetricsSnapshot snap, HistoryStore history, ConfigManager.ConfigData cfg) {
             if (snap.unavailable.contains(MetricsSnapshot.MODULE_MEMORY)) {
-                return Evaluation.skip(id(), "内存模块不可用（采集失败或被配置禁用）");
+                return Evaluation.skip(id(), Messages.get("diag.skip.memory-unavailable"));
             }
             if (snap.heapUsagePercent < cfg.memory_heapWarningThreshold) {
-                return Evaluation.skip(id(), "当前堆占用 " + snap.heapUsagePercent + "% 低于告警线 "
-                    + cfg.memory_heapWarningThreshold + "%（低水位不判定泄漏）");
+                return Evaluation.skip(id(), Messages.get("diag.skip.heap-below-threshold",
+                    snap.heapUsagePercent, cfg.memory_heapWarningThreshold));
             }
             long windowMs = WINDOW_MINUTES * 60_000L;
             List<HistorySample> window = history.since(System.currentTimeMillis() - windowMs);
-            String cov = coverageProblem(window, windowMs, MIN_SAMPLES, "历史");
+            String cov = coverageProblem(window, windowMs, MIN_SAMPLES, Messages.get("diag.label.history"));
             if (cov != null) {
                 return Evaluation.skip(id(), cov);
             }
             HistorySample first = window.get(0);
             HistorySample last = window.get(window.size() - 1);
             if (first.heapUsagePercent() <= 0 || last.heapUsagePercent() <= 0) {
-                return Evaluation.skip(id(), "窗口内含内存未采集样本（heapUsagePercent=0），无法比较趋势");
+                return Evaluation.skip(id(), Messages.get("diag.skip.heap-sample-missing"));
             }
             int growth = last.heapUsagePercent() - first.heapUsagePercent();
             if (growth < MIN_HEAP_GROWTH_PERCENT) {
@@ -145,7 +144,7 @@ public final class CoreRules {
             for (int i = window.size() / 2; i < window.size(); i++) {
                 int h = window.get(i).heapUsagePercent();
                 if (h <= 0) {
-                    return Evaluation.skip(id(), "窗口后半段含内存未采集样本（heapUsagePercent=0），无法判定是否回落");
+                    return Evaluation.skip(id(), Messages.get("diag.skip.heap-sample-missing-later-half"));
                 }
                 minInLaterHalf = Math.min(minInLaterHalf, h);
             }
@@ -153,14 +152,10 @@ public final class CoreRules {
                 return Evaluation.clean(); // 回落过 → 更像正常波动
             }
             long minutes = Math.max(1, (last.timestamp() - first.timestamp()) / 60_000L);
-            return Evaluation.of(new Diagnosis(id(), "堆占用持续抬升（疑似内存泄漏）",
-                "近 " + minutes + " 分钟内堆占用从 " + first.heapUsagePercent() + "% 升至 "
-                    + last.heapUsagePercent() + "%（+" + growth + " 个百分点），且该时段最低点仍为 "
-                    + minInLaterHalf + "%（未回落到起点）——当前 " + snap.heapUsagePercent + "%",
-                "先留证再处置：① /perfscope report 存档当前状态；② 用 /spark heapdump 取堆快照"
-                    + "（Paper 内置 spark 已含此命令，产物可由 spark 上传分析，无需装 JVM 工具链）；"
-                    + "③ 重启前确认 -Xmx 是否偏小（当前 " + (snap.heapMax / 1024 / 1024) + "MB）；"
-                    + "④ 常见持有者：地图/缓存插件、异常堆积的 Item 实体（可先 /perfscope hotspot 看掉落物）",
+            return Evaluation.of(new Diagnosis(id(), Messages.get("diag.DIAG-MEM-LEAK.title"),
+                Messages.get("diag.DIAG-MEM-LEAK.detail", minutes, first.heapUsagePercent(),
+                    last.heapUsagePercent(), growth, minInLaterHalf, snap.heapUsagePercent),
+                Messages.get("diag.DIAG-MEM-LEAK.suggestion", snap.heapMax / 1024 / 1024),
                 true));
         }
     }
@@ -189,24 +184,21 @@ public final class CoreRules {
         @Override
         public Evaluation evaluate(MetricsSnapshot snap, HistoryStore history, ConfigManager.ConfigData cfg) {
             if (snap.unavailable.contains(MetricsSnapshot.MODULE_HOTSPOTS)) {
-                return Evaluation.skip(id(), "热点区块模块不可用（采集失败或被配置禁用 hotspots.enabled=false）");
+                return Evaluation.skip(id(), Messages.get("diag.skip.hotspots-unavailable"));
             }
             if (snap.topEntityChunks.isEmpty()) {
-                return Evaluation.skip(id(), "尚无热点采样（首轮全遍历未完成，通常 30 秒内就绪）");
+                return Evaluation.skip(id(), Messages.get("diag.skip.hotspots-not-ready"));
             }
             var top = snap.topEntityChunks.get(0);
             int warnThreshold = Math.max(ABSOLUTE_FLOOR, cfg.hotspots_chunkWarningThreshold);
             if (top.entityCount() < warnThreshold) {
                 return Evaluation.clean(); // 最高的那个区块都没到线
             }
-            return Evaluation.of(new Diagnosis(id(), "热点区块（单区块实体堆积）",
-                top.world() + " 区块 [" + top.chunkX() + "," + top.chunkZ() + "]（方块 " + top.blockX() + ",~,"
-                    + top.blockZ() + "）堆积 " + top.entityCount() + " 个实体（单区块阈值 " + warnThreshold
-                    + "），主导 " + top.dominantType() + "（" + top.dominantPercent() + "%）",
-                "① 先去坐标看：/minecraft:tp " + top.blockX() + " ~ " + top.blockZ()
-                    + "；② 若是掉落物堆积（主导 ITEM），可用 /perfscope hotspot 复制坐标后人工清理，"
-                    + "或临时限制掉落物存活时间；③ 若是刷怪装置失控，检查世界 spawn-limits / 生物上限；"
-                    + "④ 处理前建议先 /perfscope report 留档",
+            return Evaluation.of(new Diagnosis(id(), Messages.get("diag.DIAG-ENT-HOTSPOT.title"),
+                Messages.get("diag.DIAG-ENT-HOTSPOT.detail", top.world(), top.chunkX(), top.chunkZ(),
+                    top.blockX(), top.blockZ(), top.entityCount(), warnThreshold,
+                    top.dominantType(), top.dominantPercent()),
+                Messages.get("diag.DIAG-ENT-HOTSPOT.suggestion", top.blockX(), top.blockZ()),
                 top.entityCount() >= CHUNK_CRITICAL));
         }
     }
@@ -231,11 +223,11 @@ public final class CoreRules {
         @Override
         public Evaluation evaluate(MetricsSnapshot snap, HistoryStore history, ConfigManager.ConfigData cfg) {
             if (snap.unavailable.contains(MetricsSnapshot.MODULE_TPS)) {
-                return Evaluation.skip(id(), "TPS 模块不可用（采集失败或被配置禁用）");
+                return Evaluation.skip(id(), Messages.get("diag.skip.tps-unavailable"));
             }
             long windowMs = WINDOW_MINUTES * 60_000L;
             List<HistorySample> window = history.since(System.currentTimeMillis() - windowMs);
-            String cov = coverageProblem(window, windowMs, MIN_SAMPLES, "历史");
+            String cov = coverageProblem(window, windowMs, MIN_SAMPLES, Messages.get("diag.label.history"));
             if (cov != null) {
                 return Evaluation.skip(id(), cov);
             }
@@ -253,7 +245,7 @@ public final class CoreRules {
                 }
             }
             if (count < MIN_SAMPLES || lowest == null) {
-                return Evaluation.skip(id(), "历史有效 TPS 样本不足（" + count + "/" + MIN_SAMPLES + " 条）");
+                return Evaluation.skip(id(), Messages.get("diag.skip.tps-samples", count, MIN_SAMPLES));
             }
             double avg1m = sum / count;
             // "持续"主判据：15 分钟滚动均值（服务端自带，天然平滑），窗口均值只作辅助
@@ -263,15 +255,14 @@ public final class CoreRules {
                 return Evaluation.clean();
             }
             long minutes = Math.max(1, (window.get(window.size() - 1).timestamp() - window.get(0).timestamp()) / 60_000L);
-            return Evaluation.of(new Diagnosis(id(), "TPS 持续低位",
-                "15 分钟均值 " + String.format(java.util.Locale.ROOT, "%.2f", snap.tps15m)
-                    + "、近 " + minutes + " 分钟窗口均值 " + String.format(java.util.Locale.ROOT, "%.2f", avg1m)
-                    + "（告警线 <" + cfg.tps_warningThreshold + "），窗口最低 "
-                    + String.format(java.util.Locale.ROOT, "%.2f", lowest.tps1m())
-                    + "——非偶发抖动，属持续负载",
-                "按顺序排查：① /perfscope hotspot 查实体堆积坐标；② /perfscope memory 看内存压力；"
-                    + "③ 对照 /perfscope trend 1 的跌落起点与玩家上线/定时任务时间；"
-                    + "④ 仍定位不了用 /spark profiler start --only-ticks-over 200",
+            // 数值格式保持原样（Locale.ROOT + %.2f）：翻译只换语序，不碰数字口径
+            return Evaluation.of(new Diagnosis(id(), Messages.get("diag.DIAG-TPS-PERSIST.title"),
+                Messages.get("diag.DIAG-TPS-PERSIST.detail",
+                    String.format(java.util.Locale.ROOT, "%.2f", snap.tps15m), minutes,
+                    String.format(java.util.Locale.ROOT, "%.2f", avg1m),
+                    cfg.tps_warningThreshold,
+                    String.format(java.util.Locale.ROOT, "%.2f", lowest.tps1m())),
+                Messages.get("diag.DIAG-TPS-PERSIST.suggestion"),
                 snap.tps15m > 0 && snap.tps15m < cfg.tps_criticalThreshold));
         }
     }
@@ -298,10 +289,10 @@ public final class CoreRules {
         @Override
         public Evaluation evaluate(MetricsSnapshot snap, HistoryStore history, ConfigManager.ConfigData cfg) {
             if (snap.unavailable.contains(MetricsSnapshot.MODULE_PLAYERS)) {
-                return Evaluation.skip(id(), "玩家模块不可用（采集失败或被配置禁用）");
+                return Evaluation.skip(id(), Messages.get("diag.skip.players-unavailable"));
             }
             if (snap.maxPlayers <= 0) {
-                return Evaluation.skip(id(), "max-players 未就绪（当前 " + snap.maxPlayers + "）");
+                return Evaluation.skip(id(), Messages.get("diag.skip.max-players-not-ready", snap.maxPlayers));
             }
             // 9A-6：统一走 MetricsSnapshot 的算法（此前这里是 Math.round、命令层 int 截断、采集层 double 截断）
             int currentPercent = snap.playerPercent();
@@ -310,7 +301,7 @@ public final class CoreRules {
             }
             long windowMs = WINDOW_MINUTES * 60_000L;
             List<HistorySample> window = history.since(System.currentTimeMillis() - windowMs);
-            String cov = coverageProblem(window, windowMs, MIN_SAMPLES, "历史");
+            String cov = coverageProblem(window, windowMs, MIN_SAMPLES, Messages.get("diag.label.history"));
             if (cov != null) {
                 return Evaluation.skip(id(), cov);
             }
@@ -323,14 +314,10 @@ public final class CoreRules {
                 return Evaluation.clean(); // 窗口内有明显低谷：属活动峰值而非容量问题
             }
             long minutes = Math.max(1, (window.get(window.size() - 1).timestamp() - window.get(0).timestamp()) / 60_000L);
-            return Evaluation.of(new Diagnosis(id(), "在线人数持续接近上限",
-                "当前 " + snap.playerCount + "/" + snap.maxPlayers + "（" + currentPercent + "%），"
-                    + "近 " + minutes + " 分钟内最低也有 " + minPercent + "%——新玩家可能进不来",
-                "先分辨是容量问题还是挂机：① /perfscope players 看在线时长分布；"
-                    + "② 若是挂机占位，装 AFK 踢出插件释放槽位；"
-                    + "③ 若是真实满员，扩容 server.properties → max-players"
-                    + "（每 +10 人约 +0.5–1G 堆，扩容后建议复查 /perfscope memory）；"
-                    + "④ 活动峰段可在群公告排队规则",
+            return Evaluation.of(new Diagnosis(id(), Messages.get("diag.DIAG-PLAYER-CAP.title"),
+                Messages.get("diag.DIAG-PLAYER-CAP.detail", snap.playerCount, snap.maxPlayers,
+                    currentPercent, minutes, minPercent),
+                Messages.get("diag.DIAG-PLAYER-CAP.suggestion"),
                 currentPercent >= cfg.players_criticalThreshold));
         }
     }
@@ -357,27 +344,22 @@ public final class CoreRules {
         @Override
         public Evaluation evaluate(MetricsSnapshot snap, HistoryStore history, ConfigManager.ConfigData cfg) {
             if (snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT)) {
-                return Evaluation.skip(id(), "MSPT 模块不可用（采集失败或被配置禁用）");
+                return Evaluation.skip(id(), Messages.get("diag.skip.mspt-unavailable"));
             }
             if (snap.msptAvg <= 0) {
-                return Evaluation.skip(id(), "MSPT 平均值未知（当前采集路径未取到数据）");
+                return Evaluation.skip(id(), Messages.get("diag.skip.mspt-avg-unknown"));
             }
             if (snap.msptMax <= 0) {
                 // 9A-0 后：min/max = -1 表示该采集路径只有平均值，不提供极值信息
-                return Evaluation.skip(id(), "当前 MSPT 采集路径仅提供平均值、无 tick 极值（Paper 1.20.4+ 的 "
-                    + "getTickTimes() 可用时才有尖刺信息）");
+                return Evaluation.skip(id(), Messages.get("diag.skip.mspt-no-extremes"));
             }
             if (snap.msptMax < MIN_SPIKE_MS || snap.msptMax < snap.msptAvg * RATIO) {
                 return Evaluation.clean();
             }
-            return Evaluation.of(new Diagnosis(id(), "MSPT 尖刺（偶发单 tick 冻结）",
-                "最大 " + snap.msptMax + "ms ≈ 平均 " + snap.msptAvg + "ms 的 "
-                    + String.format(java.util.Locale.ROOT, "%.1f", snap.msptMax / snap.msptAvg)
-                    + " 倍——均值掩盖了偶发卡顿，玩家体感为「顿一下」",
-                "尖刺多来自区块保存或 GC：① 降区块保存压力——改 config/paper-world-defaults.yml 的 "
-                    + "chunks.max-auto-save-chunks-per-tick（默认 24，可降到 8）；"
-                    + "② 自动保存周期在 bukkit.yml 的 ticks-per.autosave（默认 6000 tick）；"
-                    + "③ 定点抓取：/spark profiler start --only-ticks-over 200（采样结束后 /spark profiler stop 看报告）",
+            return Evaluation.of(new Diagnosis(id(), Messages.get("diag.DIAG-MSPT-SPIKE.title"),
+                Messages.get("diag.DIAG-MSPT-SPIKE.detail", snap.msptMax, snap.msptAvg,
+                    String.format(java.util.Locale.ROOT, "%.1f", snap.msptMax / snap.msptAvg)),
+                Messages.get("diag.DIAG-MSPT-SPIKE.suggestion"),
                 snap.msptMax > 1000.0));
         }
     }

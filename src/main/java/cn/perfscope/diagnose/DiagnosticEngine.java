@@ -21,6 +21,7 @@ import cn.perfscope.PerfScope;
 import cn.perfscope.config.ConfigManager;
 import cn.perfscope.history.HistoryStore;
 import cn.perfscope.metrics.MetricsSnapshot;
+import cn.perfscope.util.Messages;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -108,7 +109,7 @@ public class DiagnosticEngine {
                 Evaluation ev = rule.evaluate(snap, historyStore, cfg);
                 if (ev == null) {
                     // 契约违约：旧式规则返回 null。不当作"干净"，如实记为未评估。
-                    skipped.add(new Diagnosis.Skip(rule.id(), "规则未给出结论（实现未遵循三态契约）"));
+                    skipped.add(new Diagnosis.Skip(rule.id(), Messages.get("diag.skip.no-conclusion")));
                 } else if (ev.hit() != null) {
                     hits.add(ev.hit());
                 } else if (ev.skip() != null) {
@@ -116,13 +117,14 @@ public class DiagnosticEngine {
                 }
                 // ev.isClean() → 评估过且干净，两者都不计入
             } catch (Exception | LinkageError e) {
-                skipped.add(new Diagnosis.Skip(rule.id(), "规则评估异常：" + e.getClass().getSimpleName()));
+                skipped.add(new Diagnosis.Skip(rule.id(),
+                    Messages.get("diag.skip.rule-exception", e.getClass().getSimpleName())));
                 if (cfg.general_debug) {
                     plugin.getLogger().log(java.util.logging.Level.WARNING,
-                        "[诊断] 规则 " + rule.id() + " 评估失败（已跳过）", e);
+                        Messages.get("diag.log.rule-failed", rule.id()), e);
                 } else {
-                    plugin.getLogger().warning("[诊断] 规则 " + rule.id()
-                        + " 评估失败（已跳过）: " + e.getMessage());
+                    plugin.getLogger().warning(Messages.get("diag.log.rule-failed-detail",
+                        rule.id(), e.getMessage()));
                 }
             }
         }

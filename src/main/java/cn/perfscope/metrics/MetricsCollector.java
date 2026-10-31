@@ -199,6 +199,39 @@ public class MetricsCollector {
     private boolean teCacheDisabled = false;
     private boolean hotspotsCacheDisabled = false;
 
+    // ==================== 9B-3：Folia 跨 region 聚合跳过标记 ====================
+    // refresh*Cache 走"平台限制"分支时置 true，apply*Cache 据此把模块同时写入
+    // disabledModules（按规格要求）+ platformSkipped（供展示层区分"服主关掉"与"平台做不到"）。
+    // 与 entitiesCacheDisabled 分开存放是刻意的：两者可能同时成立（服主关了 entities + Folia 跳过 chunks），
+    // 展示层据此分别渲染"已禁用（config …=false）"与"平台限制（Folia 跨 region）"。
+    private boolean entitiesCachePlatformSkipped = false;
+    private boolean chunksCachePlatformSkipped = false;
+    private boolean teCachePlatformSkipped = false;
+    private boolean hotspotsCachePlatformSkipped = false;
+
+    /** 9B-3：平台跳过提示只打一次（同一次插件生命周期内；不随 reload 重置，避免刷日志）。 */
+    private volatile boolean foliaSkipLogged = false;
+
+    /**
+     * 9B-3：需要"全服聚合"遍历的模块集合。
+     *
+     * <p>这些模块的数据源在 Folia 上都是<b>跨 region</b> 的：
+     * {@code World.getLoadedChunks()} / {@code World.getEntities()} / {@code Chunk.getEntities()} /
+     * {@code Chunk.getTileEntities()} / {@code World.getTileEntityCount()}。Folia 把这些状态的归属
+     * 拆到各 region 线程，Bukkit 层没有任何"一次性拿全服快照"的线程安全 API——在 GlobalRegion
+     * 线程上调用，轻则只看到 global region 自己的那部分（数字偏小、且在任意两秒之间跳变），
+     * 重则直接 {@code IllegalStateException}（跨 region 访问）。所以本插件在 Folia 上不猜，
+     * 直接跳过并如实标注。</p>
+     *
+     * <p>TPS / MSPT / 玩家数 / JVM 指标<b>不在此集合内</b>：它们的口径问题分别由 9A-2（TPS 标注
+     * {@code (global region)}）与 9A-1（MSPT 直接不可用）处理，不属于本项。</p>
+     */
+    private static final Set<String> FOLIA_CROSS_REGION_MODULES = Set.of(
+        MetricsSnapshot.MODULE_ENTITIES,
+        MetricsSnapshot.MODULE_CHUNKS,
+        MetricsSnapshot.MODULE_TILE_ENTITIES,
+        MetricsSnapshot.MODULE_HOTSPOTS);
+
     public MetricsCollector(PerfScope plugin, HistoryStore historyStore) {
         this.plugin = plugin;
         this.configManager = plugin.getConfigManager();
@@ -264,6 +297,12 @@ public class MetricsCollector {
         chunksCacheReady = false;
         teCacheReady = false;
         hotspotsCacheReady = false;
+        // 9B-3：平台跳过标记随缓存一起重置（配置可能在 reload 后变了，但"这是不是 Folia"不会变，
+        // 所以 foliaSkipLogged 刻意不重置——见 logFoliaAggregationSkipOnce 注释）
+        entitiesCachePlatformSkipped = false;
+        chunksCachePlatformSkipped = false;
+        teCachePlatformSkipped = false;
+        hotspotsCachePlatformSkipped = false;
         jvmCache = null;
         startedAtMs = System.currentTimeMillis(); // W5-D #1：reload 后重新进入预热窗口（与 jvmCache 置空同步）
         // 9A-20 #4：reload/重启是人工介入的恢复动作，清空"死亡"判定让新任务有干净的判定基线
@@ -444,6 +483,8 @@ public class MetricsCollector {
         snap.unavailable = Collections.unmodifiableSet(new LinkedHashSet<>(snap.unavailable));
         snap.warmingUp = Collections.unmodifiableSet(new LinkedHashSet<>(snap.warmingUp));
         snap.disabledModules = Collections.unmodifiableSet(new LinkedHashSet<>(snap.disabledModules));
+        // 9B-3：平台限制标记同样固化（保持 platformSkipped ⊆ disabledModules ⊆ unavailable 契约）
+        snap.platformSkipped = Collections.unmodifiableSet(new LinkedHashSet<>(snap.platformSkipped));
     }
 
     /** 9A-10 #3：保留插入序的不可变 Map 副本（元素均为不可变类型，浅拷贝即足够）。 */
@@ -627,6 +668,45 @@ public class MetricsCollector {
 
     // ==================== P0-1 重模块分级降频（节流缓存，仅主线程） ====================
 
+    /**
+     * 9B-3：当前服务端上"全服聚合遍历"整体是否不可信（等价于 {@link ServerCompat#isFolia()}）。
+     *
+     * <p>本方法只为让调用点语义自解释而存在：判定<b>唯一来源</b>是 {@link ServerCompat}，
+     * 本类不重复任何 Folia 反射探测（规格 9B-3 第 3 条）。</p>
+     */
+    private boolean foliaAggregationUnsafe() {
+        return ServerCompat.isFolia();
+    }
+
+    /**
+     * 9B-3：该模块在 Folia 上是否属于"跨 region 聚合"从而必须跳过。
+     *
+     * <p>两个条件同时成立才为 true：服务端是 Folia（{@link #foliaAggregationUnsafe()}）
+     * <b>且</b>该模块的数据源需要跨区域遍历（{@link #FOLIA_CROSS_REGION_MODULES}）。
+     * 非 Folia 上恒为 false——因此 Paper 路径不会经过任何新增分支（零行为变化）。</p>
+     */
+    private boolean foliaAggregationUnsafe(String module) {
+        return foliaAggregationUnsafe() && FOLIA_CROSS_REGION_MODULES.contains(module);
+    }
+
+    /**
+     * 9B-3：Folia 平台跳过提示——<b>每个插件生命周期只打一条 INFO</b>。
+     *
+     * <p>由 {@code foliaSkipLogged} 保证幂等；该标记<b>刻意不随 start()/reload 重置</b>：
+     * 服主反复 /perfscope reload 时不需要重复读同一段解释（reload 不会改变"这是 Folia"的事实）。</p>
+     */
+    private void logFoliaAggregationSkipOnce() {
+        if (foliaSkipLogged) {
+            return;
+        }
+        foliaSkipLogged = true;
+        plugin.getLogger().info("[PerfScope] Folia 下跨 region 聚合不可靠（World.getEntities()/"
+            + "getLoadedChunks()、Chunk.getEntities()/getTileEntities() 均按 region 归属，"
+            + "可能只返回部分 region 或抛 IllegalStateException），"
+            + "entities / chunks / tile_entities / hotspots 已自动跳过并标记为平台限制；"
+            + "需要这些数据请用 AlmanacAPI 等 region 感知方案（说明见 docs/07-guides/COMPAT-MATRIX-VERIFICATION.md）");
+    }
+
     /** 实体采集（分级降频）：每 ENTITY_SAMPLE_EVERY 个周期遍历一次世界实体并刷新缓存，其余周期复用缓存值填入快照。 */
     private void collectEntitiesThrottled(MetricsSnapshot snap, ConfigManager.ConfigData cfg, long taskGen) {
         if (!entitiesCacheReady || tickCounter % ENTITY_SAMPLE_EVERY == 0) {
@@ -655,10 +735,19 @@ public class MetricsCollector {
         List<String> warningList = List.of();
         List<String> criticalList = List.of();
         boolean disabled = false;
+        boolean platformSkipped = false;   // 9B-3
 
         if (!cfg.entities_enabled) {   // 配置禁用：与 runOrMark 语义一致，标记不可用
             unavailable = true;
             disabled = true;   // 9A-20 #3：同时记入 disabledModules（区分"服主关掉"与"采集坏了"）
+        } else if (foliaAggregationUnsafe(MetricsSnapshot.MODULE_ENTITIES)) {
+            // 9B-3：Folia 上 world.getEntities() 是跨 region 聚合——不保证跨 region 一致，
+            // 也可能抛 IllegalStateException。保守策略（A）：整块跳过，如实标注平台限制，
+            // 绝不用"只覆盖 part 个 region 的数字"冒充全服实体数（那是假数据，比没有更糟）。
+            logFoliaAggregationSkipOnce();
+            unavailable = true;
+            disabled = true;          // 规格 9B-3 第 2 条 A：同时标 disabledModules
+            platformSkipped = true;   // 更精确的原因标记（disabledModules 的子集），供展示层区分
         } else {
             // 临时快照承接本次采集，隔离出本模块产生的告警，便于缓存后在复用周期一并还原
             MetricsSnapshot tmp = new MetricsSnapshot();
@@ -682,6 +771,7 @@ public class MetricsCollector {
         entitiesCacheReady = ready;
         entitiesCacheUnavailable = unavailable;
         entitiesCacheDisabled = disabled;
+        entitiesCachePlatformSkipped = platformSkipped;
         cachedTotalEntities = total;
         cachedEntitiesByType = byType;
         cachedEntitiesByWorld = byWorld;
@@ -695,6 +785,9 @@ public class MetricsCollector {
             snap.unavailable.add(MetricsSnapshot.MODULE_ENTITIES);
             if (entitiesCacheDisabled) {
                 snap.disabledModules.add(MetricsSnapshot.MODULE_ENTITIES);
+            }
+            if (entitiesCachePlatformSkipped) {
+                snap.platformSkipped.add(MetricsSnapshot.MODULE_ENTITIES);   // 9B-3
             }
             return;
         }
@@ -730,10 +823,18 @@ public class MetricsCollector {
         List<String> warningList = List.of();
         List<String> criticalList = List.of();
         boolean disabled = false;
+        boolean platformSkipped = false;   // 9B-3
 
         if (!cfg.chunks_enabled) {
             unavailable = true;
             disabled = true;   // 9A-20 #3
+        } else if (foliaAggregationUnsafe(MetricsSnapshot.MODULE_CHUNKS)) {
+            // 9B-3：Folia 上 getLoadedChunks() 只反映调用线程可见的 region 集合（且 chunk.isForceLoaded()
+            // 的语义在各 region 间也不保证一致）→ 整块跳过，不用局部数字冒充全服区块数。
+            logFoliaAggregationSkipOnce();
+            unavailable = true;
+            disabled = true;
+            platformSkipped = true;
         } else {
             MetricsSnapshot tmp = new MetricsSnapshot();
             safeCollect(MetricsSnapshot.MODULE_CHUNKS, tmp, () -> collectChunks(tmp, cfg));
@@ -755,6 +856,7 @@ public class MetricsCollector {
         chunksCacheReady = true;
         chunksCacheUnavailable = unavailable;
         chunksCacheDisabled = disabled;
+        chunksCachePlatformSkipped = platformSkipped;
         cachedTotalLoadedChunks = totalLoaded;
         cachedTotalForceLoadedChunks = totalForceLoaded;
         cachedChunksByWorld = byWorld;
@@ -769,6 +871,9 @@ public class MetricsCollector {
             snap.unavailable.add(MetricsSnapshot.MODULE_CHUNKS);
             if (chunksCacheDisabled) {
                 snap.disabledModules.add(MetricsSnapshot.MODULE_CHUNKS);
+            }
+            if (chunksCachePlatformSkipped) {
+                snap.platformSkipped.add(MetricsSnapshot.MODULE_CHUNKS);   // 9B-3
             }
             return;
         }
@@ -798,10 +903,19 @@ public class MetricsCollector {
         int count = 0;
         Map<String, Integer> byWorld = Map.of();
         boolean disabled = false;
+        boolean platformSkipped = false;   // 9B-3
 
         if (!cfg.tileEntities_enabled) {
             unavailable = true;
             disabled = true;   // 9A-20 #3
+        } else if (foliaAggregationUnsafe(MetricsSnapshot.MODULE_TILE_ENTITIES)) {
+            // 9B-3：Paper 路径用 World.getTileEntityCount()（内部要与各 region 的区块状态对账）；
+            // Bukkit 降级路径用 Chunk.getTileEntities()——两者在 Folia 上都是跨 region 聚合，
+            // 故 Tier-1 与 Tier-2 一并跳过，不做"降级后就安全了"的假设。
+            logFoliaAggregationSkipOnce();
+            unavailable = true;
+            disabled = true;
+            platformSkipped = true;
         } else {
             MetricsSnapshot tmp = new MetricsSnapshot();
             safeCollect(MetricsSnapshot.MODULE_TILE_ENTITIES, tmp, () -> collectTileEntities(tmp));
@@ -818,6 +932,7 @@ public class MetricsCollector {
         teCacheReady = true;
         teCacheUnavailable = unavailable;
         teCacheDisabled = disabled;
+        teCachePlatformSkipped = platformSkipped;
         cachedTileEntityCount = count;
         cachedTileEntitiesByWorld = byWorld;
     }
@@ -827,6 +942,9 @@ public class MetricsCollector {
             snap.unavailable.add(MetricsSnapshot.MODULE_TILE_ENTITIES);
             if (teCacheDisabled) {
                 snap.disabledModules.add(MetricsSnapshot.MODULE_TILE_ENTITIES);
+            }
+            if (teCachePlatformSkipped) {
+                snap.platformSkipped.add(MetricsSnapshot.MODULE_TILE_ENTITIES);   // 9B-3
             }
             return;
         }
@@ -857,10 +975,19 @@ public class MetricsCollector {
         boolean unavailable;
         List<ChunkHotspot> hotspots = List.of();
         boolean disabled = false;
+        boolean platformSkipped = false;   // 9B-3
 
         if (!cfg.hotspots_enabled) {
             unavailable = true;
             disabled = true;   // 9A-20 #3
+        } else if (foliaAggregationUnsafe(MetricsSnapshot.MODULE_HOTSPOTS)) {
+            // 9B-3：热点扫描是"全部世界 × 全部已加载区块 × chunk.getEntities()"的最重活，
+            // 在 Folia 上既不可信（区块实体按 region 归属）又最容易踩跨 region IllegalStateException
+            // （每 30 周期一次全遍历，踩中概率最高）→ 整块跳过。
+            logFoliaAggregationSkipOnce();
+            unavailable = true;
+            disabled = true;
+            platformSkipped = true;
         } else {
             MetricsSnapshot tmp = new MetricsSnapshot();
             safeCollect(MetricsSnapshot.MODULE_HOTSPOTS, tmp, () -> collectHotspots(tmp));
@@ -876,6 +1003,7 @@ public class MetricsCollector {
         hotspotsCacheReady = true;
         hotspotsCacheUnavailable = unavailable;
         hotspotsCacheDisabled = disabled;
+        hotspotsCachePlatformSkipped = platformSkipped;
         cachedHotspots = hotspots;
     }
 
@@ -884,6 +1012,9 @@ public class MetricsCollector {
             snap.unavailable.add(MetricsSnapshot.MODULE_HOTSPOTS);
             if (hotspotsCacheDisabled) {
                 snap.disabledModules.add(MetricsSnapshot.MODULE_HOTSPOTS);
+            }
+            if (hotspotsCachePlatformSkipped) {
+                snap.platformSkipped.add(MetricsSnapshot.MODULE_HOTSPOTS);   // 9B-3
             }
             return;
         }
@@ -909,8 +1040,22 @@ public class MetricsCollector {
                 }
                 // 主导类型：单遍统计（实体数通常很小，HashMap 开销可忽略）
                 Map<String, Integer> byType = new HashMap<>();
+                int nullSkipped = 0;
                 for (Entity entity : entities) {
+                    // 9B-4：chunk.getEntities() 在实体被并发移除时可能返回含 null 元素的数组
+                    // （Paper 的 ChunkEntitySlices 非完全快照）。直接 getName() 会 NPE，
+                    // 一次 NPE 会让本次热点采集整块失败（safeCollect 标 unavailable）。
+                    if (entity == null) {
+                        nullSkipped++;
+                        continue;
+                    }
                     byType.merge(entity.getType().name(), 1, Integer::sum);
+                }
+                ConfigManager.ConfigData hsCfg = configManager.get();
+                if (nullSkipped > 0 && hsCfg != null && hsCfg.general_debug) {
+                    // 计数口径说明：实体数仍是数组长度（含已被移除的槽位），此处只保证不崩
+                    plugin.getLogger().fine("[PerfScope] 热点扫描跳过 " + nullSkipped
+                        + " 个 null 实体槽位（world=" + worldName + "）");
                 }
                 String dominant = "UNKNOWN";
                 int dominantCount = 0;
@@ -1003,6 +1148,10 @@ public class MetricsCollector {
         // 9A-20 #3：JVM 缓存里的"配置禁用"标记一并透传（否则 enabled=false 的 memory/cpu 在 status 里
         // 会与"采集失败"混为一谈——jvm 缓存非空时原本只透传 unavailable）
         snap.disabledModules.addAll(jvm.disabledModules);
+        // 9B-3：平台限制标记同样透传。JVM 侧模块（memory/cpu/gc/server）不属于跨 region 聚合，
+        // 故这里实际恒为空——保留这一行是为了让"三个集合的透传规则"在同一处完整可见，
+        // 将来若有 JVM 侧模块被平台限制，不必再回头找漏掉的一处。
+        snap.platformSkipped.addAll(jvm.platformSkipped);
         snap.alerts.addAll(jvm.alerts);
         snap.activeWarnings.addAll(jvm.activeWarnings);
         snap.activeCriticals.addAll(jvm.activeCriticals);
@@ -1172,11 +1321,11 @@ public class MetricsCollector {
         snap.tps15m = round2(tps[2]);
 
         if (snap.tps1m < cfg.tps_criticalThreshold) {
-            addAlert(snap, Alert.of("tps:global", Alert.LEVEL_CRITICAL,
-                "TPS 严重偏低: " + snap.tps1m, MetricsSnapshot.MODULE_TPS, snap.timestamp));
+            addAlert(snap, Alert.measuredWithThresholds("tps:global", Alert.LEVEL_CRITICAL, snap.tps1m,
+                    cfg.tps_criticalThreshold, cfg.tps_criticalThreshold, MetricsSnapshot.MODULE_TPS, snap.timestamp));
         } else if (snap.tps1m < cfg.tps_warningThreshold) {
-            addAlert(snap, Alert.of("tps:global", Alert.LEVEL_WARNING,
-                "TPS 偏低: " + snap.tps1m, MetricsSnapshot.MODULE_TPS, snap.timestamp));
+            addAlert(snap, Alert.measuredWithThresholds("tps:global", Alert.LEVEL_WARNING, snap.tps1m,
+                    cfg.tps_warningThreshold, cfg.tps_warningThreshold, MetricsSnapshot.MODULE_TPS, snap.timestamp));
         }
     }
 
@@ -1212,11 +1361,11 @@ public class MetricsCollector {
         }
 
         if (snap.msptAvg > 0 && snap.msptAvg > cfg.mspt_criticalThreshold) {
-            addAlert(snap, Alert.of("mspt:global", Alert.LEVEL_CRITICAL,
-                "MSPT 严重偏高: " + snap.msptAvg + "ms", MetricsSnapshot.MODULE_MSPT, snap.timestamp));
+            addAlert(snap, Alert.measuredWithThresholds("mspt:global", Alert.LEVEL_CRITICAL, snap.msptAvg,
+                    cfg.mspt_criticalThreshold, cfg.mspt_criticalThreshold, MetricsSnapshot.MODULE_MSPT, snap.timestamp));
         } else if (snap.msptAvg > 0 && snap.msptAvg > cfg.mspt_warningThreshold) {
-            addAlert(snap, Alert.of("mspt:global", Alert.LEVEL_WARNING,
-                "MSPT 偏高: " + snap.msptAvg + "ms", MetricsSnapshot.MODULE_MSPT, snap.timestamp));
+            addAlert(snap, Alert.measuredWithThresholds("mspt:global", Alert.LEVEL_WARNING, snap.msptAvg,
+                    cfg.mspt_warningThreshold, cfg.mspt_warningThreshold, MetricsSnapshot.MODULE_MSPT, snap.timestamp));
         }
     }
 
@@ -1311,13 +1460,11 @@ public class MetricsCollector {
         // 9A-6：统一走 MetricsSnapshot.playerPercent()（唯一算法入口）
         int pct = snap.playerPercent();
         if (pct >= cfg.players_criticalThreshold) {
-            addAlert(snap, Alert.of("players:global", Alert.LEVEL_CRITICAL,
-                "玩家数接近上限: " + snap.playerCount + "/" + snap.maxPlayers,
-                MetricsSnapshot.MODULE_PLAYERS, snap.timestamp));
+            addAlert(snap, Alert.measuredWithReference("players:global", Alert.LEVEL_CRITICAL,
+                snap.playerCount, snap.maxPlayers, MetricsSnapshot.MODULE_PLAYERS, snap.timestamp));
         } else if (pct >= cfg.players_warningThreshold) {
-            addAlert(snap, Alert.of("players:global", Alert.LEVEL_WARNING,
-                "玩家数较多: " + snap.playerCount + "/" + snap.maxPlayers,
-                MetricsSnapshot.MODULE_PLAYERS, snap.timestamp));
+            addAlert(snap, Alert.measuredWithReference("players:global", Alert.LEVEL_WARNING,
+                snap.playerCount, snap.maxPlayers, MetricsSnapshot.MODULE_PLAYERS, snap.timestamp));
         }
     }
 
@@ -1331,6 +1478,10 @@ public class MetricsCollector {
         for (World world : Bukkit.getWorlds()) {
             int worldCount = 0;
             for (Entity entity : world.getEntities()) {
+                // 9B-4：与 chunk.getEntities() 同源风险——实体被并发移除时集合可能含 null
+                if (entity == null) {
+                    continue;
+                }
                 total++;
                 worldCount++;
                 String typeName = entity.getType().name();
@@ -1357,23 +1508,21 @@ public class MetricsCollector {
                 continue; // 无覆盖的世界不单独判定，由下方总数判定覆盖
             }
             if (entry.getValue() > ws.entities_totalCriticalThreshold) {
-                addAlert(snap, Alert.of("entities:world:" + entry.getKey(), Alert.LEVEL_CRITICAL,
-                    "世界 " + entry.getKey() + " 实体数严重超标: " + entry.getValue(),
+                addAlert(snap, Alert.measured("entities:world:" + entry.getKey(), Alert.LEVEL_CRITICAL, entry.getValue(),
                     MetricsSnapshot.MODULE_ENTITIES, snap.timestamp));
             } else if (entry.getValue() > ws.entities_totalWarningThreshold) {
-                addAlert(snap, Alert.of("entities:world:" + entry.getKey(), Alert.LEVEL_WARNING,
-                    "世界 " + entry.getKey() + " 实体数较多: " + entry.getValue(),
+                addAlert(snap, Alert.measured("entities:world:" + entry.getKey(), Alert.LEVEL_WARNING, entry.getValue(),
                     MetricsSnapshot.MODULE_ENTITIES, snap.timestamp));
             }
         }
 
         // 全服总数判定（与命令层 /ps entities 的总数口径一致）
         if (snap.totalEntities > cfg.entities_totalCriticalThreshold) {
-            addAlert(snap, Alert.of("entities:global", Alert.LEVEL_CRITICAL,
-                "实体总数严重超标: " + snap.totalEntities, MetricsSnapshot.MODULE_ENTITIES, snap.timestamp));
+            addAlert(snap, Alert.measured("entities:global", Alert.LEVEL_CRITICAL, snap.totalEntities,
+                MetricsSnapshot.MODULE_ENTITIES, snap.timestamp));
         } else if (snap.totalEntities > cfg.entities_totalWarningThreshold) {
-            addAlert(snap, Alert.of("entities:global", Alert.LEVEL_WARNING,
-                "实体总数较多: " + snap.totalEntities, MetricsSnapshot.MODULE_ENTITIES, snap.timestamp));
+            addAlert(snap, Alert.measured("entities:global", Alert.LEVEL_WARNING, snap.totalEntities,
+                MetricsSnapshot.MODULE_ENTITIES, snap.timestamp));
         }
     }
 
@@ -1408,12 +1557,10 @@ public class MetricsCollector {
 
         for (Map.Entry<String, Integer> entry : byWorld.entrySet()) {
             if (entry.getValue() > cfg.chunks_loadedCriticalThreshold) {
-                addAlert(snap, Alert.of("chunks:world:" + entry.getKey(), Alert.LEVEL_CRITICAL,
-                    "世界 " + entry.getKey() + " 加载区块数严重超标: " + entry.getValue(),
+                addAlert(snap, Alert.measured("chunks:world:" + entry.getKey(), Alert.LEVEL_CRITICAL, entry.getValue(),
                     MetricsSnapshot.MODULE_CHUNKS, snap.timestamp));
             } else if (entry.getValue() > cfg.chunks_loadedWarningThreshold) {
-                addAlert(snap, Alert.of("chunks:world:" + entry.getKey(), Alert.LEVEL_WARNING,
-                    "世界 " + entry.getKey() + " 加载区块数较多: " + entry.getValue(),
+                addAlert(snap, Alert.measured("chunks:world:" + entry.getKey(), Alert.LEVEL_WARNING, entry.getValue(),
                     MetricsSnapshot.MODULE_CHUNKS, snap.timestamp));
             }
         }
@@ -1434,15 +1581,35 @@ public class MetricsCollector {
         snap.nonHeapMax = memoryMXBean.getNonHeapMemoryUsage().getMax();
 
         if (snap.heapUsagePercent >= cfg.memory_heapCriticalThreshold) {
-            addAlert(snap, Alert.of("memory:global", Alert.LEVEL_CRITICAL,
-                "堆内存使用率严重偏高: " + snap.heapUsagePercent + "%", MetricsSnapshot.MODULE_MEMORY, snap.timestamp));
+            addAlert(snap, Alert.measuredWithThresholds("memory:global", Alert.LEVEL_CRITICAL, snap.heapUsagePercent,
+                    cfg.memory_heapCriticalThreshold, cfg.memory_heapCriticalThreshold, MetricsSnapshot.MODULE_MEMORY, snap.timestamp));
         } else if (snap.heapUsagePercent >= cfg.memory_heapWarningThreshold) {
-            addAlert(snap, Alert.of("memory:global", Alert.LEVEL_WARNING,
-                "堆内存使用率偏高: " + snap.heapUsagePercent + "%", MetricsSnapshot.MODULE_MEMORY, snap.timestamp));
+            addAlert(snap, Alert.measuredWithThresholds("memory:global", Alert.LEVEL_WARNING, snap.heapUsagePercent,
+                    cfg.memory_heapWarningThreshold, cfg.memory_heapWarningThreshold, MetricsSnapshot.MODULE_MEMORY, snap.timestamp));
         }
     }
 
     // ==================== CPU ====================
+
+    /**
+     * CPU 告警闩锁（迟滞）：解决"阈值边界锯齿"。
+     *
+     * <p><b>问题</b>：此前进入与退出共用同一个阈值（{@code load > threshold} 才告警，不满足即视为干净）。
+     * CPU 读数的采样方差远大于阈值间距——本机受控实验实测 σ≈12 个百分点，
+     * 样本在 55%–100% 之间摆动。于是"越界 3 个周期 → 未越界 3 个周期"每隔几秒重复一次，
+     * 每条都走「恢复 → 复燃」，而复燃按设计绕过冷却，形成 6 小时 1333 条消息的锯齿刷屏。</p>
+     *
+     * <p><b>做法</b>：告警进入用 {@code threshold}，退出用 {@code threshold - cpu.hysteresis-margin}。
+     * 落在中间带内的样本既不进入也不退出，保持上一次判定——这条带吸收了采样噪声，锯齿从源头消失。</p>
+     *
+     * <p><b>为什么不放在 AlertService</b>：该类约定"采集层判定阈值、决策层只管投递"（见其类注释），
+     * 且 7 类指标的阈值方向不同（TPS 是低值告警），在决策层复制阈值比较会同时破坏分层和低值语义。</p>
+     *
+     * <p>线程：仅在 {@code collectJvmAsync} 的异步线程内读写，故用普通字段即可；
+     * {@code volatile} 仅为 reload 重建后新任务读到一致的初值。</p>
+     */
+    private volatile boolean systemCpuLatched = false;
+    private volatile boolean processCpuLatched = false;
 
     private void collectCPU(MetricsSnapshot snap, ConfigManager.ConfigData cfg) {
         OperatingSystemMXBean osMXBean = ManagementFactory.getOperatingSystemMXBean();
@@ -1450,25 +1617,73 @@ public class MetricsCollector {
 
         if (osMXBean instanceof com.sun.management.OperatingSystemMXBean sunOsMXBean) {
             // P0-13：JDK 无数据时返回 -1（原样 *100 会得到误导性的 -100），转为 -1 哨兵
+            //
+            // ⚠️ 本机实测（Zulu 21 / Windows 10 / E5-2660 v2）：
+            //   getCpuLoad()        p50 = 0.006ms   ← 极便宜（命中缓存时几乎为零）
+            //   getProcessCpuLoad() p50 = 90.5ms    p90 = 139.8ms   max = 259.6ms
+            // 后者慢 4 个数量级且**阻塞**（进程 CPU 仅 0.4%，不是计算开销）——
+            // Windows 实现每次都枚举全部进程名。若在主线程调用，单次就吃 1.8 个 tick。
+            // 本方法固定在 collectJvmAsync 的**异步线程**执行（见 start() 的 runAsyncTimer），
+            // 故不影响 tick；但需知道它会让 JVM 采集节拍抖动（见下方 getCpuLoad 的窗口说明）。
             double p = sunOsMXBean.getProcessCpuLoad() * 100;
+            // 窗口语义（OpenJDK 源码确认）：Windows 实现有 MIN_UPDATE_INTERVAL = 500ms 的硬门限，
+            // 快于 500ms 的调用只返回缓存；且读数是"两次真实采集之间的增量占比"，
+            // 即**窗口长度 ≈ 调用间隔**。所以 JVM 异步线程若因上文 90ms 调用而迟到，
+            // 下一帧覆盖的窗口就变长——这是 CPU 采样方差大的一个物理来源，
+            // 也是迟滞（hysteresis）必须在采集层做的原因之一。
             double s = sunOsMXBean.getSystemCpuLoad() * 100;
             snap.processCpuLoad = p < 0 ? -1 : round4(p);
             snap.systemCpuLoad = s < 0 ? -1 : round4(s);
 
-            // 哨兵 -1 不参与告警判定
-            if (snap.processCpuLoad > 0 && snap.processCpuLoad > cfg.cpu_processWarningThreshold) {
-                addAlert(snap, Alert.of("cpu:process", Alert.LEVEL_WARNING,
-                    "进程CPU使用率偏高: " + snap.processCpuLoad + "%", MetricsSnapshot.MODULE_CPU, snap.timestamp));
+            // 迟滞带宽度：配置项非法（负值/超过 50）时回退默认 5 个百分点。
+            // 上限 50 的理由：margin 过大等于把退出线压到阈值一半以下，
+            // 一次真实的持续过载会永远退不出去（告警挂着不退，比误报更糟）。
+            double margin = cfg.cpu_hysteresisMargin;
+            if (!(margin >= 0) || margin > 50) {
+                margin = ConfigManager.CPU_HYSTERESIS_DEFAULT;
             }
-            if (snap.systemCpuLoad > 0 && snap.systemCpuLoad > cfg.cpu_systemWarningThreshold) {
-                addAlert(snap, Alert.of("cpu:system", Alert.LEVEL_WARNING,
-                    "系统CPU负载偏高: " + snap.systemCpuLoad + "%", MetricsSnapshot.MODULE_CPU, snap.timestamp));
+
+            // 哨兵 -1 不参与告警判定（保持原有语义）；闩锁只在有效读数上推进
+            if (snap.processCpuLoad > 0) {
+                processCpuLatched = latched(
+                    processCpuLatched, snap.processCpuLoad,
+                    cfg.cpu_processWarningThreshold, margin);
+                if (processCpuLatched) {
+                    addAlert(snap, Alert.measuredWithThresholds("cpu:process", Alert.LEVEL_WARNING, snap.processCpuLoad,
+                            cfg.cpu_processWarningThreshold, cfg.cpu_processWarningThreshold - margin,
+                            MetricsSnapshot.MODULE_CPU, snap.timestamp));
+                }
+            }
+            if (snap.systemCpuLoad > 0) {
+                systemCpuLatched = latched(
+                    systemCpuLatched, snap.systemCpuLoad,
+                    cfg.cpu_systemWarningThreshold, margin);
+                if (systemCpuLatched) {
+                    addAlert(snap, Alert.measuredWithThresholds("cpu:system", Alert.LEVEL_WARNING, snap.systemCpuLoad,
+                            cfg.cpu_systemWarningThreshold, cfg.cpu_systemWarningThreshold - margin,
+                            MetricsSnapshot.MODULE_CPU, snap.timestamp));
+                }
             }
         } else {
-            // 非 sun.* MXBean：无 CPU 数据，显式置 -1（避免默认 0 误导）
+            // 非 sun.* MXBean：无 CPU 数据，显式置 -1（避免默认 0 误导），并解除闩锁
             snap.processCpuLoad = -1;
             snap.systemCpuLoad = -1;
+            processCpuLatched = false;
+            systemCpuLatched = false;
         }
+    }
+
+    /**
+     * 单个指标的迟滞状态转移：进入用 {@code threshold}，退出用 {@code threshold - margin}。
+     *
+     * <p>落在 {@code [threshold - margin, threshold]} 的样本保持上一状态——
+     * 这正是"不让边界噪声反复触发状态翻转"的全部机制。</p>
+     */
+    private static boolean latched(boolean latched, double value, double threshold, double margin) {
+        if (latched) {
+            return value >= threshold - margin;   // 只有明确回落到带下方才解除
+        }
+        return value > threshold;                 // 只有明确越过阈值才进入
     }
 
     // ==================== GC ====================

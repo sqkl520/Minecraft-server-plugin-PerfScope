@@ -3,7 +3,7 @@ version: ${project.version}
 main: cn.perfscope.PerfScope
 api-version: "1.20"
 folia-supported: true
-description: 高性能服务器性能监测插件 - 专注 Paper 系服务端（Paper/Purpur/Pufferfish/Folia）
+description: High-performance server performance monitor for Paper-family servers (Paper/Purpur/Pufferfish/Folia)
 author: sqkl520
 website: https://github.com/sqkl520/Minecraft-server-plugin-PerfScope
 
@@ -13,31 +13,32 @@ website: https://github.com/sqkl520/Minecraft-server-plugin-PerfScope
 
 commands:
   perfscope:
-    description: PerfScope 主指令 - 查看实时性能数据
+    description: PerfScope main command - inspect live server performance
     usage: |
       /perfscope <子命令>
     aliases: [pscope, perf]
     permission: perfscope.use
-    # 9A-24：此值只是"消息层加载前的首帧兜底"。插件启动/重载时会把 messages.yml 的
-    # no-permission 回写为权限拒绝文案（Messages#applyCommandPermissionMessage），
-    # 因此改文案请改 messages.yml，不要依赖这里（否则会出现两份副本各说各话）。
-    permission-message: 你没有权限使用此指令喵
+    # Runtime fallback only: this value applies for the brief moment before the message layer
+    # loads. From then on Messages#applyCommandPermissionMessage writes the `no-permission`
+    # message of the active language onto this command. Translate text in messages.yml,
+    # not here — otherwise the two copies drift apart.
+    permission-message: You do not have permission to use this command.
 
 permissions:
   perfscope.use:
-    description: 允许使用 PerfScope 基本指令
+    description: Allows using basic PerfScope commands
     default: op
   perfscope.reload:
-    description: 允许重载 PerfScope 配置
+    description: Allows reloading the PerfScope configuration
     default: op
   perfscope.export:
-    description: 允许导出性能报告
+    description: Allows exporting performance reports
     default: op
   perfscope.alert:
-    description: 允许接收 PerfScope 告警推送
+    description: Allows receiving PerfScope alert notifications
     default: op
   perfscope.admin:
-    description: 允许使用 PerfScope 管理指令
+    description: Allows using PerfScope admin commands
     default: op
     children:
       perfscope.use: true
