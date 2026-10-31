@@ -39,6 +39,12 @@ public final class PerfScope extends JavaPlugin {
     // TODO: 作者在 bstats.org 注册后替换（当前占位：不发送任何数据）
     private static final int BSTATS_PLUGIN_ID = 0;
 
+    /**
+     * bStats 句柄（Wave 10）：非 null 表示遥测已启用且需在 onDisable 时显式 {@code shutdown()}。
+     * 占位 ID（0）或配置关闭时恒为 null。
+     */
+    private Metrics bstatsMetrics;
+
     private static PerfScope instance;
 
     private ConfigManager configManager;
@@ -221,6 +227,9 @@ public final class PerfScope extends JavaPlugin {
         // 9A-18：历史写线程必须在采集停止之后关——它要把队列残余刷盘，否则最后一批样本丢失
         shutdownHistoryFileStore();
         shutdownReportGenerator(); // ③ 输出：最后关报告执行器
+        // Wave 10：遥测放在最后关——它的图表回调要读采集器快照，必须等上面全部停稳；
+        // 同时它自带线程，不显式 shutdown 会拖住 JVM 退出。
+        stopBstats();
         getLogger().info(Messages.get("shutdown-bye"));
         instance = null;
     }
@@ -467,7 +476,9 @@ public final class PerfScope extends JavaPlugin {
             return;
         }
         try {
-            new Metrics(this, bstatsPluginId);
+            Metrics metrics = new Metrics(this, bstatsPluginId);
+            bstatsMetrics = metrics;
+            BstatsCharts.register(metrics, this);
             getLogger().info(Messages.get("core.bstats.enabled", bstatsPluginId));
         } catch (Exception | LinkageError e) {
             // general.debug 门控堆栈（与 safeCollect / monitor 推送同款日志口径）
@@ -476,6 +487,26 @@ public final class PerfScope extends JavaPlugin {
             } else {
                 getLogger().warning(Messages.get("core.bstats.init-failed-detail", e.getMessage()));
             }
+        }
+    }
+
+    /**
+     * 停止 bStats（Wave 10）：{@link Metrics#shutdown()} 会终止其提交线程。
+     *
+     * <p>为什么必须显式调用：bStats 的提交线程是 {@code Thread} 而非守护线程的子类，
+     * 插件被 reload/disable 后若线程仍在，服务器关闭时会拖住 JVM。整段兜底——
+     * 遥测层的关闭失败绝不能影响插件本体与服务器关闭流程。</p>
+     */
+    private void stopBstats() {
+        Metrics metrics = bstatsMetrics;
+        bstatsMetrics = null;
+        if (metrics == null) {
+            return;
+        }
+        try {
+            metrics.shutdown();
+        } catch (Exception | LinkageError e) {
+            // 关闭期静默：此时日志可能已不可用，且遥测失败无用户可见影响
         }
     }
 

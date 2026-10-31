@@ -41,6 +41,15 @@ general:
   language: en
   # bStats 匿名统计 (https://bstats.org): 仅上报插件使用量/服务端环境等匿名数据，无个人信息。
   # 关闭方式二选一: 此处设为 false, 或在 plugins/bStats/config.yml 中设 enabled: false (对全服所有插件生效)
+  #
+  # 上报内容（全部为分桶后的整数/枚举，不含玩家名、世界名、插件列表、配置内容、告警文本）:
+  #   server_software   服务端类型（Paper/Spigot/Bukkit/Folia）
+  #   language          当前界面语言（en/zh/other）
+  #   module_enabled    各采集模块的开关状态
+  #   webhook_channel   告警通道类型（none/discord/... ，不含 URL）
+  #   entity_count_bucket / loaded_chunks_bucket / peak_players_bucket / heap_max_mb_bucket
+  #                     规模量级桶（如 1000 表示 "不超过 1000"），用于判断大服的真实规模
+  #   world_count / loaded_plugins   世界数与插件数
   bstats-enabled: true
 
 # TPS 监测

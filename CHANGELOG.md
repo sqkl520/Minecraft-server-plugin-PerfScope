@@ -20,6 +20,42 @@
 
 ---
 
+## [Unreleased] — Wave 10「bStats 自定义图表：把"有没有真实用户"变成可验证信号」
+
+> **背景**：`EXECUTION-PLAN.md §5` 把 ROADMAP V2.0 全部条目（Prometheus / Grafana / PAPI /
+> GUI / 英文包 / LLM）冻结在「出现真实用户信号前」。这个约束本身合理——别在没人用的时候
+> 做没人要的东西——但"信号"从哪来、怎么量，一直没有定义。bStats 是把口头需求变成可验证
+> 数字的最低成本手段：它不面向用户，却是路线图排期的唯一客观依据。
+>
+> 此前 `BSTATS_PLUGIN_ID = 0` 是占位，代码路径完备但**零上报**。
+
+### Added
+- **bStats 自定义图表**（`BstatsCharts`，10 张）。基础匿名数据只能回答"有多少人在用"，
+  回答不了路线图真正要问的三类问题，故按问题分组：
+  - **规模**：`entity_count_bucket` / `loaded_chunks_bucket` / `peak_players_bucket` /
+    `heap_max_mb_bucket` / `world_count` —— 判断"大服到底有多大"，是性能优化排期的前置证据。
+  - **采用率**：`module_enabled`（11 个采集模块的开关矩阵）/ `webhook_channel` ——
+    判断哪些功能真有人开、哪些可以砍。
+  - **i18n 收益**：`language` —— 判断英文默认是否真的被使用，还是一直有人在改回中文。
+  - 另有 `server_software`（Paper/Spigot/Bukkit/Folia 分布）与 `loaded_plugins`（插件数）。
+- **隐私边界写进代码与配置注释**：只上报分桶后的整数与枚举，不上报玩家名、世界名、
+  插件列表、配置内容、告警文本、坐标。分桶有意为之——既能判断量级，又让单条记录无法
+  反推到具体服务器。`config.yml` 的 `general.bstats-enabled` 注释已列出全部上报字段。
+
+### Fixed
+- **bStats 句柄未保存导致无法关闭**（潜在资源泄漏）。此前 `new Metrics(...)` 的返回值被丢弃，
+  `Metrics#shutdown()` 无从调用；bStats 的提交线程在服务器关闭时会拖住 JVM。
+  现在持有句柄并在 `onDisable` 末尾（全部采集/告警/报告停稳之后）显式关闭。
+
+### Notes
+- **仍需作者动作**：`PerfScope.BSTATS_PLUGIN_ID` 仍是占位 `0`，**代码就绪但尚未生效**。
+  在 <https://bstats.org> 注册插件后替换该常量即可；在此之前不发送任何数据，
+  启动日志会明确打印 `bStats anonymous metrics disabled (pluginId is 0; ...)`。
+- 图表回调全部在 bStats 自己的线程上执行，只读不可变快照与配置对象，不触碰 Bukkit 世界状态。
+  快照未就绪时返回空 Map（bStats 跳过该次上报），**不记 0**——记 0 会污染统计。
+
+---
+
 ## [Unreleased] — Wave 9D「i18n：命令层正文 + 报告 + 告警信封 + 诊断规则」
 
 > **本批次把"英文默认"真正落到全站**：命令面板正文、报告三格式、告警信封、诊断规则、
