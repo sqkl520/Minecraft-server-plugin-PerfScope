@@ -36,8 +36,14 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 public final class PerfScope extends JavaPlugin {
 
-    // TODO: 作者在 bstats.org 注册后替换（当前占位：不发送任何数据）
-    private static final int BSTATS_PLUGIN_ID = 0;
+    /**
+     * bStats 项目 ID（2026-11-01 注册）。
+     *
+     * <p>持在局部变量里再判定（见 {@code startBstats()}），避免 javac 对常量做常量折叠，
+     * 把 {@code Metrics} 引用连同整段代码从字节码中消去——保留引用才能用 javap 验证
+     * shade 已把 {@code org.bstats} 重写为 {@code cn.perfscope.shaded.bstats}。</p>
+     */
+    private static final int BSTATS_PLUGIN_ID = 35061;
 
     /**
      * bStats 句柄（Wave 10）：非 null 表示遥测已启用且需在 onDisable 时显式 {@code shutdown()}。

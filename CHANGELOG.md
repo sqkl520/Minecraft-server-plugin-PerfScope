@@ -226,9 +226,8 @@
   现在持有句柄并在 `onDisable` 末尾（全部采集/告警/报告停稳之后）显式关闭。
 
 ### Notes
-- **仍需作者动作**：`PerfScope.BSTATS_PLUGIN_ID` 仍是占位 `0`，**代码就绪但尚未生效**。
-  在 <https://bstats.org> 注册插件后替换该常量即可；在此之前不发送任何数据，
-  启动日志会明确打印 `bStats anonymous metrics disabled (pluginId is 0; ...)`。
+- **bStats 项目 ID 已填入**：`BSTATS_PLUGIN_ID = 35061`（2026-11-01 在 bstats.org 注册，
+  项目名 `PerfScope`，平台 Bukkit）。此前是占位 `0`，全部图表代码从未上报过任何数据。
 - 图表回调全部在 bStats 自己的线程上执行，只读不可变快照与配置对象，不触碰 Bukkit 世界状态。
   快照未就绪时返回空 Map（bStats 跳过该次上报），**不记 0**——记 0 会污染统计。
 
