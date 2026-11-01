@@ -273,7 +273,10 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         // MSPT（P0-5：先判模块级"不可用"；P0-13：再判 -1 哨兵显示"未知"）
         // 9A-1：Folia 上 MSPT 能力位恒 false（无全局 tick 时间）——此时既不能出数、也不能用
         // region 局部 TPS 反推，直接按"不可用"渲染并说明原因。
-        if (snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT) || !ServerCompat.isMsptTrustworthy()) {
+        // f-s02-logic-01：false 有"两种 false"，必须按 isFolia() 分叉（ServerCompat:437-438 的豁免条款）——
+        // 非 Folia 上采集层已降级到 TPS 反推（MetricsCollector:1356），放行进下方由 msptSource 标"(估算)"。
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT)
+                || (!ServerCompat.isMsptTrustworthy() && ServerCompat.isFolia())) {
             sender.sendMessage(yellowLabel(Messages.get("cmd.mspt.triple-label"))
                 .append(Component.text(Messages.get("cmd.state.unavailable"), GRAY))
                 .append(msptUnavailableTag()));
@@ -506,7 +509,9 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         // P0-5：先判模块级"不可用"（P0-13 的 -1 哨兵"未知"仍由 formatMSPTComponent 处理）
         // 9A-1：能力位为 false（Folia 无全局 tick 时间 / 实测恒空）时不存在可信数据源——
         // 直接按"不可用"渲染并给出原因，绝不用 TPS 反推充数（Folia 的 TPS 是 region 局部值）。
-        if (snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT) || !ServerCompat.isMsptTrustworthy()) {
+        // f-s02-logic-01：同上，只有 Folia 的 false 才挡；非 Folia 的 false 走 TPS 反推降级，需放行标注。
+        if (snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT)
+                || (!ServerCompat.isMsptTrustworthy() && ServerCompat.isFolia())) {
             sender.sendMessage(yellowLabel(Messages.get("cmd.mspt.label")).append(Component.text(Messages.get("cmd.state.unavailable"), GRAY))
                 .append(msptUnavailableTag()));
             return;
@@ -1398,7 +1403,11 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 cfg == null ? "?" : cfg.history_sampleIntervalSeconds), WHITE)));
         var fileStore = plugin.getHistoryFileStore();
         boolean persistOn = cfg != null && cfg.history_persistEnabled;
-        boolean persistOk = fileStore != null && fileStore.available();
+        // 只探目录（available()）曾在写线程被 Error 击穿后继续报"可用"：running 仍为 true、append 继续
+        // 入队、队列满后只静默累加 droppedSamples，而 dropped 的唯一上报点全在死线程内 → 结构性谎报绿色。
+        // isHealthy() 额外含线程存活 + 连续失败阈值，故此处必须用它；代价与 available() 同量级
+        // （同样两次 stat，无额外 IO），可在 /status 路径使用。
+        boolean persistOk = fileStore != null && fileStore.isHealthy();
         Component persistState;
         if (!persistOn) {
             persistState = Component.text(Messages.get("cmd.status.persistence-disabled"), GRAY);
@@ -1574,9 +1583,18 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             }
         } else {
             monitoringPlayers.add(player.getUniqueId());
-            player.sendMessage(Component.text(Messages.get("monitor-on"), GREEN));
             // 9B-5：先入 Set 再装任务——即使这里让位给别人的安装，订阅者也不会丢
-            startMonitorTask();
+            // f-s02-conc-01：noop 时不得回执"已开启"（否则看到绿灯但 ActionBar 永不刷新），
+            // 且要撤销刚加入的订阅，让下一次点击仍是"订阅"而不是被误判成"退订"。
+            if (startMonitorTask()) {
+                player.sendMessage(Component.text(Messages.get("monitor-on"), GREEN));
+            } else {
+                monitoringPlayers.remove(player.getUniqueId());
+                boolean zh = Messages.LOCALE_ZH.equals(Messages.activeLocale());
+                player.sendMessage(Component.text(zh
+                    ? "实时监测启动失败（调度不可用，详见控制台）"
+                    : "Live monitoring failed to start (scheduler unavailable; see the console)", RED));
+            }
         }
     }
 
@@ -1615,32 +1633,41 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
      * 老实现直接赋值 {@code monitorTask = runGlobalTimer(...)}——两个线程同时进来会各建一份任务，
      * 后写的句柄覆盖先写的，先建的任务从此无人能取消（"一次开却有两份刷新"）。
      * 现在用「null → 新句柄」的 CAS 安装：只有一个赢家，输家丢弃自己刚建的任务。
+     *
+     * @return {@code true} 表示调用返回后确实有一个任务在跑（本线程装的、或别人已装的）；
+     *         {@code false} 表示调度失败、任务根本没装上（f-s02-conc-01 的 noop 路径）
      */
-    private void startMonitorTask() {
+    private boolean startMonitorTask() {
         if (monitorShutdown) {
-            return; // 9B-5：关服后不再拉起
+            return true; // 9B-5：关服后不再拉起；回执路径维持原状（属 f-s02-conc-03 的范围）
         }
         if (!monitorTaskStarting.compareAndSet(false, true)) {
-            return; // 另一线程正在安装：它装好的任务同样覆盖本线程刚加入的订阅者
+            return true; // 另一线程正在安装：它装好的任务同样覆盖本线程刚加入的订阅者
         }
         try {
             if (monitorTask.get() != null) {
-                return; // 双检：拿门闩期间别人已装好
+                return true; // 双检：拿门闩期间别人已装好
             }
             // P0-8：经 SchedulerAdapter.runGlobalTimer 调度，保持 20 tick/次推送间隔。
             // Folia 下该任务运行于 GlobalRegionScheduler（全局区域线程）；给玩家 sendActionBar 的
             // 跨 region 线程问题由 Adventure 消息发送的线程安全性覆盖；A2 修正：本任务体自带 try 边界
             //（此前注释谎称"外层 try 兜底"但实际无 try——单帧异常会被调度器记日志并继续重排，导致每周期刷一条异常噪音）
             SchedulerAdapter.TaskHandle created = SchedulerAdapter.runGlobalTimer(plugin, this::monitorTick, 20L, 20L);
+            if (!created.isActive()) {
+                // f-s02-conc-01：noop = 任务没装上。装进 monitorTask 会让双检把所有后续订阅挡回，
+                // monitor 永久静默空转；不装入则保住 conc-04 依赖的不变量「句柄非空 ⇔ 任务在跑」。
+                return false;
+            }
             // 9B-5：安装用 CAS；安装失败（他人抢先装好）或安装期间已关服 → 取消刚建的任务避免野跑
             if (monitorShutdown || !monitorTask.compareAndSet(null, created)) {
                 created.cancel();
-                return;
+                return true;
             }
             // 9B-5：安装前订阅集合已被清空（创建与安装之间的退订窗口）→ 立刻撤销，不等首次 tick 自愈
             if (monitoringPlayers.isEmpty()) {
                 cancelMonitorTaskIfIdle();
             }
+            return true;
         } finally {
             monitorTaskStarting.set(false);
         }
@@ -1696,8 +1723,10 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         // 修复禁用模块上屏 "TPS: 0.0"（红）/ "内存: 0%"（假绿）/ MSPT 直出 "-1.0" 的误导渲染
         // 9A-1 / 9A-2：MSPT 能力位为 false（Folia 无全局 tick 时间）时 ActionBar 也显示"不可用"，
         // 否则会在 Folia 上渲染出 -1 哨兵派生的"未知"，被误读成"采集坏了"。
+        // f-s02-logic-01：与聊天层同口径——非 Folia 的 false 是 TPS 反推降级（采集层仍在出数），放行，
+        // 由下方 msptSource 判定追加"(估算)"；只有 Folia 的 false 才挡。
         boolean msptUnavailable = snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT)
-            || !ServerCompat.isMsptTrustworthy();
+            || (!ServerCompat.isMsptTrustworthy() && ServerCompat.isFolia());
         Component actionBar = Component.text(
                 Messages.get("cmd.actionbar.lead", Messages.get("cmd.unit.tps")), GRAY)
             .append(snap.unavailable.contains(MetricsSnapshot.MODULE_TPS)
@@ -1708,6 +1737,11 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 Messages.get("cmd.actionbar.segment", Messages.get("cmd.unit.mspt")), GRAY))
             .append(msptUnavailable
                 ? Component.text(Messages.get("cmd.state.unavailable"), GRAY) : formatMSPTComponent(snap.msptAvg))
+            // f-s02-data-08 / f-s02-actionbar-01：MSPT 走 TPS 反推路径时，(估算) 口径必须与聊天层一致；
+            // 仅在确实渲染出数值时追加——"未知"后面挂"(估算)"是自相矛盾的组合，故排除
+            .append(msptUnavailable || snap.msptAvg <= 0
+                || snap.msptSource != MetricsSnapshot.MSPT_SOURCE_TPS_FALLBACK
+                ? Component.empty() : Component.text(Messages.get("cmd.mspt.estimated-tag"), GRAY))
             .append(Component.text(
                 Messages.get("cmd.actionbar.segment", Messages.get("cmd.unit.players")), GRAY))
             .append(snap.unavailable.contains(MetricsSnapshot.MODULE_PLAYERS)

@@ -320,6 +320,10 @@ public class MetricsCollector {
         lastJvmCycleFailureLogAtMs = 0L;
         // 9A-20 #2：模块健康状态随 reload 重置（配置可能刚改回 enabled=true，失败序列应重新计）
         moduleHealth.clear();
+        // f-s04-conc-04：CPU 迟滞闩锁随 reload 重置——否则旧代异步任务留下的闩锁被新代继承，
+        // 新配置下的首个周期不重新判定，告警会带着上一代的判定继续挂着。
+        processCpuLatched = false;
+        systemCpuLatched = false;
 
         // L-2 修复：interval ≤0 会被 Bukkit 调度器 coerce 成单次任务（负值 period=-1 跑一轮即静默死亡）
         // 或每 tick（0 → 1），Folia 下则被 SchedulerAdapter 校正为每 tick，行为分叉，
@@ -1676,12 +1680,21 @@ public class MetricsCollector {
      *
      * <p>落在 {@code [threshold - margin, threshold]} 的样本保持上一状态——
      * 这正是"不让边界噪声反复触发状态翻转"的全部机制。</p>
+     *
+     * <p><b>退出线下界（f-s04-logic-01）</b>：{@code margin} 与 {@code threshold} 是独立配置项，
+     * 当 {@code margin >= threshold} 时裸减法得到非正退出线，而调用侧保证喂入值 {@code > 0}
+     * （{@code collectCPU} 的哨兵过滤），于是 {@code value >= 非正数} 恒真、闩锁永不解除。
+     * 这里显式兜底：迟滞带非正即视为无效，退回无迟滞判据（与 {@code margin = 0}
+     * "关闭迟滞 = 旧行为"的声明同口径），保证闩锁一定会在负载回落后解除。
+     * 仅钳到 0 不足以修复——{@code value >= 0} 对恒正输入仍然恒真。</p>
      */
     private static boolean latched(boolean latched, double value, double threshold, double margin) {
-        if (latched) {
-            return value >= threshold - margin;   // 只有明确回落到带下方才解除
+        double exit = threshold - margin;
+        // 迟滞带非正（margin >= threshold）即视为无效：退回无迟滞判据，避免负/零退出线造成永不解锁
+        if (exit <= 0.0d) {
+            return value > threshold;
         }
-        return value > threshold;                 // 只有明确越过阈值才进入
+        return latched ? value >= exit : value > threshold;   // 带内保持上一状态
     }
 
     // ==================== GC ====================

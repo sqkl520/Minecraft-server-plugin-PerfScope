@@ -203,6 +203,14 @@ public final class SchedulerAdapter {
         }
 
         /**
+         * f-s01-err-01：句柄是否真的装上了一个任务。noop（Folia fail-safe 停用）返回 false，
+         * Bukkit / Folia 正常句柄返回 true，调用方据此区分"在跑"与"调度失败"。
+         */
+        public boolean isActive() {
+            return bukkitTask != null || foliaTask != null;
+        }
+
+        /**
          * 取消任务。Bukkit 路径直接 cancel；Folia 路径经 {@link FoliaSchedulerBridge}
          * 直连 ScheduledTask.cancel()。句柄为空（调度失败/无操作句柄）时为无操作；
          * 取消异常被吞并记 warning，不抛给调用方。

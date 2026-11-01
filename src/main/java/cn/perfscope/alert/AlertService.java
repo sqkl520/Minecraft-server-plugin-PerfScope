@@ -441,6 +441,16 @@ public class AlertService {
         long interval = Math.max(1, cfg.general_updateInterval);
         // 首查延迟一个采集周期：等采集器先产出首份快照；runGlobalTimer 在主线程执行，玩家消息发送天然安全
         timerHandle = SchedulerAdapter.runGlobalTimer(plugin, this::checkCycle, interval, interval);
+        if (!timerHandle.isActive()) {
+            // f-s01-err-01：noop 句柄 = 任务没装上（原因已由 SchedulerAdapter 记 severe）。照旧打印
+            // "已启动"就是告警永久停摆而控制台显示正常。文案内联：AlertMessages 不在本次写权限内。
+            boolean zh = Messages.LOCALE_ZH.equals(Messages.activeLocale());
+            plugin.getLogger().severe(Messages.get("alert.log.prefix") + (zh
+                ? "告警服务未能启动（调度不可用，告警不会触发；/perfscope reload 可重试）"
+                : "Alert service did not start (scheduler unavailable; no alerts will fire; "
+                    + "/perfscope reload to retry)"));
+            return;
+        }
         Options o = options;
         plugin.getLogger().info(logText("alert.log.started",
             interval, cfg.alerts_cooldownSeconds, Math.max(1, cfg.alerts_debounceCycles),

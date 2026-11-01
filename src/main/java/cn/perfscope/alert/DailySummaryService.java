@@ -189,6 +189,16 @@ public class DailySummaryService {
         refreshZone(); // 9A-14：reload 后时区变更即时生效
         // 每分钟检查（1200 ticks = 60 秒）；首查延迟 5 秒（等采集器与历史环就绪）
         timerHandle = SchedulerAdapter.runGlobalTimer(plugin, this::checkCycle, 100L, 1200L);
+        if (!timerHandle.isActive()) {
+            // f-s01-err-02：与 AlertService.start 同构——noop = 任务没装上，不得再打印"已启用"
+            //（否则每日摘要静默永不送达）。文案内联：AlertMessages 不在本次写权限内。
+            boolean zh = Messages.LOCALE_ZH.equals(Messages.activeLocale());
+            plugin.getLogger().severe(Messages.get("alert.log.prefix") + (zh
+                ? "每日摘要未能启动（调度不可用，摘要不会发送；/perfscope reload 可重试）"
+                : "Daily summary did not start (scheduler unavailable; no summaries will be sent; "
+                    + "/perfscope reload to retry)"));
+            return;
+        }
         plugin.getLogger().info(logText("daily.log.enabled",
             cfg.alerts_dailySummaryTime, zone(), distinctZoneNote()));
     }

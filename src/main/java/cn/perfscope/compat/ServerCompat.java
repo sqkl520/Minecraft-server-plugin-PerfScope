@@ -114,7 +114,12 @@ public final class ServerCompat {
         } else {
             PAPER_MSPT_AVAILABLE = TICK_TIMES_METHOD_PRESENT;
             PAPER_AVG_TICK_AVAILABLE = AVG_TICK_METHOD_PRESENT;
-            msptUnavailableReasonKey = null;
+            // f-s02-data-01 / f-s02-data-09 / f-s06-contract-04：非 Folia 但两级 tick API 都不在时，
+            // "不可用"是有具体成因的（服务端未提供 MSPT 采集 API），不能一律留 null——
+            // 留 null 会让报告层把空原因当文案（HTML 侧直接 NPE），也让 CoreMessages 已定义的
+            // compat.mspt.no-api 成为全仓零赋值的死键。只有能力位真为真时才无原因。
+            msptUnavailableReasonKey = (PAPER_MSPT_AVAILABLE || PAPER_AVG_TICK_AVAILABLE)
+                ? null : "compat.mspt.no-api";
         }
         PAPER_TILE_ENTITY_COUNT_AVAILABLE = checkPaperTileEntityCount();
         // Paper 系原生自带 Adventure，sendActionBar(Component) 恒可用；

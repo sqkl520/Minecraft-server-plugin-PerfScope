@@ -126,7 +126,9 @@ public class ConfigManager {
      *
      * <p><b>失败语义</b>：YAML 语法错误 / 文件内容为空时，记录 SEVERE 并抛出
      * {@link IllegalStateException}（不发布任何新值，{@link #get()} 保持旧快照），
-     * 由调用方按"加载失败、按旧配置继续"处理；其余情况一律正常返回，状态放在
+     * 调用方按场景处理（f-s06-err-01 / f-s03-err-05）：<b>启动期</b>（onEnable）
+     * <b>应让异常穿透以 fail-fast</b>——此时 {@link #get()} 为 {@code null}，无旧配置可退；
+     * <b>reload</b> 则捕获并按旧快照继续运行。其余情况一律正常返回，状态放在
      * {@link LoadResult} 里（版本迁移、缺键、未知键、未知世界名）。</p>
      */
     public LoadResult load() {
@@ -916,6 +918,20 @@ public class ConfigManager {
             plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.hysteresis",
                 "cpu.hysteresis_margin", cfg.cpu_hysteresisMargin, CPU_HYSTERESIS_DEFAULT));
             cfg.cpu_hysteresisMargin = CPU_HYSTERESIS_DEFAULT;
+        }
+        // f-s04-logic-01：上下界之外还需与阈值交叉校验——margin 不小于任一 CPU 阈值时，
+        // 退出线 threshold-margin 非正，而判定值在采集侧恒正（MetricsCollector 的 > 0 过滤），
+        // 闩锁一旦进入就永不解除。margin=0 是关闭迟滞的合法值（0 恒小于正阈值），不拦。
+        // 回退值不能直接用默认 5——阈值为 3 时 5 仍不小于阈值，故取「默认值与两阈值一半的较小者」。
+        double cpuMinThreshold = Math.min(cfg.cpu_processWarningThreshold, cfg.cpu_systemWarningThreshold);
+        if (cfg.cpu_hysteresisMargin >= cpuMinThreshold) {
+            double fallback = Math.min(CPU_HYSTERESIS_DEFAULT, cpuMinThreshold / 2.0d);
+            String detail = "=" + cfg.cpu_hysteresisMargin + " | threshold(process/system)="
+                + cfg.cpu_processWarningThreshold + "/" + cfg.cpu_systemWarningThreshold + " | reverted=" + fallback;
+            boolean zh = Messages.LOCALE_ZH.equals(Messages.activeLocale());
+            plugin.getLogger().warning("[PerfScope] cpu.hysteresis_margin" + detail
+                + (zh ? " —— 不小于 CPU 告警阈值，退出线会非正且告警永不解除" : " —— not below the CPU threshold; exit line non-positive, alert would never clear"));
+            cfg.cpu_hysteresisMargin = fallback;
         }
 
         // === worlds 段覆盖值对（倒置时回退到已校验的全局值） ===

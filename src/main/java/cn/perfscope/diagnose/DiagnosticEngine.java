@@ -71,7 +71,7 @@ public class DiagnosticEngine {
      *
      * @param hits    命中列表（critical 在前）
      * @param skipped 未评估的规则及原因
-     * @param total   注册的规则总数
+     * @param total   评估基数：规则循环进入过 = 注册规则数；整轮未执行（无快照 / 无配置）= 0
      */
     public record Result(List<Diagnosis> hits, List<Diagnosis.Skip> skipped, int total) {
 
@@ -80,9 +80,9 @@ public class DiagnosticEngine {
             return total - skipped.size();
         }
 
-        /** 是否所有规则都评估过（否则输出不能说"未发现已知问题"）。 */
+        /** 是否所有规则都评估过（否则输出不能说"未发现已知问题"）。{@code total == 0} 时恒为 false。 */
         public boolean fullyEvaluated() {
-            return skipped.isEmpty();
+            return total > 0 && skipped.isEmpty();
         }
     }
 
@@ -98,11 +98,11 @@ public class DiagnosticEngine {
         MetricsSnapshot snap = plugin.getMetricsCollector() == null
             ? null : plugin.getMetricsCollector().getLatest();
         if (snap == null) {
-            return new Result(hits, skipped, RULES.size()); // 无快照：命令层已处理"采集中"文案
+            return new Result(hits, skipped, 0); // f-s03-logic-02：整轮未执行，不是"5/5 已评估"
         }
         ConfigManager.ConfigData cfg = configManager.get();
         if (cfg == null) {
-            return new Result(hits, skipped, RULES.size());
+            return new Result(hits, skipped, 0);
         }
         for (DiagnosticRule rule : RULES) {
             try {

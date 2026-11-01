@@ -117,6 +117,9 @@ public class HistoryFileStore {
     /** 9A-18：shutdown 等待写线程退出的上限。 */
     private static final long SHUTDOWN_JOIN_MS = 5_000L;
 
+    /** 写线程因 Error 逃逸后的重建上限；超过即放弃并打 SEVERE（防止 OOM 类错误触发无限重建）。 */
+    private static final int MAX_WRITER_RESTARTS = 3;
+
     /** 9A-18：JVM 退出兜底钩子（PerfScope.onDisable 尚未接线前也不会丢最后一批样本）。
      *  构造末尾才挂到 Runtime（字段初始化完成后），避免 this-escape。 */
     private final Thread shutdownHook;
@@ -150,6 +153,9 @@ public class HistoryFileStore {
 
     /** 写线程句柄（shutdown 用）。 */
     private volatile Thread writerThread;
+
+    /** 写线程被 Error 击穿后的连续重建次数（任一次成功写盘即清零；仅写线程访问）。 */
+    private int writerRestarts = 0;
 
     /** 9A-18：健康状态（volatile，跨线程读）。 */
     private volatile long lastSuccessAtMs = 0L;
@@ -237,6 +243,43 @@ public class HistoryFileStore {
      * 把手上这批写完再退出。</p>
      */
     private void writerLoop() {
+        // 守卫：内层 catch 只覆盖 Exception | LinkageError，Error（OOM/AssertionError 等）会击穿线程。
+        // 线程一死，running 仍为 true：append 继续入队、队列满只静默累加 droppedSamples（唯一上报点
+        // reportDropsThrottled 全在死线程内），status 又只看 available() → 结构性谎报"可用"。
+        // 故按"有界重建"接管；连续失败达上限即退出线程，让 writerRunning()/isHealthy() 如实转 false。
+        for (;;) {
+            try {
+                writeLoop();
+                return;
+            } catch (Error e) {
+                writerRestarts++;
+                consecutiveFailures = Math.max(consecutiveFailures + 1, FAILURE_SEVERE_THRESHOLD);
+                lastError = Messages.get("run.history.writer-crashed") + ": " + e;
+                boolean retry = running && writerRestarts <= MAX_WRITER_RESTARTS;
+                // 先打日志再收尾：收尾本身（flush/close）也可能抛 Error，若先收尾会吞掉这条 SEVERE
+                try {
+                    logger.severe(Messages.get("run.history.log.failure", lastError, dir.toAbsolutePath())
+                        + " [restart " + writerRestarts + "/" + MAX_WRITER_RESTARTS
+                        + (retry ? "]" : ", giving up]"));
+                } catch (Throwable ignored) {
+                    // 日志通道自身抛错不能让守卫失效
+                }
+                try {
+                    closeWriterQuietly();
+                } catch (Throwable ignored) {
+                    // 句柄已不可用（flush/close 抛 Error）：弃用，下一批由 openWriter 重开
+                    this.writer = null;
+                    this.currentFileDate = null;
+                }
+                if (!retry) {
+                    return;
+                }
+            }
+        }
+    }
+
+    /** 写线程主循环实体（正常 return = 已关停并落盘；Error 逃逸由 {@link #writerLoop()} 守卫接管）。 */
+    private void writeLoop() {
         try {
             while (true) {
                 HistorySample first;
@@ -514,6 +557,7 @@ public class HistoryFileStore {
     private void onWriteSuccess() {
         lastSuccessAtMs = System.currentTimeMillis();
         consecutiveFailures = 0;
+        writerRestarts = 0;
         lastError = null;
     }
 

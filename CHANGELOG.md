@@ -20,6 +20,184 @@
 
 ---
 
+## [Unreleased] — Wave 11「多 Agent 极限审计（round1）：静默失效与口径分裂」
+
+> **背景**：采用 `docs/framework/` 的五波次审计流水线，对全仓 35 个源文件做了一轮
+> 「侦察 → 审计 → 锐评 → 修复 → 验收」的对抗式审计。24 个审计实例（6 切片 × 4 维度）
+> 共产出 160 条带证据的发现，经 8 个锐评实例（6 Skeptic + Devil's Advocate + Arbiter）
+> 撤销 25 条、降级 66 条、合并 10 组，最终收敛为 9 个修复单元。
+>
+> **本轮的主线不是"崩溃"，而是"代码说的和代码做的不一样"**：两条最终 HIGH 都不是程序崩了，
+> 而是系统静默地做错事且没人知道。
+
+### Fixed
+- **CPU 告警闩锁永不解除**（`f-s04-logic-01` + `f-s03-logic-03` + `f-s04-conc-04`，HIGH）。
+  `latched()` 的退出判据是裸减法 `value >= threshold - margin`，而阈值与迟滞带宽度被独立校验。
+  当 `cpu.process_warning_threshold < cpu.hysteresis_margin` 时退出线为负，喂入值被
+  `if (snap.processCpuLoad > 0)` 保证恒正 → `value >= 负数` 恒真 → 闩锁一旦进入永不解除，
+  且 `exitThreshold` 以负数渲染给用户。
+  - 采集侧（`MetricsCollector.latched`）：**单纯把退出线钳到 0 无效**（`value >= 0` 对正数恒真），
+    改为「迟滞带非正时退回无迟滞判据 `value > threshold`」。
+  - 配置侧（`ConfigManager.validateThresholds`）：新增交叉校验，`margin >= min(两阈值)` 时回退并
+    WARNING；回退值取 `min(5.0, 两阈值较小者/2)` 而非默认 5.0（阈值为 3 时 5.0 仍越界）。
+    `margin == 0` 不拦（`config.yml:121` 明写「0 = 关闭迟滞」）。
+  - `MetricsCollector.start()` 重置清单补入 `systemCpuLatched` / `processCpuLatched`。
+- **历史写线程死亡后永久静默**（`f-s04-err-02`，HIGH）。`writerLoop` 的 `catch` 在 `while`
+  **之外**，其后无条件 `drainAndClose()` 并返回，全类仅 `:188` 一处 `new Thread`。线程因 `Error`
+  逃逸后 `running` 仍为 `true`，`append` 继续入队，队列满后只静默累加 `droppedSamples`——
+  而唯一输出该计数的 `reportDropsThrottled` 三处调用点**全在死线程内**。`/perfscope status`
+  只判 `available()`（仅探目录可写），**谎报绿色**。
+  - 循环体抽为 `writeLoop()`，外层加有界自动重建守卫（`MAX_WRITER_RESTARTS=3`，
+    `onWriteSuccess()` 清零使其语义为「连续」而非累计）。
+  - `PerfScopeCommand` 的 `persistOk` 判定由 `available()` 改为 `isHealthy()`，使线程死亡可见。
+- **`TaskHandle.noop()` 与活句柄不可区分**（`f-s01-err-01` + `f-s01-err-02` + `f-s02-conc-01`，
+  MEDIUM）。Folia 分支调度失败返回 noop（三字段全 null，`cancel()` 空操作），三个消费点均误判为
+  「任务已启动」：告警与日报照打「已启动」INFO 而实际永久停摆，monitor 的 noop 被 CAS 装进
+  `monitorTask` 后双检挡回全部后续订阅。
+  - `TaskHandle` 新增 `isActive()`（Bukkit/Folia 返回 true，noop 返回 false）。
+  - 告警/日报：`!isActive()` 时打 SEVERE 并 return，不再打印「已启动」。
+  - monitor：noop 不装入 `monitorTask`，`startMonitorTask()` 返回 `boolean`，订阅分支据此
+    撤销刚加入的订阅并回失败文案。
+- **HTML 报告 NPE**（`f-s05-logic-02` + `f-s02-contract-01` + `f-s02-data-01` + `f-s02-data-09`
+  + `f-s06-contract-04`，MEDIUM）。`ServerCompat.java:117` 在非 Folia 分支**无条件**把
+  `msptUnavailableReasonKey` 置 null，`msptUnavailableReason()` 返回 null，
+  `ReportGenerator:371` 把该 null 直接传给 `htmlCard` 的 `subtitle`，而 `htmlCard` 首句即
+  `subtitle.isEmpty()` → NPE（TXT 侧 `:609` 有双保护，HTML 没有）。实测抛
+  `NullPointerException: Cannot invoke "String.isEmpty()" because "<parameter4>" is null`。
+  - `ServerCompat.java:117` 改为「两能力位皆 false 才写 `compat.mspt.no-api`」，
+    同时消掉 NPE 根因与 `CoreMessages.java:149` 的零赋值死键。
+  - `ReportGenerator` HTML 路径补 null 兜底，与 TXT 侧对齐。
+  - **C 项（后续补修）**：新增 `msptUnavailableCause(snap)` 作为 HTML/TXT 唯一成因入口，
+    优先级依 `MetricsSnapshot.disabledModules` 契约（`disabledModules` > 能力位 false > 采集异常）喵。
+    新增 i18n 键 `report.common.mspt.disabled` / `report.common.mspt.collect-failed`（en+zh 双写）喵。
+    修复前「配置禁用」与「采集异常」渲染**逐字节相同**，现三档互不相同喵。
+    真实 Paper 1.21.11 实测：`MSPT (avg/min/max): unavailable (Disabled in config (mspt.enabled=false))` 喵。
+  - **仍未同步**：JSON 路径（`ReportGenerator:747` 的 `unavailableSection()`）未加 `cause` 字段，
+    因 JSON 字段名是下游依赖的外部契约，加字段属 `PUBLIC_API_CHANGE`，留待人工决策喵。
+- **MSPT 能力位口径分裂**（`f-s02-logic-01` + `f-s02-contract-02` + `f-s02-data-02`，MEDIUM）。
+  `isMsptTrustworthy()` 的 javadoc 主条款要求「false 时不得 TPS 反推」，但同段末尾明确授权
+  「非 Folia 上 TPS 反推仍合理，**调用方应以 `isFolia()` 区分两种 false**」。采集层按豁免条款
+  实现（非 Folia 走 TPS 反推并产出估算值），命令层三处未分叉，一律渲染「不可用」——同一份快照，
+  采集层有值、报告层打印、命令层与 ActionBar 报不可用。
+  - `PerfScopeCommand` 三处（`showAll` / `showMSPT` / `sendActionBar`）统一改为
+    `|| (!isMsptTrustworthy() && isFolia())`，照 `:248-253` 既有分叉风格。
+  - Folia 分支修复前后输出逐字节 `<IDENTICAL>`，全程保持「不可用」。
+- **非聊天输出面缺「(估算)」标注**（`f-s02-data-08` + `f-s02-actionbar-01`，LOW）。
+  MSPT 走 TPS 反推时聊天层会标「(估算)」，报告（HTML/TXT）与 ActionBar 只输出数值。
+  - 新增 i18n 键 `report.common.estimated-tag`（en ` (estimated)` / zh ` (估算)`，双表同时注册，
+    走 `report.*` 前缀，未跨模块复用 `cmd.*`）。
+  - 判定抽为 `ReportGenerator.msptEstimateTag(snap)`，HTML 卡片与 TXT 两个分支接入；
+    ActionBar 在 MSPT 段后独立追加，并主动排除「未知 (估算)」矛盾组合。
+  - HTML 转义只做一次（用 `&<>"x` 覆盖文案实测输出 `&amp;&lt;&gt;&quot;x`，无三重转义）。
+- **`future.get()` 无超时导致关服可能永久阻塞**（`f-s06-conc-02`，LOW）。`shutdown()` 调
+  `shutdownNow()` 会清空队列却**不完成**已排队的 Future（JDK 21 实测：`isDone=false
+  isCancelled=false`，2 秒后仍如此），而 `submitAndAwait` 的 `get()` 无超时 → 永久阻塞调用线程。
+  - 改为 `get(30, TimeUnit.SECONDS)`，新增 `REPORT_AWAIT_TIMEOUT_SECONDS=30L` 常量，
+    超时记 WARNING 并返回 null。
+  - **刻意不调 `future.cancel(true)`**：中断写盘线程会留下半写报告文件，与「绝不产生半份报告」
+    前提冲突。代价是被 drain 的 Future 仍持有 plugin 引用直到 JVM 退出（执行器线程为 daemon，
+    关服窗口极短）。
+- **`DiagnosticEngine.Result` 谎报「全部已评估」**（`f-s03-logic-02` + `f-s03-err-01` +
+  `f-s03-contract-02`，LOW）。两条提前返回（`snap == null` / `cfg == null`）用 `RULES.size()`
+  当 total，使 `evaluatedCount()` 返回 5、`fullyEvaluated()` 返回 true，而实际 0 条规则运行。
+  - 提前返回的 `total` 改为 0，`fullyEvaluated()` 加 `total > 0` 前置；`total` 字段名未改，
+    只把「评估基数」语义写进 javadoc。
+  - 消费者穷举确认：`Result` 唯一入口 `PerfScopeCommand:1016`，而 `:1011` 已先判
+    `getLatest() == null` 提前 return，故**无任何消费方依赖旧行为**，用户可见输出零变化。
+
+### Changed
+- **`onEnable` 裸调 `configManager.load()` 的文档声明**（`f-s06-err-01` + `f-s03-err-05`，LOW）。
+  机制成立（`load():147-154` 会抛 `IllegalStateException`），但后果是**清晰的 fail-fast**：
+  `:150-152` 已在抛前打两条 SEVERE（本地化原因 + 修复指引），服务端会判启用失败并留堆栈。
+  `reload()` 有 catch 属**正当的不对称**——启动期没有旧配置可退。
+  - **只改注释，0 行代码变更**（机械核验：`git diff -U0 | grep -vE '^\+\\s*//'` 为空）。
+    `PerfScope.java:86` 新增 4 行注释声明「启动期不捕获是刻意设计」，
+    `ConfigManager.load()` javadoc 改为分场景表述。
+  - **明令禁止**给 `onEnable` 加 `try/catch`：那会让插件带着 `config == null` 继续装配
+    12 个模块，后果远比 fail-fast 严重。
+
+### Notes
+- **本轮覆盖不完整，必须如实声明**：Devil's Advocate 的四类覆盖扫描发现 7 条缺口，
+  已补派 2 个审计实例闭合其中 4 条。以下 3 处**本轮不具备发现能力**：
+  - `slice-01 / security`：`WebhookNotifier.java:207-414` 的出站目的地校验段在审计波零行号引用。
+    （锐评波已由 `slice-02` Skeptic 实际覆盖并判其 SSRF 防护完整，故无需补派。）
+  - `slice-05 / concurrency`：`ReportGenerator` 的实例态与清理动作跨线程访问、
+    `ReportMessages.ensureRegistered` 静态注册时序、`ThresholdColors` 的 `configManager` 读取路径。
+  - `slice-05 / contract`：`ReportGenerator` 三格式输出契约与 `Messages` 键契约（问题密度不支持
+    「无需 contract 维度」的判断）。
+- **未闭合项（留给下一轮）**：
+  - `f-s05-logic-02` 的 JSON 路径未同步（HTML/TXT 已在 fix-05C 补完）：`ReportGenerator:747`
+    的 `unavailableSection()` 仍只输出 `{"status":"unavailable"}`，未携带成因喵。
+    因 JSON 字段名是下游依赖的外部契约，加 `cause` 字段属 `PUBLIC_API_CHANGE`，
+    属 `UNRESOLVED_FINDING`、`blocking: false`喵。
+  - `f-s05-logic-01`（JSON `alerts.health` 恒 `degraded`）——MEDIUM，本轮未进修复波喵。
+    真实 Paper 端到端实测坐实：仅把 `mspt.enabled` 设为 `false`、服务器 TPS 20 / 零告警，
+    JSON 仍输出 `"health": "degraded"`，而同刻 `/perfscope status` 正确显示
+    `MSPT: Disabled (config mspt.enabled=false)`喵。依赖 `health` 做监控抓取的下游会对
+    按配置正常运行的服务器永久报异常喵。
+  - `f-s04-conc-02`（`shutdown()` join 超时分支从关服线程操作写线程正在用的 `BufferedWriter`）
+    与 `f-s04-err-03`（`flush`/`close` 同 try，flush 失败跳过 close）未被任何修复项合并，
+    本轮未处理。
+  - `fix-07` 的 `OBSERVED_BUT_OUT_OF_SCOPE`：其余 4 处 noop 消费点
+    （`MetricsCollector:338-339` 的 sync/jvm 句柄、`PerfScope:308` 的 healthWatchTask、
+    `PerfScope:400` 的 autoReportTask、`ServerCompat:386` 的 runLater）同样无法判读 noop。
+  - `fix-07` 发现的非 Folia 对称缺口：`SchedulerAdapter:85` 的 Bukkit 分支无 try，
+    失败形态是**抛异常而非返回 noop**，会留下「已发已开启回执 + 集合有 UUID + 任务未装」
+    且下次点击变退订。
+- **规则 10 的局限（必须如实记录）**：CLAUDE.md 规则 10 要求涉及阈值/迟滞/窗口的改动
+  用真实采集序列（≥30 分钟）回放确认。**仓库内没有任何真实采集的 CSV 数据，也没有运行中的
+  服务器**，故本轮只验证了「钳制逻辑在边界值下是否正确」，**未验证修正后参数在真实负载下的
+  行为**。不得据此声称做过实测。
+- **测试覆盖为零**：仓库无 `src/test` 目录。所有修复的验证依赖仓库外临时探针
+  （`%TEMP%/pscope-fix*/`），未入源码树。已多次记入各修复项的 `residual_risks`，
+  建议后续补建测试。
+- **多 Agent 并行的已知风险**：所有 9 个修复项的 `rollback_command` 都是
+  `git checkout -- <file>`，但 `PerfScopeCommand.java` 被 5 个修复项先后修改、
+  `ReportGenerator.java` 被 3 个修改。**机械执行 `rollback_command` 会连带回滚他人的改动**，
+  回滚时必须用 `git checkout -p` 定向到具体 hunk。这是框架按「单 Agent 独占文件」设计的
+  真实局限。
+- **项目指令文件的事实纠正**：根 `CLAUDE.md` 的「关键文件」表称 `plugin.yml` 版本号为
+  硬编码 `1.0.0`、未用 Maven filtering。**实际 `plugin.yml:2` 为 `${project.version}`，
+  `pom.xml:111-116` 已开启 filtering**。建议更正该表。
+
+---
+
+## [Unreleased] — round1 修复收尾：JSON 成因区分 + 报告超时告警本地化
+
+> **背景**：round1 独立审计（57 份产物，179 条原始发现 → 9 个修复单元，8/8 PASS）
+> 遗留 4 项 `HUMAN_DECISION_REQUIRED`。本文档段落记录其中两项的执行结果。
+
+### Changed
+- **JSON 报告的不可用段新增 `cause` 字段**，区分三种成因：
+  `platform`（平台跳过，如 Folia）/ `disabled`（服主在配置里关掉）/ `collect_failed`（采集失败）。
+  此前所有不可用段都是恒定的 `{"status":"unavailable"}`，导致"自己关了 `mspt.enabled`"与
+  "采集抛异常"在 JSON 里**逐字节不可区分**。HTML/TXT 两侧在 round1 已按成因区分，JSON 是唯一的缺口。
+  成因判定优先级依 `platformSkipped ⊆ disabledModules ⊆ unavailable` 的集合契约：
+  平台跳过 → 配置禁用 → 采集失败。顺序不能反——Folia 上被跳过的模块同时也在 `disabledModules` 里。
+- **`alerts.health` 不再把"配置禁用"算成 `degraded`**。取值改为三档：
+  `ok`（无不可用）/ `partial`（仅配置禁用或平台跳过，无采集失败）/ `degraded`（有真正的采集失败）。
+  修复前该字段直接取 `snap.unavailable.isEmpty()`，于是**按配置正常运行的服务器会被永久报异常**——
+  依赖该字段做 CI 门禁或 Grafana 抓取的下游会持续收到假告警（`f-s05-logic-01`，round1 端到端坐实）。
+
+### Fixed
+- **报告超时告警未走 i18n 键表**（round1 N-2）。`ReportGenerator` 的 `TimeoutException` 分支
+  原本输出硬编码英文，而同文件其余 8 条控制台告警全部走 `report.log.*` 键，
+  `language: zh` 的服务器会看到语言混用。现改为 `report.log.await-timeout`。
+- **超时告警文案补上"后台可能仍会生成"**（round1 N-1）：超时后不 cancel 任务，被放行的任务
+  可能随后落盘，用户在聊天框看到"失败"后又冒出文件的认知冲突由此消除。
+
+### Verification
+- **真实 Paper 服务端端到端**（`verify-json-cause.ps1`）：
+  - 正常：`health=ok`，mspt 段无 `cause`
+  - `mspt.enabled=false` + reload：`mspt.status=unavailable`，**`mspt.cause=disabled`**，
+    **`health=partial`**（修复前为 `degraded`）
+  - 恢复后：`health=ok`，零残留
+- **回归**：`report` 10/10、`config` 11/11、`boot` 6/6、`diagnose` 9/9、`i18n` 7/7 全绿。
+- `f-s06-conc-02` 的超时路径已在 round1 由 `verify-06` 用真实 `submitAndAwait` 驱动验证
+  （基线 45s 后 `waiterAlive=true`，当前 30.08s 返回 `null`），本轮补齐其附带的两条文案缺陷。
+
+---
+
 ## [Unreleased] — Wave 10「bStats 自定义图表：把"有没有真实用户"变成可验证信号」
 
 > **背景**：`EXECUTION-PLAN.md §5` 把 ROADMAP V2.0 全部条目（Prometheus / Grafana / PAPI /

@@ -43,6 +43,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 
 /**
@@ -82,6 +84,8 @@ public class ReportGenerator {
     //   ③ 捕获 FileAlreadyExistsException 后换名重试（最多 MAX_FILE_NAME_RETRIES 次）。
     // 守护线程 + 有界语义：不阻止 JVM 退出，onDisable 由 shutdown() 主动收尾。
     private static final int MAX_FILE_NAME_RETRIES = 10;
+    // f-s06-conc-02：shutdownNow() 会 drain 队列却不完成已排队的 Future，无超时的 get() 会永久阻塞。
+    private static final long REPORT_AWAIT_TIMEOUT_SECONDS = 30L;
     private final ExecutorService reportExecutor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "perfscope-report");
         t.setDaemon(true);
@@ -142,9 +146,14 @@ public class ReportGenerator {
             return null;
         }
         try {
-            return future.get();
+            return future.get(REPORT_AWAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();   // 恢复中断，交由上层停止
+            return null;
+        } catch (TimeoutException e) {
+            // f-s06-conc-02：不 cancel(true)，否则可能中断写盘留下半写文件。
+            // N-1：文案明确"后台可能仍会生成"，避免用户看到"失败"后又冒出文件。
+            plugin.getLogger().warning(Messages.get("report.log.await-timeout", REPORT_AWAIT_TIMEOUT_SECONDS));
             return null;
         } catch (ExecutionException e) {
             // generateSpecificOnExecutor 自身已兜底全部异常，走到这里属意外；仍不向调用方抛出
@@ -367,9 +376,9 @@ public class ReportGenerator {
                     + ServerCompat.tpsScopeLabel()));
         }
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT)) {
-            // 9A-1：Folia 上是"该平台没有全局 tick 时间"，不是"采集坏了"——reason 来自 ServerCompat 唯一出处
-            String reason = ServerCompat.isMsptTrustworthy() ? "" : ServerCompat.msptUnavailableReason();
-            html.append(htmlCard(Messages.get("report.html.card.mspt"), unavailable, "unknown", reason));
+            // f-s05-logic-02(C)：按真实成因选原因（配置禁用 > 平台不支持 > 采集异常），
+            // 不再拿静态能力位代表 unavailable 的成员身份。裸文案交 htmlCard 单次转义。
+            html.append(htmlCard(Messages.get("report.html.card.mspt"), unavailable, "unknown", msptUnavailableCause(snap)));
         } else if (snap.msptAvg < 0) {
             html.append(htmlCard(Messages.get("report.html.card.mspt"), unknown, "unknown",
                 Messages.get("report.html.mspt.estimate-note")));
@@ -381,7 +390,8 @@ public class ReportGenerator {
                 : htmlMsg("report.html.mspt.range",
                     String.format(java.util.Locale.ROOT, "%.2f", snap.msptMin), String.format(java.util.Locale.ROOT, "%.2f", snap.msptMax));
             html.append(htmlCard(Messages.get("report.html.card.mspt"),
-                String.format(java.util.Locale.ROOT, "%.2f ms", snap.msptAvg), getMsptClass(snap.msptAvg), range));
+                String.format(java.util.Locale.ROOT, "%.2f ms", snap.msptAvg) + msptEstimateTag(snap),
+                getMsptClass(snap.msptAvg), range));
         }
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_PLAYERS)) {
             html.append(htmlCard(Messages.get("report.html.card.players"), unavailable, "unknown", ""));
@@ -605,17 +615,15 @@ public class ReportGenerator {
                 String.format(java.util.Locale.ROOT, "%.2f", snap.tps15m), ServerCompat.tpsScopeLabel())).append("\n");
         }
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT)) {
-            String reason = ServerCompat.isMsptTrustworthy() ? "" : ServerCompat.msptUnavailableReason();
-            sb.append(Messages.get(reason == null || reason.isEmpty()
-                ? "report.txt.mspt.unavailable"
-                : "report.txt.mspt.unavailable-reason", reason)).append("\n");
+            // f-s05-logic-02(C)：与 HTML 侧共用同一成因判定，杜绝两路径口径分裂
+            sb.append(Messages.get("report.txt.mspt.unavailable-reason", msptUnavailableCause(snap))).append("\n");
         } else if (snap.msptAvg < 0) {
             sb.append(Messages.get("report.txt.mspt.unknown")).append("\n");
         } else if (snap.msptMin <= 0 || snap.msptMax <= 0) {
             // 9A-0：极值未采集（avg-only / TPS 反推路径），不输出伪造的 min==max==avg
-            sb.append(Messages.get("report.txt.mspt.partial", String.format(java.util.Locale.ROOT, "%.2f", snap.msptAvg))).append("\n");
+            sb.append(Messages.get("report.txt.mspt.partial", String.format(java.util.Locale.ROOT, "%.2f", snap.msptAvg) + msptEstimateTag(snap))).append("\n");
         } else {
-            sb.append(Messages.get("report.txt.mspt", String.format(java.util.Locale.ROOT, "%.2f", snap.msptAvg),
+            sb.append(Messages.get("report.txt.mspt", String.format(java.util.Locale.ROOT, "%.2f", snap.msptAvg) + msptEstimateTag(snap),
                 String.format(java.util.Locale.ROOT, "%.2f", snap.msptMin), String.format(java.util.Locale.ROOT, "%.2f", snap.msptMax))).append("\n");
         }
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_PLAYERS)) {
@@ -716,7 +724,7 @@ public class ReportGenerator {
 
         // TPS
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_TPS)) {
-            root.put("tps", unavailableSection());
+            root.put("tps", unavailableSection(snap, MetricsSnapshot.MODULE_TPS));
         } else {
             Map<String, Object> tps = new LinkedHashMap<>();
             tps.put("1m", safeDouble(snap.tps1m));
@@ -727,7 +735,7 @@ public class ReportGenerator {
 
         // MSPT
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT)) {
-            root.put("mspt", unavailableSection());
+            root.put("mspt", unavailableSection(snap, MetricsSnapshot.MODULE_MSPT));
         } else {
             Map<String, Object> mspt = new LinkedHashMap<>();
             mspt.put("avg", safeDouble(snap.msptAvg));
@@ -741,7 +749,7 @@ public class ReportGenerator {
 
         // 玩家
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_PLAYERS)) {
-            root.put("players", unavailableSection());
+            root.put("players", unavailableSection(snap, MetricsSnapshot.MODULE_PLAYERS));
         } else {
             Map<String, Object> players = new LinkedHashMap<>();
             players.put("online", snap.playerCount);
@@ -751,7 +759,7 @@ public class ReportGenerator {
 
         // 实体
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_ENTITIES)) {
-            root.put("entities", unavailableSection());
+            root.put("entities", unavailableSection(snap, MetricsSnapshot.MODULE_ENTITIES));
         } else {
             Map<String, Object> entities = new LinkedHashMap<>();
             entities.put("total", snap.totalEntities);
@@ -764,7 +772,7 @@ public class ReportGenerator {
         // 而非任何误导性的 0；可用时输出 total/by_world。
         // 注意：v1.0 手拼 JSON 无此段，本段为**增量新键**（不改动任何既有键名，旧解析脚本天然忽略）。
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_TILE_ENTITIES)) {
-            root.put("tile_entities", unavailableSection());
+            root.put("tile_entities", unavailableSection(snap, MetricsSnapshot.MODULE_TILE_ENTITIES));
         } else {
             Map<String, Object> tileEntities = new LinkedHashMap<>();
             tileEntities.put("total", snap.tileEntityCount);
@@ -774,7 +782,7 @@ public class ReportGenerator {
 
         // 区块
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_CHUNKS)) {
-            root.put("chunks", unavailableSection());
+            root.put("chunks", unavailableSection(snap, MetricsSnapshot.MODULE_CHUNKS));
         } else {
             Map<String, Object> chunks = new LinkedHashMap<>();
             chunks.put("total_loaded", snap.totalLoadedChunks);
@@ -785,7 +793,7 @@ public class ReportGenerator {
 
         // 内存
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_MEMORY)) {
-            root.put("memory", unavailableSection());
+            root.put("memory", unavailableSection(snap, MetricsSnapshot.MODULE_MEMORY));
         } else {
             Map<String, Object> memory = new LinkedHashMap<>();
             memory.put("heap_used", snap.heapUsed);
@@ -799,7 +807,7 @@ public class ReportGenerator {
 
         // CPU
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_CPU)) {
-            root.put("cpu", unavailableSection());
+            root.put("cpu", unavailableSection(snap, MetricsSnapshot.MODULE_CPU));
         } else {
             Map<String, Object> cpu = new LinkedHashMap<>();
             cpu.put("process_load", safeDouble(snap.processCpuLoad));
@@ -810,7 +818,7 @@ public class ReportGenerator {
 
         // GC
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_GC)) {
-            root.put("gc", unavailableSection());
+            root.put("gc", unavailableSection(snap, MetricsSnapshot.MODULE_GC));
         } else {
             Map<String, Object> gc = new LinkedHashMap<>();
             gc.put("count", snap.gcCount);
@@ -820,7 +828,7 @@ public class ReportGenerator {
 
         // 服务器信息
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_SERVER)) {
-            root.put("server", unavailableSection());
+            root.put("server", unavailableSection(snap, MetricsSnapshot.MODULE_SERVER));
         } else {
             Map<String, Object> server = new LinkedHashMap<>();
             server.put("uptime_seconds", snap.uptimeSeconds);
@@ -837,7 +845,7 @@ public class ReportGenerator {
         Map<String, Object> alerts = new LinkedHashMap<>();
         alerts.put("critical", snap.activeCriticals);
         alerts.put("warnings", snap.activeWarnings);
-        alerts.put("health", snap.unavailable.isEmpty() ? "ok" : "degraded");
+        alerts.put("health", healthOf(snap));
         root.put("alerts", alerts);
 
         // 历史趋势 (TPS)
@@ -863,10 +871,72 @@ public class ReportGenerator {
     /**
      * P0-11：unavailable 模块的 JSON 段。
      */
-    private static Map<String, Object> unavailableSection() {
+    /**
+     * JSON 的不可用段。{@code cause} 字段区分三种成因，契约见 {@link #unavailableCause}。
+     *
+     * <p><b>为什么加 cause</b>：此前所有不可用段都是恒定的 {@code {"status":"unavailable"}}，
+     * 于是"服主自己关了 mspt.enabled"与"采集抛异常"在 JSON 里**逐字节不可区分**。
+     * 更糟的是 {@code alerts.health} 直接拿 {@code snap.unavailable.isEmpty()} 判定，
+     * 把"按配置正常运行"也算成 {@code degraded}——依赖该字段的 CI 门禁 / Grafana 抓取
+     * 会对完全健康的服务器永久报异常。HTML/TXT 两侧此前已按成因区分，JSON 是唯一的缺口。</p>
+     *
+     * <p><b>契约（外部分接口）</b>：{@code status} 与 {@code cause} 都是新增/既有稳定字段。
+     * 旧脚本只读 {@code status} 的，行为零变化；需要成因的读 {@code cause}。</p>
+     */
+    private static Map<String, Object> unavailableSection(MetricsSnapshot snap, String module) {
         Map<String, Object> section = new LinkedHashMap<>();
         section.put("status", "unavailable");
+        section.put("cause", unavailableCause(snap, module));
         return section;
+    }
+
+    /** 成因的字面量（JSON 值，非展示文案；稳定契约，不随语言变化）。 */
+    private static final String CAUSE_DISABLED = "disabled";
+    private static final String CAUSE_PLATFORM = "platform";
+    private static final String CAUSE_FAILED = "collect_failed";
+
+    /**
+     * 判定模块不可用的成因，返回**稳定字面量**而非本地化文案——JSON 是给脚本消费的，
+     * 文案会随 {@code general.language} 变化，字面量不会。
+     *
+     * <p>优先级依 {@link MetricsSnapshot} 的集合契约
+     * （{@code platformSkipped ⊆ disabledModules ⊆ unavailable}）：
+     * 平台跳过 → 配置禁用 → 采集失败。顺序不能反：Folia 上被跳过的模块同时也在
+     * {@code disabledModules} 里，若先判 disabled 会把平台成因误报成用户配置。</p>
+     */
+    private static String unavailableCause(MetricsSnapshot snap, String module) {
+        if (snap == null || module == null) {
+            return CAUSE_FAILED;
+        }
+        if (snap.platformSkipped.contains(module)) {
+            return CAUSE_PLATFORM;
+        }
+        if (snap.disabledModules.contains(module)) {
+            return CAUSE_DISABLED;
+        }
+        return CAUSE_FAILED;
+    }
+
+    /**
+     * {@code alerts.health} 的取值。
+     *
+     * <p>只有<b>真正的采集失败</b>才算 {@code degraded}。模块被服主主动关闭、或平台不支持，
+     * 都属于"按预期运行"，不应污染健康度——否则 CI 门禁会对健康的服务器永久报警。</p>
+     *
+     * <p>取值：{@code ok}（无不可用）/ {@code degraded}（有采集失败）/ {@code partial}
+     * （仅配置禁用或平台跳过，无采集失败）。{@code partial} 是新增取值，旧脚本
+     * 若只认 {@code ok} 会把它当异常——这是有意的：它确实不完全健康，只是原因不是故障。</p>
+     */
+    private static String healthOf(MetricsSnapshot snap) {
+        if (snap == null || snap.unavailable.isEmpty()) {
+            return "ok";
+        }
+        for (String module : snap.unavailable) {
+            if (CAUSE_FAILED.equals(unavailableCause(snap, module))) {
+                return "degraded";
+            }
+        }
+        return "partial";
     }
 
     /**
@@ -888,6 +958,28 @@ public class ReportGenerator {
             default:
                 return "unknown";
         }
+    }
+
+    /** f-s05-logic-02(C)：MSPT 不可用的真实成因（HTML/TXT 唯一入口）。"{@code MODULE_MSPT} ∈ unavailable" 与
+     *  能力位 {@link ServerCompat#isMsptTrustworthy()} 互不蕴含；优先级依 {@link MetricsSnapshot#disabledModules}
+     *  契约：配置禁用 → 平台不支持 → 采集异常。返回裸文案，永不为 null。 */
+    private static String msptUnavailableCause(MetricsSnapshot snap) {
+        if (snap != null && snap.disabledModules.contains(MetricsSnapshot.MODULE_MSPT)) {
+            return Messages.get("report.common.mspt.disabled");
+        }
+        if (ServerCompat.isMsptTrustworthy()) {
+            return Messages.get("report.common.mspt.collect-failed");
+        }
+        String reason = ServerCompat.msptUnavailableReason();
+        return (reason == null || reason.isEmpty()) ? Messages.get("report.common.unavailable") : reason;
+    }
+
+    /**
+     * f-s02-data-08：TPS 反推路径的估值标记（HTML/TXT 共用，与聊天层同口径；一/二级是真实测量，不标）。
+     * 返回裸文案不转义——HTML 侧由 {@link #htmlCard} 统一单次转义，避免二次转义。
+     */
+    private static String msptEstimateTag(MetricsSnapshot snap) {
+        return snap.msptSource == MetricsSnapshot.MSPT_SOURCE_TPS_FALLBACK ? Messages.get("report.common.estimated-tag") : "";
     }
 
     /**

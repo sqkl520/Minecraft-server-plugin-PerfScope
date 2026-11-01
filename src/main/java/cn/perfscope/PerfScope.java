@@ -84,6 +84,10 @@ public final class PerfScope extends JavaPlugin {
         // 首两行（插件名/服务端）永远是英文默认语言，正是"混排"最显眼的一处。
 
         // 初始化配置
+        // f-s06-err-01 / f-s03-err-05：此处**刻意不捕获**（与 reload() 的 catch 是两种场景）——
+        // 启动期没有旧配置可退（configManager.get() 此时为 null），让异常穿透由服务端判为启用失败，
+        // 是清晰可诊断的 fail-fast；捕获后继续装配只会让后续模块解引用 null（第一处是 runRetention 的
+        // history_persistRetentionDays）。reload() 已有可用快照，捕获并按旧配置继续才是正确取舍。
         this.configManager = new ConfigManager(this);
         configManager.load();
 

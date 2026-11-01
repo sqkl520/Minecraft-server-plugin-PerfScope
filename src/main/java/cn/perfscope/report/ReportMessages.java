@@ -74,6 +74,13 @@ public final class ReportMessages {
         put(en, zh, "report.common.unavailable", "unavailable", "不可用");
         put(en, zh, "report.common.unknown", "unknown", "未知");
         put(en, zh, "report.common.generated-at", "Generated at: ", "生成时间: ");
+        // f-s02-data-08：MSPT 走 TPS 反推路径时的估值标记（HTML/TXT 共用，与聊天层 cmd.mspt.estimated-tag 同口径）
+        put(en, zh, "report.common.estimated-tag", " (estimated)", " (估算)");
+        // f-s05-logic-02(C)：MSPT 不可用的两种"本地成因"，与 ServerCompat 的平台原因键互补。
+        // 报告层此前只有"不可用"一句，服主自己关掉模块与采集抛异常无法区分（见 MetricsSnapshot.disabledModules 契约）。
+        put(en, zh, "report.common.mspt.disabled",
+            "Disabled in config (mspt.enabled=false)", "已在配置中禁用（mspt.enabled=false）");
+        put(en, zh, "report.common.mspt.collect-failed", "Collection failed", "采集失败");
 
         // ---- HTML：页头 ----
         put(en, zh, "report.html.title", "PerfScope Performance Report", "PerfScope 性能报告");
@@ -187,6 +194,11 @@ public final class ReportMessages {
             "[PerfScope] 报告生成器已关闭，本次报告请求已忽略");
         put(en, zh, "report.log.task-failed",
             "[PerfScope] Report generation task failed: {0}", "[PerfScope] 报告生成任务异常: {0}");
+        // f-s06-conc-02 / N-2：超时告警原先在 ReportGenerator 里是硬编码英文，与同文件其余
+        // 8 条控制台告警全部走键表的既有约定不一致，zh 服务器会看到英文。
+        put(en, zh, "report.log.await-timeout",
+            "[PerfScope] Report task did not finish within {0}s; stopped waiting (it may still complete in the background)",
+            "[PerfScope] 报告任务 {0} 秒内未完成，已停止等待（它可能在后台继续并最终生成）");
         put(en, zh, "report.log.generate-failed",
             "Failed to generate the {0} report: {1}", "生成{0}报告失败: {1}");
         put(en, zh, "report.log.name-collision",
