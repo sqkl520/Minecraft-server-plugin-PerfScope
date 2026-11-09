@@ -148,6 +148,12 @@ if ($null -ne $node) {
     Invoke-Step 'L1 scenario assertion validity' {
         & $node (Join-Path $PSScriptRoot 'check-scenarios.mjs') '--repo' $RepoRoot '--harness' $Harness
     }
+    # Negative assertions (`notPresent` / `expectNot`) pass both when the guarded failure never
+    # happens AND when the pattern can never match. This step feeds each one a sample of what
+    # the failure WOULD emit and confirms the matcher fires -- the only way to tell those apart.
+    Invoke-Step 'L1 negative-assertion controls' {
+        & $node (Join-Path $PSScriptRoot 'negative-controls.mjs')
+    }
     Invoke-Step 'L1 config backward compatibility' {
         & $node (Join-Path $PSScriptRoot 'check-config-compat.mjs') '--repo' $RepoRoot
     }

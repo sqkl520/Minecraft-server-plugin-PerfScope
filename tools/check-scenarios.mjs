@@ -397,20 +397,51 @@ for (const file of files) {
       }
     }
 
-    // ---- S2: a negative assertion needs a positive control in the same scenario --
+    // ---- S2: a negative assertion needs a positive control -------------------------
+    // Three ways to satisfy it, in order of strength:
+    //   1. `negativeSamples`: literal text the guarded failure WOULD emit. The strongest form --
+    //      it proves the matcher fires, without needing a second check in the same scenario.
+    //      Validated here: at least one sample must actually match this check's patterns.
+    //   2. `controlledBy`: names a positive check in the same scenario that asserts the same text.
+    //   3. (legacy heuristic) some positive check happens to share a variant.
+    // Without any of these the check passes both when the failure never happens AND when the
+    // pattern can never match -- i.e. it proves nothing.
     const isNegative = (c.expectNot && expectNotVars.length > 0) || c.notPresent === true;
     if (isNegative) {
-      const declared = c.controlledBy;
-      const negVars = new Set([...expectNotVars, ...patternVars]);
-      const control = declared
-        ? positives.find(p => p.id === declared)
-        : positives.find(p => [...variantsOf(p.expect), ...variantsOf(p.pattern)].some(v => negVars.has(v)));
-      if (!control) {
-        add('WARN', name, id, 'S2-NEGATIVE-NO-CONTROL',
-          declared
-            ? `controlledBy "${declared}" does not name a positive check in this scenario`
-            : 'no positive check in this scenario asserts the same text -- if the guarded behaviour '
-              + 'never happens, this check is vacuously true (R-01 shape)');
+      const samples = variantsOf(c.negativeSamples);
+      if (samples.length > 0) {
+        // The samples must be matched BY THIS CHECK's own matcher, not just non-empty.
+        const ownPats = (c.notPresent === true ? patternVars : expectNotVars);
+        const ownRegex = isRegex(c);
+        const matchers = ownPats.map(p => {
+          if (ownRegex) {
+            try { const re = new RegExp(p); return s => re.test(s); }
+            catch { return () => false; }
+          }
+          return s => s.includes(p);
+        });
+        const hit = samples.some(s => matchers.some(m => m(s)));
+        if (!hit) {
+          add('ERROR', name, id, 'S2-CONTROL-NEVER-MATCHES',
+            `negativeSamples supplied but NONE of them match this check's own patterns `
+            + `(${ownRegex ? 'regex' : 'literal'}) -- the control is wrong, or the pattern is dead. `
+            + `samples: ${JSON.stringify(samples.slice(0, 3))}`);
+        }
+        // A valid control settles the question; nothing more to report.
+      } else {
+        const declared = c.controlledBy;
+        const negVars = new Set([...expectNotVars, ...patternVars]);
+        const control = declared
+          ? positives.find(p => p.id === declared)
+          : positives.find(p => [...variantsOf(p.expect), ...variantsOf(p.pattern)].some(v => negVars.has(v)));
+        if (!control) {
+          add('WARN', name, id, 'S2-NEGATIVE-NO-CONTROL',
+            declared
+              ? `controlledBy "${declared}" does not name a positive check in this scenario`
+              : 'no positive check in this scenario asserts the same text, and no negativeSamples '
+                + 'declared -- if the guarded behaviour never happens, this check is vacuously true '
+                + '(R-01 shape). Add negativeSamples: [<text the failure would emit>] to settle it.');
+        }
       }
     }
 
