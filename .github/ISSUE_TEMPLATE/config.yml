@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Read the FAQ first
+    url: https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/blob/main/FAQ.md
+    about: Will it slow my server down? Does it collect my data? Why is Folia missing MSPT? Why does a module show "Unavailable"?
+  - name: Compatibility matrix
+    url: https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/blob/main/README-EN.md#target-platform--compatibility
+    about: What is verified on a real server, what merely loads, and what is not supported at all.
+  - name: Report a security vulnerability
+    url: https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/blob/main/SECURITY.md
+    about: Do not open a public issue for security problems. SECURITY.md explains how to report privately.
+  - name: Contributing, CLA, and how to build
+    url: https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/blob/main/CONTRIBUTING.md
+    about: Build commands, pull request expectations, and the one-line CLA you must agree to before your first PR.

@@ -1,0 +1,206 @@
+name: Bug report
+description: Something is broken, throws an exception, or shows a number you believe is wrong.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this.
+
+        A monitoring plugin's most common "bug" is a **platform limit** or a **disabled module**, not a
+        defect. Filling in every field below is what lets us tell those apart in one pass instead of
+        five round trips.
+
+        Before you post:
+        - Read the **FAQ** (<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/blob/main/FAQ.md>)
+          and the **compatibility table** in the README.
+        - Run `/perfscope status` once. It is the plugin's own health report and it answers most
+          "why is this number empty / stale / unavailable" questions by itself.
+        - **Redact** server IPs, player names, world names if sensitive, and webhook URLs
+          (a webhook URL is a credential — it contains a token).
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      description: Reports that skip these are usually closed with a link back here.
+      options:
+        - label: I searched the existing issues and found nothing matching.
+          required: true
+        - label: I am running a Paper-family server (Paper / Purpur / Folia / Leaf / Leaves), not plain Spigot or CraftBukkit.
+          required: true
+        - label: I have read the FAQ and the compatibility table, and this is not a documented limitation.
+          required: true
+        - label: I removed or redacted server IPs, player names and webhook URLs from everything I pasted.
+          required: true
+
+  - type: dropdown
+    id: server-software
+    attributes:
+      label: Server software
+      description: |
+        The plugin prints this on startup (`[PerfScope] Server: ...`). If your fork is not listed,
+        pick "Other Paper fork" and name it in the description.
+      options:
+        - Paper
+        - Purpur
+        - Folia
+        - Leaf
+        - Leaves
+        - Pufferfish
+        - Other Paper fork
+        - Spigot / CraftBukkit (not supported — the plugin disables itself; tell us anyway)
+    validations:
+      required: true
+
+  - type: input
+    id: server-version
+    attributes:
+      label: Server version and build number
+      description: The first line of `logs/latest.log`, including the build number if present.
+      placeholder: "Paper version 1.21.4-232-master@3f1c0a1 (MC: 1.21.4)"
+    validations:
+      required: true
+
+  - type: input
+    id: mc-version
+    attributes:
+      label: Minecraft version
+      description: Just the game version, e.g. `1.21.4`. Separate from the server build above.
+      placeholder: "1.21.4"
+    validations:
+      required: true
+
+  - type: input
+    id: perfscope-version
+    attributes:
+      label: PerfScope version
+      description: Shown by `/perfscope status` (first line) or by `/perfscope help`.
+      placeholder: "1.3.0"
+    validations:
+      required: true
+
+  - type: input
+    id: java-version
+    attributes:
+      label: Java version
+      description: Output of `java -version`, or the line the server prints at startup.
+      placeholder: "OpenJDK 17.0.10+7"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: |
+        Exact commands, in order. If the problem is a wrong number, say what you compared against
+        (`/spark tps`, `/tps`, the vanilla F3 screen, another plugin).
+      placeholder: |
+        1. Start the server with the default config
+        2. Run `/perfscope entities`
+        3. Compare the total with `/spark entities` (or with an independent count)
+        4. The two differ by roughly 30%
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What you expected to see, and why you expected it.
+      placeholder: "Entity totals should be within a few percent of what another tool reports on the same tick."
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: |
+        What happened instead. Paste the exact output if it is short. If an exception was thrown,
+        include the full stack trace — the first line alone usually is not enough.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: status-output
+    attributes:
+      label: Output of `/perfscope status`
+      description: |
+        **This is the single most useful field in the report.**
+
+        Run `/perfscope status` and paste the whole thing. It tells us whether collection is alive or
+        stalled, how much main-thread time collection costs (p50 / p95 / max), whether the JVM
+        sampling thread is alive, how many consecutive cycles have failed, and — for every module —
+        whether it is working, disabled by config, warming up, failing, or skipped because of a
+        platform limitation.
+
+        If the plugin is disabled or the command is unavailable, write `unavailable` and say why.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Console log
+      description: |
+        Paste the `[PerfScope]` lines from `logs/latest.log` (startup block plus anything around the
+        problem). If the log is long, paste it into a **gist** and link it here instead of pasting
+        thousands of lines.
+
+        Include the lines from `PerfScope` being enabled through the first few seconds of operation —
+        the startup block is where platform detection, MSPT capability and config clamping are
+        reported.
+
+        Redact: server IPs, player names, webhook URLs, and anything under a personal directory path.
+      render: text
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reproducible
+    attributes:
+      label: Can you reproduce it reliably?
+      description: This changes the diagnosis path completely — a one-off is usually an environment issue.
+      options:
+        - "Yes — every time, following the steps above"
+        - "Yes — but only under load or after a long uptime"
+        - "No — it happened once and I cannot make it happen again"
+        - "Not sure — I have not tried more than once"
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant configuration
+      description: |
+        The keys you changed from the defaults, plus `general.update_interval`, `general.language`
+        and any module you disabled. You do not need to paste the whole file.
+      placeholder: |
+        general:
+          update_interval: 20
+          language: en
+        alerts:
+          debounce-cycles: 60
+      render: yaml
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: |
+        Screenshots, a `/spark profiler` link if the server was lagging, other plugins that touch
+        metrics or scheduling (spark, Plan, ClearLag, PlaceholderAPI, a Folia scheduler shim), or an
+        exported report — attach the report as a **file**, do not paste HTML inline.
+
+        Note that an exported report contains world names and entity counts. Review it first.
+    validations:
+      required: false

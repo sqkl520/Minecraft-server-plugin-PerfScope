@@ -1,0 +1,123 @@
+name: Feature request
+description: Suggest a capability PerfScope does not have, or a better way to present what it already collects.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea.
+
+        PerfScope has a deliberate boundary, and it is worth checking it before writing this up —
+        the following are **out of scope by design**, not by backlog:
+
+        - **Root-cause profiling** (method-level flame graphs). Use `/spark profiler`; this plugin
+          narrows down *which* metric is abnormal, it does not find the slow line of code.
+        - **Automatic remediation** — no restarts, no entity clearing, no config edits, ever. It
+          only observes, alerts and exports.
+        - **Long-term time-series platform** (weeks/months, multi-server aggregation, Prometheus
+          replacement). History is a single server, daily CSV, 7-day retention by default.
+        - **Support for plain Spigot / CraftBukkit.** The plugin requires Paper APIs and disables
+          itself on anything else.
+
+        Requests inside those boundaries are usually closed with a pointer to this list.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I read the "Boundaries & What This Plugin Does Not Do" section of the README.
+          required: true
+        - label: I searched existing issues and discussions for this idea.
+          required: true
+
+  - type: textarea
+    id: scenario
+    attributes:
+      label: Your situation
+      description: |
+        Describe the server, not the solution. What does it run, how big is it, and what were you
+        doing when you wanted this? "A 60-player survival server where mob farms push entity counts
+        past 5000 nightly, and I cannot tell which world the growth is in" is far more useful than
+        "add per-world charts".
+      placeholder: |
+        Player count / worlds / whether you run Folia or a fork / roughly how many loaded chunks /
+        whether it is a network or a single server.
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: How do you solve it today?
+      description: |
+        What you use now — another plugin, a shell script, an external stack (spark / Plan /
+        Prometheus + Grafana), or nothing at all. This tells us whether we would be duplicating an
+        existing tool, which is usually a reason not to build it.
+      placeholder: "I run /perfscope entities for each world in turn and copy the numbers into a spreadsheet."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What should PerfScope do?
+      description: |
+        As concrete as you can make it. A command name, the shape of the output, a config key,
+        whether it belongs in the alert path or only on demand. You do not need to know how it
+        would be implemented.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: cost
+    attributes:
+      label: Where may this cost main-thread time?
+      description: |
+        Every number this plugin shows is read on the main thread or on a background thread that
+        reads JVM counters. Anything that walks the world (entities, chunks, tile entities) is a
+        main-thread sweep, which is why those run at reduced cadence by default. Being honest here
+        helps us judge whether a feature is worth its cost.
+      options:
+        - On demand only (a command the admin runs) — cost is fine
+        - Periodic, every few seconds — should stay cheap
+        - Continuous / real-time — must be nearly free
+        - Background thread only (JVM-level data, no world access)
+        - I do not know — please decide
+    validations:
+      required: true
+
+  - type: dropdown
+    id: server-size
+    attributes:
+      label: How large is the server this would run on?
+      description: Used to judge whether a proposed threshold or default would be sane at that scale.
+      options:
+        - Under 10 players, 1 world
+        - 10-50 players, a few worlds
+        - 50+ players, or a network of servers
+        - Not applicable / just evaluating
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      description: |
+        Contributions are welcome. Read `CONTRIBUTING.md` first, and note that the first PR requires
+        agreeing to `CLA.md` (you keep your copyright; the maintainer gets a relicensing right).
+      options:
+        - label: I am willing to test a development build on my server.
+          required: false
+        - label: I am willing to open a pull request for this.
+          required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Mockups, links to similar features in other plugins, edge cases you can already foresee.
+    validations:
+      required: false
