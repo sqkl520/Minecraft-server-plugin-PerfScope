@@ -322,15 +322,23 @@ Collection cost: p50 0ms / p95 54ms / max 127ms (66 samples, main thread)
 
 **Known scale boundaries** (honest, not a guarantee):
 
-| Scale | Measured collision tick | Note |
-|---|---|---|
-| ~300 chunks / idle | max **127ms** | measured on this machine's test server |
-| ~11,000 chunks / 13,000 entities | ~**66.6ms** (p95 75.5ms) | earlier baseline, four modules colliding |
-| ~50,000 entities | ~**106-119ms** | hotspot sweep alone dominates |
+| Scale | Collision tick | Evidence grade | Note |
+|---|---|---|---|
+| ~300 chunks / idle | max **127ms** | **A — reproducible by you** | self-reported by `/perfscope status` on the test server |
+| ~11,000 chunks / 13,000 entities | ~**66.6ms** (p95 75.5ms) | **B — one-off benchmark** | measured once by a dedicated script; not part of continuous regression |
+| ~50,000 entities | ~**106-119ms** | **C — extrapolated** | never measured on a server actually running 50k entities |
 
-v1.3.0 moved the tile-entity period from 10 to **7**, taking the least common multiple of the four periods from **30 cycles** to **210 cycles** (~3.5 minutes by default), cutting the collision frequency to 1/7.
+**What the grades mean** (this table exists so you know how much to trust each row):
 
-**What was deliberately not done**: no phase offsets, no chunk-period change. Scattering only helps if *each module on its own* stays under one tick — at 50k entities the hotspot sweep alone takes 106ms, so at that scale scattering merely splits one big stall into several smaller ones. The real fix is **hotspot scan partitioning** (v1.4 scope).
+- **A** — there is a one-command reproduction (`/perfscope status`); anyone running the plugin can get the same number and compare.
+- **B** — measured once with a dedicated script under a specific load. The method is documented, but it is not a regression test and another machine may differ substantially.
+- **C** — extrapolated linearly from per-module cost, never run at the target scale. **Real large-server numbers may deviate significantly.**
+
+v1.3.0 moved the tile-entity period from 10 to **7**, taking the least common multiple of the four periods from **30 cycles** to **210 cycles** (~3.5 minutes by default), cutting the collision frequency to 1/7. Measured here (~300 chunks): cycles exceeding one tick went from 7.6% to **0%**.
+
+v1.4 added **hotspot scan partitioning** (`hotspots.scan-shards`, default 10): one full sweep is spread across several collection cycles, cutting the per-cycle cost to roughly 1/N. **The benefit scales with the number of loaded chunks** — it is significant on a large server and essentially invisible on a 300-chunk one.
+
+**What was deliberately not done**: no phase offsets, no chunk-period change. Scattering only helps if *each module on its own* stays under one tick — at 50k entities the hotspot sweep alone takes 106ms, so at that scale scattering merely splits one big stall into several smaller ones. Partitioning is what actually lowers that per-cycle cost.
 
 Reproduce: `tools/perfscope-jfr-overhead.ps1` (counts per sample block, requests both `jdk.ExecutionSample` and `jdk.NativeMethodSample`, isolates Server thread with a Wilson interval, prints the tested jar's version and SHA-256).
 The full executable minimal measurement set (three load tiers, A/B baseline, artifact format) is in `docs/07-guides/PERF-BASELINE-PLAN.md`.
