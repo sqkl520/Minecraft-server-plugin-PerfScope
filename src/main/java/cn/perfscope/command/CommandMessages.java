@@ -321,9 +321,11 @@ public final class CommandMessages {
         put(en, zh, "cmd.status.collect-cost",
             "p50 {0}ms / p95 {1}ms / max {2}ms ({3} samples, main thread)",
             "p50 {0}ms / p95 {1}ms / max {2}ms（{3} 个样本，主线程）");
+        // 只有绝对次数会让用户误判：93 个样本里超 2 次是 2%，和 5 个样本里超 2 次是
+        // 40% 是天壤之别，但原文案两者都说 "2 cycles exceeded"。带上占比与样本总数。
         put(en, zh, "cmd.status.collect-cost-warn",
-            "{0} cycles exceeded {1}ms (1 tick) - the collector is eating into tick budget",
-            "有 {0} 个周期超过 {1}ms（1 tick）—— 采集器正在占用 tick 预算");
+            "{0}/{1} cycles ({2}%) exceeded {3}ms (1 tick) - on those cycles the collector used more than a full tick budget. No action needed if this stays low.",
+            "有 {0}/{1} 个周期（{2}%）超过 {3}ms（1 tick）—— 这些周期上采集占满了整份 tick 预算。占比持续偏低则无需处理。");
         put(en, zh, "cmd.status.jvm-label", "JVM sampling: ", "JVM 采集: ");
         put(en, zh, "cmd.status.jvm-never",
             "Never succeeded (no memory/CPU/GC data)", "从未成功（内存/CPU/GC 无数据）");

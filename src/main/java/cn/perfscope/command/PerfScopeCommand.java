@@ -1387,8 +1387,10 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 .append(Component.text(Messages.get("cmd.status.collect-cost",
                     dur[0], dur[1], dur[2], dur[3]), overBudget ? RED : GREEN)));
             if (overBudget) {
+                // 带上占比：绝对次数看不出严重程度（2/93 = 2% vs 2/5 = 40%）。
+                double pct = dur[3] > 0 ? (100.0 * dur[4] / dur[3]) : 0.0;
                 sender.sendMessage(Component.text(Messages.get("cmd.status.collect-cost-warn",
-                    dur[4], warnMs), RED));
+                    dur[4], dur[3], String.format(java.util.Locale.ROOT, "%.1f", pct), warnMs), RED));
             }
         }
         // 9A-20 顺手项：JVM 异步节拍是独立任务——主线程节拍正常 ≠ 内存/CPU/GC 是新的。
