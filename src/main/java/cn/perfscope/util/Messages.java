@@ -480,7 +480,9 @@ public final class Messages {
             String locale = detectLocale(plugin, false);
             writeDefaultFile(plugin, file, locale);
         } catch (Exception | LinkageError e) {
-            warn(plugin, "messages.yml 生成失败（将使用内置默认）: " + e.getMessage());
+            warn(plugin,
+                "failed to generate messages.yml (falling back to built-in defaults): " + e.getMessage(),
+                "messages.yml 生成失败（将使用内置默认）: " + e.getMessage());
         }
     }
 
@@ -506,9 +508,13 @@ public final class Messages {
         // mergeModules 不持有 plugin，改由这里统一发；补齐在 mergeModules 内已完成。
         List<String> mismatched = mergeModules();
         if (!mismatched.isEmpty()) {
-            warn(plugin, "内置文案表的键集合不一致（" + mismatched.size()
-                + " 个键只在一种语言里存在，已用键名补齐，该语言下会显示键名）: "
-                + String.join(", ", mismatched));
+            warn(plugin,
+                "inconsistent message-table key sets (" + mismatched.size()
+                    + " key(s) exist in only one language; filled with the key name, so that language will show raw keys): "
+                    + String.join(", ", mismatched),
+                "内置文案表的键集合不一致（" + mismatched.size()
+                    + " 个键只在一种语言里存在，已用键名补齐，该语言下会显示键名）: "
+                    + String.join(", ", mismatched));
         }
         String locale = detectLocale(plugin, true);
         Map<String, String> userOverrides;
@@ -516,7 +522,9 @@ public final class Messages {
             userOverrides = loadOverrides(plugin, locale);
         } catch (Exception | LinkageError e) {
             userOverrides = Map.of();
-            warn(plugin, "messages.yml 加载失败（回退 " + locale + " 内置默认）: " + e.getMessage());
+            warn(plugin,
+                "failed to load messages.yml (falling back to built-in " + locale + " defaults): " + e.getMessage(),
+                "messages.yml 加载失败（回退 " + locale + " 内置默认）: " + e.getMessage());
         }
         // 单次整体发布：读线程不可能看到"新语言 + 旧覆盖"的组合
         snapshot = new Snapshot(locale, defaultsOf(locale), userOverrides);
@@ -578,8 +586,11 @@ public final class Messages {
         YamlConfiguration yaml = YamlConfiguration.loadConfiguration(file);
         if (yaml.getKeys(false).isEmpty()) {
             if (hasNonCommentContent(file)) {
-                warn(plugin, "messages.yml 解析失败（YAML 语法错误？），本次忽略该文件并使用内置默认；"
-                    + "请修正缩进/引号后执行 /perfscope reload（原文件未改动）");
+                warn(plugin,
+                    "failed to parse messages.yml (YAML syntax error?); ignoring this file and using built-in defaults. "
+                        + "Fix the indentation/quotes and run /perfscope reload (the original file is untouched).",
+                    "messages.yml 解析失败（YAML 语法错误？），本次忽略该文件并使用内置默认；"
+                        + "请修正缩进/引号后执行 /perfscope reload（原文件未改动）");
                 return new OverrideResult(Map.of(), "messages.yml 解析失败（YAML 语法错误），本次未生效");
             }
             // 空文件 / 只剩注释：没有任何覆盖，也无需迁移（不制造一份空文件的备份）
@@ -598,15 +609,22 @@ public final class Messages {
         String fileLocale = canonicalLocale(tagRaw);
         if (fileLocale == null) {
             // 关键：不能把"未知标签"归一化成默认语言——那样一份 fr 文件会被当成 en 文案使用
-            warn(plugin, "messages.yml 的 language 标签无法识别（当前值 \"" + (tagRaw == null ? "" : tagRaw)
-                + "\"，支持 en / zh），已整份忽略该文件并使用内置默认");
+            warn(plugin,
+                "unrecognised language tag in messages.yml (current value \"" + (tagRaw == null ? "" : tagRaw)
+                    + "\"; supported: en / zh). The whole file is ignored and built-in defaults are used.",
+                "messages.yml 的 language 标签无法识别（当前值 \"" + (tagRaw == null ? "" : tagRaw)
+                    + "\"，支持 en / zh），已整份忽略该文件并使用内置默认");
             return new OverrideResult(Map.of(),
                 "messages.yml 的 language 标签无法识别（\"" + (tagRaw == null ? "" : tagRaw) + "\"），本次未生效");
         }
         if (!fileLocale.equals(locale)) {
-            warn(plugin, "messages.yml 是用 \"" + fileLocale + "\" 写的，而当前语言是 \"" + locale
-                + "\"，已整份忽略该文件以避免中英混排。若要沿用其中的自定义文案，"
-                + "请把 language 改成 \"" + locale + "\" 并翻译对应条目；也可以直接删除该文件让插件重新生成");
+            warn(plugin,
+                "messages.yml is written in \"" + fileLocale + "\" but the current language is \"" + locale
+                    + "\". The whole file is ignored to avoid mixing languages. To keep its customisations, "
+                    + "set language to \"" + locale + "\" and translate the entries; or delete the file to regenerate it.",
+                "messages.yml 是用 \"" + fileLocale + "\" 写的，而当前语言是 \"" + locale
+                    + "\"，已整份忽略该文件以避免中英混排。若要沿用其中的自定义文案，"
+                    + "请把 language 改成 \"" + locale + "\" 并翻译对应条目；也可以直接删除该文件让插件重新生成");
             return new OverrideResult(Map.of(),
                 "messages.yml 语言是 \"" + fileLocale + "\"、当前是 \"" + locale + "\"，本次未生效");
         }
@@ -631,8 +649,12 @@ public final class Messages {
         }
         if (!unknown.isEmpty()) {
             // 拼错的键过去是彻底静默的：用户以为自己改了文案，实际一个字都没生效
-            warn(plugin, "messages.yml 含 " + unknown.size()
-                + " 个本版本不认识的键（不会生效，多为拼写错误）: " + String.join(", ", unknown));
+            warn(plugin,
+                "messages.yml contains " + unknown.size()
+                    + " key(s) this version does not recognise (they have no effect; usually a typo): "
+                    + String.join(", ", unknown),
+                "messages.yml 含 " + unknown.size()
+                    + " 个本版本不认识的键（不会生效，多为拼写错误）: " + String.join(", ", unknown));
         }
         return new OverrideResult(Map.copyOf(loaded), null);
     }
@@ -662,11 +684,17 @@ public final class Messages {
         //   有任何键不同 → 用户改过 → **保留原文件不动**，只警告它本次不生效。
         // 宁可少一次自动迁移，也不能吞掉用户的手工修改。
         if (customized) {
-            warn(plugin, "检测到旧版 messages.yml（无 language 标签）且其中包含自定义文案。"
-                + "为避免覆盖你的修改，本插件不会移动该文件；但它没有语言标签，"
-                + "本次已整份忽略（避免中英混排）。如需继续使用：请在文件首行加上 "
-                + "language: " + locale + "，并把条目翻译成该语言；或把该文件改名备份，"
-                + "让插件重新生成一份带标签的默认文件");
+            warn(plugin,
+                "Found a legacy messages.yml (no language tag) containing customised text. To avoid overwriting "
+                    + "your edits this plugin will not move the file; but without a language tag the whole file is "
+                    + "ignored for this run (to avoid mixing languages). To keep using it: add "
+                    + "\"language: " + locale + "\" as the first line and translate the entries, or rename the file "
+                    + "as a backup so the plugin can regenerate a tagged default.",
+                "检测到旧版 messages.yml（无 language 标签）且其中包含自定义文案。"
+                    + "为避免覆盖你的修改，本插件不会移动该文件；但它没有语言标签，"
+                    + "本次已整份忽略（避免中英混排）。如需继续使用：请在文件首行加上 "
+                    + "language: " + locale + "，并把条目翻译成该语言；或把该文件改名备份，"
+                    + "让插件重新生成一份带标签的默认文件");
             return;
         }
 
@@ -675,19 +703,30 @@ public final class Messages {
         try {
             Files.move(file.toPath(), backup.toPath(), StandardCopyOption.REPLACE_EXISTING);
         } catch (Exception | LinkageError e) {
-            warn(plugin, "检测到旧版 messages.yml（无 language 标签），但备份失败，本次已忽略该文件"
-                + "（使用内置默认，避免中英混排）: " + e.getMessage());
+            warn(plugin,
+                "Found a legacy messages.yml (no language tag) but backing it up failed; the file is ignored for "
+                    + "this run (built-in defaults are used, to avoid mixing languages): " + e.getMessage(),
+                "检测到旧版 messages.yml（无 language 标签），但备份失败，本次已忽略该文件"
+                    + "（使用内置默认，避免中英混排）: " + e.getMessage());
             return;
         }
         // f-s05-err-08：完成态日志必须在写入成功之后打。旧文件此刻已被移走，
         // 若写入失败，用户手上既没有旧文件也没有模板，日志必须同时说明「备份在哪」与「没有模板」。
         if (writeDefaultFile(plugin, file, locale)) {
-            warn(plugin, "检测到旧版 messages.yml（无 language 标签，内容与内置默认一致，未做自定义），"
-                + "已备份为 " + backup.getName() + "，并按当前语言 \"" + locale + "\" 生成新文件");
+            warn(plugin,
+                "Found a legacy messages.yml (no language tag; identical to built-in defaults, not customised). "
+                    + "Backed up as " + backup.getName() + " and regenerated for language \"" + locale + "\".",
+                "检测到旧版 messages.yml（无 language 标签，内容与内置默认一致，未做自定义），"
+                    + "已备份为 " + backup.getName() + "，并按当前语言 \"" + locale + "\" 生成新文件");
         } else {
-            warn(plugin, "检测到旧版 messages.yml（无 language 标签，内容与内置默认一致，未做自定义），"
-                + "已备份为 " + backup.getName() + "，但按当前语言 \"" + locale + "\" 生成新文件失败："
-                + "本次使用内置默认，且暂时没有可编辑的 messages.yml（旧文件已改名为备份，可从备份恢复或重启后重试）");
+            warn(plugin,
+                "Found a legacy messages.yml (no language tag; identical to built-in defaults, not customised). "
+                    + "Backed up as " + backup.getName() + ", but regenerating for language \"" + locale + "\" failed: "
+                    + "built-in defaults are used this run and there is no editable messages.yml right now "
+                    + "(restore from the backup, or restart to retry).",
+                "检测到旧版 messages.yml（无 language 标签，内容与内置默认一致，未做自定义），"
+                    + "已备份为 " + backup.getName() + "，但按当前语言 \"" + locale + "\" 生成新文件失败："
+                    + "本次使用内置默认，且暂时没有可编辑的 messages.yml（旧文件已改名为备份，可从备份恢复或重启后重试）");
         }
     }
 
@@ -742,13 +781,17 @@ public final class Messages {
         try {
             File parent = file.getParentFile();
             if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
-                warn(plugin, "无法创建插件数据目录，messages.yml 未生成（将使用内置默认）");
+                warn(plugin,
+                    "cannot create the plugin data directory; messages.yml was not generated (built-in defaults are used)",
+                    "无法创建插件数据目录，messages.yml 未生成（将使用内置默认）");
                 return false;
             }
             Files.write(file.toPath(), buildDefaultFileContent(locale).getBytes(StandardCharsets.UTF_8));
             return true;
         } catch (Exception | LinkageError e) {
-            warn(plugin, "messages.yml 写入失败（将使用内置默认）: " + e.getMessage());
+            warn(plugin,
+                "failed to write messages.yml (built-in defaults are used): " + e.getMessage(),
+                "messages.yml 写入失败（将使用内置默认）: " + e.getMessage());
             return false;
         }
     }
@@ -907,8 +950,11 @@ public final class Messages {
         }
         String locale = normalizeLocale(raw);
         if (warnUnknown && plugin != null && raw != null && !raw.isBlank() && canonicalLocale(raw) == null) {
-            warn(plugin, "配置 general.language=\"" + raw + "\" 不是内置语言（支持 en / zh），已按 "
-                + DEFAULT_LOCALE + " 处理");
+            warn(plugin,
+                "config general.language=\"" + raw + "\" is not a built-in language (supported: en / zh); using "
+                    + DEFAULT_LOCALE + " instead",
+                "配置 general.language=\"" + raw + "\" 不是内置语言（支持 en / zh），已按 "
+                    + DEFAULT_LOCALE + " 处理");
         }
         return locale;
     }
@@ -1146,11 +1192,25 @@ public final class Messages {
         }
     }
 
-    /** 统一日志前缀（与控制台既有 "[消息]" 口径一致）。 */
-    private static void warn(PerfScope plugin, String message) {
+    /**
+     * 消息层自身的诊断日志 —— **双语并列**，不走消息表。
+     *
+     * <p><b>为什么不能用 {@code Messages.get()}</b>：这一层报的是消息系统自己的故障
+     * （messages.yml 解析失败、language 标签不认识、旧版迁移失败……）。此时快照要么还没
+     * 建立、要么正是出问题的那个——用消息表只会递归地失败，或打出键名。</p>
+     *
+     * <p><b>为什么要双语而不是随 {@code general.language} 二选一</b>：语言配置本身可能就是
+     * 出问题的那一项（见 {@code general.language} 校验那条）。此刻没有可信的"用户语言"可依，
+     * 而两种都写出来，任何语言的服主都能读懂——代价只是一行日志长一点。</p>
+     *
+     * <p>调用方按 {@code 英文 + " / " + 中文} 的形式传两个参数。英文在前，因为项目的默认
+     * 语言是 {@code en}，且英文更长、更醒目。</p>
+     */
+    private static void warn(PerfScope plugin, String en, String zh) {
         try {
             if (plugin != null && plugin.getLogger() != null) {
-                plugin.getLogger().warning("[消息] " + message);
+                // "[消息]" 前缀保持不变：既有故障排查文档与日志检索都以它为准。
+                plugin.getLogger().warning("[消息] " + en + " / " + zh);
             }
         } catch (Exception | LinkageError e) {
             // 日志本身失败也只能放弃——绝不能因为记日志把加载流程打断
