@@ -204,6 +204,18 @@ public final class AlertMessages {
         put(en, zh, "alert.log.bad-refire",
             "alerts.refire-min-interval-seconds={0} is invalid (must be ≥0); using the default {1}s",
             "alerts.refire-min-interval-seconds={0} 非法（需 ≥0），已按默认值 {1} 秒处理");
+        // f-s01-err-10：非数值 / 非整数的写法（如 "1m"、"abc"、1.5）。与上方 bad-refire 分开成键：
+        // 那条讲"值越界"，这条讲"根本解析不出来"，成因不同、修法也不同（改格式 vs 改大小）。
+        put(en, zh, "alert.log.refire-unparsable",
+            "alerts.refire-min-interval-seconds=\"{0}\" cannot be read as a whole number of seconds; "
+                + "using the default {1}s — fix the value and run /perfscope reload",
+            "alerts.refire-min-interval-seconds=\"{0}\" 无法解析为整数秒，已按默认值 {1} 秒处理；"
+                + "请修正该值后执行 /perfscope reload");
+        // f-s01-err-08：部分玩家投递失败。{0}=失败人数，{1}=首个失败者「玩家名: 异常类型 消息」。
+        put(en, zh, "alert.log.game-partial",
+            "in-game alert delivery failed for {0} player(s); first failure: {1} "
+                + "(the remaining players still received it)",
+            "游戏内告警投递失败 {0} 名玩家；首个失败: {1}（其余玩家仍已收到）");
         put(en, zh, "alert.log.bad-flap",
             "alerts.flap-window-seconds={0} is invalid (must be ≥0); using the default {1}s",
             "alerts.flap-window-seconds={0} 非法（需 ≥0），已按默认值 {1} 秒处理");
@@ -299,6 +311,12 @@ public final class AlertMessages {
             "coverage {0} min, less than 50% of {1} — trend conclusions are indicative only; "
                 + "data from before the restart is lost",
             "覆盖 {0} 分钟，不足 {1} 的 50%——趋势结论仅供参考，重启前的数据已丢失");
+        // f-s01-logic-07：只触发绝对下限（60 分钟）时的说明。不能复用 note.thin——那句无条件
+        // 断言"不足 50%"，在刚重启不久（覆盖率其实已过半）时与自身数据矛盾。
+        put(en, zh, "daily.note.floor",
+            "coverage {0} min, less than the {1} min minimum — trend conclusions are indicative only; "
+                + "the server has not been up long enough for a full daily picture",
+            "覆盖 {0} 分钟，不足 {1} 分钟下限——趋势结论仅供参考，开机时长尚不足以构成完整的每日视图");
         put(en, zh, "daily.note.24h", "24 hours", "24 小时");
         put(en, zh, "daily.note.label", "Data notes: {0}", "数据说明: {0}");
         // 最低 TPS 附带发生时刻（{0}=TPS，{1}=HH:mm）

@@ -60,13 +60,17 @@ public final class CoreRules {
      * 历史窗口覆盖是否足够（9A-8）。
      *
      * <p>两个判据都要满足：① 样本条数 ≥ minSamples（够算统计量）；
-     * ② 首尾时间跨度覆盖了"这 minSamples 条样本本该覆盖的时间"——即
-     * {@code span ≥ minSamples × 采样间隔 × 0.8}。</p>
+     * ② 首尾跨度 ≥ 判据实际采用的下限 {@code needed}，其中
+     * {@code needed = max(窗口内中位间隔 × (样本数-1) × 0.8, 窗口长度 × 10%)}。</p>
      *
      * <p>为什么用「样本间隔」而不是「窗口比例」：旧实现只看条数，在 5 秒采样下
      * 45 秒数据就能断言"30 分钟趋势"（8 个样本）；但若强求窗口的 60%，刚重启的服务器
      * 又会在长时间内完全无法诊断（30 分钟窗要等 18 分钟）。以"这批样本自身的时间密度"
      * 为准是更准确的口径：它保证样本确实是分散在一段时间上的，而不是挤在一瞬间。</p>
+     *
+     * <p>f-s03-contract-08：上述公式与 {@code absoluteFloor} 原仅记载于方法体注释，
+     * javadoc 曾写成 {@code minSamples × 采样间隔 × 0.8}（既不含中位间隔，也不含 10% 下限），
+     * 与实现不符。此处按实现改写，不作行为变更。</p>
      *
      * @return 覆盖不足时返回人类可读原因（供 skip），足够时返回 null
      */
@@ -82,7 +86,11 @@ public final class CoreRules {
             gaps[i - 1] = window.get(i).timestamp() - window.get(i - 1).timestamp();
         }
         java.util.Arrays.sort(gaps);
-        long medianGap = gaps.length == 0 ? 0 : gaps[gaps.length / 2];
+        // f-s03-logic-04：偶数个间隔时取中间两个的均值才是中位数；原实现只取 gaps[L/2]（上中位数），
+        // 恰好把"一半很短、一半很长"的窗口判成覆盖不足（只产生 skip，不产生误报，故为 LOW）。
+        long medianGap = gaps.length == 0 ? 0
+            : (gaps.length % 2 == 1 ? gaps[gaps.length / 2]
+                : (gaps[gaps.length / 2 - 1] + gaps[gaps.length / 2]) / 2);
         // 期望跨度 = 中位间隔 × (样本数-1)，允许 20% 抖动
         long expected = (long) (medianGap * (window.size() - 1) * 0.8);
         // 同时保有绝对下限：至少覆盖窗口的 10%（防止"1 秒内 10 条样本"这种极端）
@@ -248,7 +256,10 @@ public final class CoreRules {
                 return Evaluation.skip(id(), Messages.get("diag.skip.tps-samples", count, MIN_SAMPLES));
             }
             double avg1m = sum / count;
-            // "持续"主判据：15 分钟滚动均值（服务端自带，天然平滑），窗口均值只作辅助
+            // f-s03-logic-05（产品裁决 2026-11-04：保持 OR）：两个判据地位对等，任一口径低于
+            // 告警线即命中——15 分钟滚动均值（服务端自带，天然平滑）负责"久低"，窗口均值负责
+            // "刚崩"。改 AND 会减少误报但漏报"刚发生的大幅下跌"，故不取值域收窄。
+            // 文案侧已同步为"任一口径低于告警线即命中"，规则语义零变更。
             boolean persist15m = snap.tps15m > 0 && snap.tps15m < cfg.tps_warningThreshold;
             boolean persistWindow = avg1m < cfg.tps_warningThreshold;
             if (!persist15m && !persistWindow) {

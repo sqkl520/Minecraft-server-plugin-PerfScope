@@ -542,6 +542,8 @@ public class AlertService {
 
     private void loadOptions() {
         Options o = new Options();
+        // f-s01-data-05：进入时捕获旧快照，供末尾判定「时区规格是否真的变了」。
+        Options previous = this.options;
         try {
             RawConfig raw = RawConfig.load(plugin);
             ConfigManager.ConfigData cfg = configManager.get();
@@ -564,6 +566,13 @@ public class AlertService {
             String tz = raw.getString("alerts.daily-summary.timezone", "");
             o.dailyTimezone = tz == null ? "" : tz.trim();
             // 9C-4：复燃最短间隔与抖动窗口（秒）。0 = 关闭对应抑制，负值/非数值回退默认。
+            // f-s01-err-10：本键是 loadOptions 里唯一既不被 ConfigManager 读取、也不在 jar 内
+            // config.yml 中登记的键——写错时没有第二处校验会报，故在此补一条带原值的 WARNING。
+            String badRefire = raw.unparsableInt("alerts.refire-min-interval-seconds");
+            if (badRefire != null) {
+                plugin.getLogger().warning(logText("alert.log.refire-unparsable", badRefire,
+                    (int) (DEFAULT_REFIRE_MIN_INTERVAL_MS / 1000L)));
+            }
             int refireSec = raw.getInt("alerts.refire-min-interval-seconds",
                 (int) (DEFAULT_REFIRE_MIN_INTERVAL_MS / 1000L));
             if (refireSec < 0) {
@@ -591,6 +600,22 @@ public class AlertService {
             plugin.getLogger().warning(logText("alert.log.options-failed", e.getMessage()));
         }
         this.options = o;
+        // f-s01-data-05：pushedTodayDayEpoch 的初值在构造时按「系统时区」算出（那一刻 options 还是
+        // 默认值、dailyTimezone 为空串）。这里换上配置时区后，若新旧时区不在同一 LocalDate，
+        // 下一次 rollDay() 会误判跨天并把当日四个计数器整体清零——时区切换不是跨天。
+        //
+        // **只在时区规格真的变了时才重算基线**（f-s01-data-05-r1 回归修正）：
+        // 初版写成无条件 `pushedTodayDayEpoch = currentDayEpoch()`，那会让「时区切换」与
+        // 「真跨天」不可区分——服务端跨过午夜后、在首次推送（即首次 rollDay）之前执行
+        // /perfscope reload，基线会被直接设成"今天"，昨天→今天的跳变永远观测不到，
+        // 四个计数器跨天累积、每日摘要报出虚高的"今日已推送"。故必须比对旧时区。
+        //
+        // 只动基线字段，计数器值与 rollDay() 逻辑均不变。时区未变时本分支不执行，
+        // rollDay() 的跨天归零语义完全保留。
+        String prevTz = previous == null ? "" : previous.dailyTimezone;
+        if (!prevTz.equals(o.dailyTimezone)) {
+            this.pushedTodayDayEpoch = currentDayEpoch();
+        }
     }
 
     /**
@@ -651,6 +676,34 @@ public class AlertService {
                 }
             }
             return def;
+        }
+
+        /**
+         * f-s01-err-10：整数键无法被 {@link #getInt} 解析时返回原值文本，缺键/合法返回 null。
+         *
+         * <p>只给 ConfigManager 不读的键用——其余键已由 {@code ConfigManager.readInt} 的
+         * {@code warnType} 报过带原值的 WARNING，再报一次等于同一错误两条日志。当前
+         * {@code loadOptions} 的 8 个键里只有 {@code alerts.refire-min-interval-seconds} 属此类。</p>
+         */
+        String unparsableInt(String path) {
+            if (yaml == null || !yaml.contains(path)) {
+                return null;
+            }
+            Object v = yaml.get(path);
+            if (v instanceof Number n) {
+                // getInt 用 intValue() 截断：1.5 静默变 1，与 ConfigManager.coerceInt 的
+                // "非整数即类型错误" 口径分叉，故同样上报。
+                return n.intValue() == n.doubleValue() ? null : String.valueOf(v);
+            }
+            if (v instanceof String s) {
+                try {
+                    Integer.parseInt(s.trim());
+                    return null;
+                } catch (NumberFormatException e) {
+                    return s;
+                }
+            }
+            return String.valueOf(v);
         }
 
         String getString(String path, String def) {
@@ -758,6 +811,10 @@ public class AlertService {
                     suspendedRec.restored = false;
                     activeAlerts.put(key, suspendedRec);
                     moduleDownSince.remove(key);
+                    // f-s01-logic-02：静默接管必须同时刷新冷却表。否则本周期不推送、下一周期走到
+                    // 同级别分支时 isCooling 无记录（进 unknown 至少 5 分钟，旧记录已过期）→ 立刻重推，
+                    // 与日志"不重复推送"及 rec.restored 分支（下方 cooldowns.put）口径矛盾。
+                    cooldowns.put(key, now);
                     recordEvent("restore", suspendedRec);
                     stateDirty = true;
                     plugin.getLogger().log(Level.FINE, logText("alert.log.resume-unknown", key));
@@ -770,7 +827,10 @@ public class AlertService {
                 // 不再复用 cooldownSeconds。两者语义相反：冷却要长（别刷屏），
                 // 复燃窗口要短（几秒内又坏了确实该立即告知）；复用同一个数会让一方受害。
                 // 该键此前被声明与解析但从未被读取（红队 D4：死配置），现接上。
-                long refireWindowMs = refireMinIntervalMs > 0 ? refireMinIntervalMs : cooldownMs;
+                // f-s01-logic-06：0 = 关闭复燃抑制（作者决策，按配置注释的语义实现）。
+                // 0 → refireWindowMs = 0 → 下方 refireWindowMs > 0 恒假 → refire 恒 false，
+                // 复燃走普通新告警路径（立即推送）；负值已在 loadOptions() 回退默认，不会到这里。
+                long refireWindowMs = Math.max(0L, refireMinIntervalMs);
                 boolean refire = resolved != null && refireWindowMs > 0
                     && now - resolved.atMs <= refireWindowMs;
                 if (!refire && count < debounceCycles) {
@@ -798,6 +858,9 @@ public class AlertService {
                     debounceCounts.remove(key);
                     recoveryCounts.remove(key);
                     moduleDownSince.remove(key);
+                    // f-s01-logic-02（姊妹分支）：静默接管同样必须刷新冷却表，理由同上方
+                    // suspendedAlerts 分支——否则"抑制"只压一个周期，下一周期即以普通重推出现。
+                    cooldowns.put(key, now);
                     noteFlap(key, now);
                     recordEvent("refire_suppressed", quiet);
                     stateDirty = true;
@@ -1260,7 +1323,9 @@ public class AlertService {
             }
         }
         if (total > shown) {
-            sb.append('\n').append(Messages.get("alert.msg.digest-more", total));
+            // f-s01-logic-04：模板 "…and {0} more" 问的是**未展示**条数，不是本周期总数。
+            // 传 total 时，新增 6 条 / 已展示 5 条会打出 "and 6 more"（实际只剩 1 条）。
+            sb.append('\n').append(Messages.get("alert.msg.digest-more", total - shown));
         }
         String text = sb.toString();
         // 控制台多行输出（每行一个 Logger 调用，便于日志系统逐行采集）
@@ -1288,8 +1353,8 @@ public class AlertService {
         }
         if (cfg.alerts_in_game) {
             try {
-                broadcastToAlertPlayers(Component.text(gameText, color));
-                gameOk = true;
+                // f-s01-err-08：逐玩家异常已在方法内隔离，这里只接"整批不可用"（如 getOnlinePlayers 抛出）。
+                gameOk = broadcastToAlertPlayers(Component.text(gameText, color));
             } catch (Exception | LinkageError e) {
                 plugin.getLogger().warning(logText("alert.log.game-failed", e.getMessage()));
             }
@@ -1334,8 +1399,8 @@ public class AlertService {
         }
         if (cfg.alerts_in_game) {
             try {
-                broadcastToAlertPlayers(Component.text(text, color));
-                gameOk = true;
+                // f-s01-err-08：同 emit，逐玩家边界在 broadcastToAlertPlayers 内部。
+                gameOk = broadcastToAlertPlayers(Component.text(text, color));
             } catch (Exception | LinkageError e) {
                 plugin.getLogger().warning(logText("alert.log.game-failed", e.getMessage()));
             }
@@ -1465,13 +1530,36 @@ public class AlertService {
     /**
      * 向所有在线且持有 perfscope.alert 权限的玩家发送消息。
      * 必须运行在主线程（本服务定时器经 SchedulerAdapter.runGlobalTimer 调度，天然满足）。
+     *
+     * <p><b>f-s01-err-08</b>：原实现 for 内无 try，任一 sendMessage 抛出即跳过其后全部玩家。
+     * 现逐玩家隔离，失败数与首个失败者（含玩家名）汇总为一条 WARNING。</p>
+     *
+     * @return {@code false} 仅当"有人需要收但全员失败"；无人需要收时返回 {@code true}，
+     *         以保持调用方 {@code gameOk}="通道可用"的既有计数语义不变。
      */
-    private void broadcastToAlertPlayers(Component component) {
+    private boolean broadcastToAlertPlayers(Component component) {
+        int failed = 0;
+        boolean anyDelivered = false;
+        String firstFailure = null;
         for (Player player : Bukkit.getOnlinePlayers()) {
-            if (player.hasPermission(PERMISSION_ALERT)) {
+            if (!player.hasPermission(PERMISSION_ALERT)) {
+                continue;
+            }
+            try {
                 player.sendMessage(component);
+                anyDelivered = true;
+            } catch (Exception | LinkageError e) {
+                failed++;
+                if (firstFailure == null) {
+                    firstFailure = player.getName() + ": " + e.getClass().getSimpleName()
+                        + (e.getMessage() == null ? "" : " " + e.getMessage());
+                }
             }
         }
+        if (failed > 0) {
+            plugin.getLogger().warning(logText("alert.log.game-partial", failed, firstFailure));
+        }
+        return anyDelivered || failed == 0;
     }
 
     // ==================== 9A-14：文案辅助 ====================
@@ -1595,7 +1683,19 @@ public class AlertService {
         }
     }
 
-    /** 9A-14：服名（motd 首行去色码，截断 16 字符）；取不到退化为端口号。 */
+    /**
+     * 9A-14：服名（motd 首行去色码，截断 16 字符）；取不到退化为端口号。
+     *
+     * <p><b>f-s01-err-07（catch 口径）</b>：两处原为 {@code catch (Throwable)}，把 Error 一并当作
+     * "motd 不可用"静默降级，且降级值在本方法末尾被<em>永久缓存</em>到 {@code serverTag} 字段——
+     * 错误从此不可见。实测该路径可达的 {@code Error} 只有 LinkageError 一族
+     * （{@code NoSuchMethodError} 等非 Paper 混合端缺方法、{@code NoClassDefFoundError}、
+     * {@code ExceptionInInitializerError}，三者均 extends LinkageError），其余
+     * （OOM / StackOverflowError / AssertionError / ThreadDeath）是 JVM 级故障，
+     * 按本项目既定口径（{@code MetricsCollector} 9A-20 #4、
+     * {@code DiagnosticEngine} f-s03-err-04）<b>故意不吞</b>，让其逃到任务边界由服务端记日志。
+     * 故收窄为与全文件其余 catch 一致的 {@code Exception | LinkageError}。</p>
+     */
     private String serverTag() {
         String cached = serverTag;
         if (cached != null) {
@@ -1612,13 +1712,13 @@ public class AlertService {
                     tag = first.length() > 16 ? first.substring(0, 16) + "…" : first;
                 }
             }
-        } catch (Throwable ignored) {
+        } catch (Exception | LinkageError ignored) {
             // motd 不可用：下沉到端口号
         }
         if (tag == null) {
             try {
                 tag = ":" + Bukkit.getServer().getPort();
-            } catch (Throwable ignored) {
+            } catch (Exception | LinkageError ignored) {
                 // 端口也取不到：最后用实现名
             }
         }
@@ -1945,6 +2045,13 @@ public class AlertService {
                 // threshold 取到旧 module，然后立刻用 v2 格式覆写，结构化数据错位且不可逆。
                 // 版本头是显式的、由本插件自己写的，不存在这种歧义。
                 boolean v2 = stateFormatVersion >= 2;
+                // f-s01-logic-05：v2 行需要 10 列，但入口守卫只保证 6 列（v1 的最小宽度）。
+                // 一条 6–9 列的 v2 行会在下方 p[9] 抛 ArrayIndexOutOfBoundsException，
+                // 而该异常被包住整个 for 的 catch 吞掉 → 其后所有行都不再恢复。
+                // 格式不符的行直接跳过（保留 v1 的宽松口径：v1 分支逐字段自带守卫）。
+                if (v2 && p.length < 10) {
+                    continue;
+                }
                 double value;
                 String scope;
                 double threshold;

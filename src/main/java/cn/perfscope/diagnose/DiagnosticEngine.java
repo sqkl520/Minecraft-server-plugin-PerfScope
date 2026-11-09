@@ -67,6 +67,18 @@ public class DiagnosticEngine {
     }
 
     /**
+     * f-s03-data-06：代次校验的生效窗口——一个采集周期再留 20 秒余量，下限 30 秒、上限 5 分钟。
+     *
+     * <p>窗口外的"快照早于配置发布"意味着采集中断，而不是 reload 的正常过渡；
+     * 此时仍照常评估（并由既有的过期/健康提示暴露采集问题），避免诊断永久沉默。</p>
+     */
+    private static long reloadGraceMs(ConfigManager.ConfigData cfg) {
+        long cycleMs = Math.max(1, cfg.general_updateInterval) * 50L;   // 20 tick = 1 秒
+        long window = cycleMs + 20_000L;
+        return Math.min(300_000L, Math.max(30_000L, window));
+    }
+
+    /**
      * 一次诊断的完整结果（9A-3）。
      *
      * @param hits    命中列表（critical 在前）
@@ -90,7 +102,9 @@ public class DiagnosticEngine {
      * 对最新快照运行全部规则。
      *
      * <p>单条规则抛异常只跳过该条并记日志（异常隔离——与采集层 safeCollect 同口径），
-     * 绝不让一条坏规则拖垮整页诊断；并且该条会计入"未评估"，不会伪装成"查过了没问题"。</p>
+     * 绝不让一条坏规则拖垮整页诊断；并且该条会计入"未评估"，不会伪装成"查过了没问题"。
+     * 隔离覆盖 {@code Exception}、{@code LinkageError} 与 {@code StackOverflowError}（f-s03-err-04）；
+     * 其余 {@code Error}（尤其 {@code OutOfMemoryError}）不捕获——吞掉它们后继续分配只会把真实故障藏起来。</p>
      */
     public Result run() {
         List<Diagnosis> hits = new ArrayList<>();
@@ -103,6 +117,20 @@ public class DiagnosticEngine {
         ConfigManager.ConfigData cfg = configManager.get();
         if (cfg == null) {
             return new Result(hits, skipped, 0);
+        }
+        // f-s03-data-06：代次校验。snap 的 unavailable/disabledModules 是采集那一刻按当时配置算的，
+        // cfg 的阈值是现在这一代。reload 后到下一个采集周期之间，两者属于不同代次——
+        // 拼在一起求值会输出"旧配置的可用性 + 新配置的阈值"这种自相矛盾的结论。
+        // 不假装干净、也不报 0/0：逐条登记为未评估，原因写明代次不符。
+        // 只在一个采集周期 + 余量的窗口内生效：超出窗口仍不匹配说明采集本身已停摆，
+        // 那时"代次"不是首要问题，照常评估并交由既有的过期/健康提示暴露，避免永久沉默。
+        long publishedAt = configManager.publishedAtMillis();
+        if (publishedAt > 0L && snap.timestamp < publishedAt
+            && System.currentTimeMillis() - publishedAt <= reloadGraceMs(cfg)) {
+            for (DiagnosticRule rule : RULES) {
+                skipped.add(new Diagnosis.Skip(rule.id(), Messages.get("diag.skip.stale-config")));
+            }
+            return new Result(hits, skipped, RULES.size());
         }
         for (DiagnosticRule rule : RULES) {
             try {
@@ -126,6 +154,14 @@ public class DiagnosticEngine {
                     plugin.getLogger().warning(Messages.get("diag.log.rule-failed-detail",
                         rule.id(), e.getMessage()));
                 }
+            } catch (StackOverflowError e) {
+                // f-s03-err-04：VirtualMachineError 不经 Exception / LinkageError 捕获，会直接逃出
+                // run()，让整页诊断失败——恰在本插件最该自证的场景（内存压力）成立。只收 StackOverflowError：
+                // 它可恢复（栈随帧弹出自动回到正常），而 OutOfMemoryError 捕获后继续分配毫无意义。
+                skipped.add(new Diagnosis.Skip(rule.id(),
+                    Messages.get("diag.skip.rule-exception", e.getClass().getSimpleName())));
+                plugin.getLogger().warning(Messages.get("diag.log.rule-failed-detail",
+                    rule.id(), e.getMessage() == null ? "stack overflow" : e.getMessage()));
             }
         }
         // critical 优先（排序稳定：同为 critical 保持注册顺序）

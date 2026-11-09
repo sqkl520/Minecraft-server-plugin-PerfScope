@@ -87,6 +87,13 @@ public class ConfigManager {
     /** 9A-11：最近一次 load() 的结果（供命令层 / 重载逻辑查询；加载失败时保持失败态）。 */
     private volatile LoadResult lastLoadResult;
 
+    /**
+     * f-s03-data-06：当前配置的发布时刻（{@link #config} 被替换那一刻的墙钟）。
+     * 采集层产出的 {@code MetricsSnapshot.timestamp} 早于本值，说明该快照是在旧配置下采集的，
+     * 其 {@code unavailable}/{@code disabledModules} 与当前阈值不属于同一代次。
+     */
+    private volatile long publishedAtMillis;
+
     private File configFile;
 
     /** 9A-11：本轮 load() 使用的 yaml 句柄（仅 load() 内部使用，勿在其它线程读取）。 */
@@ -240,11 +247,13 @@ public class ConfigManager {
         fresh.alerts_notifyMitigation = readBool("alerts.notify-mitigation", true);
         fresh.alerts_unknownAfterMinutes = readInt("alerts.unknown-after-minutes", 5);
         fresh.alerts_dailySummaryTimezone = readString("alerts.daily-summary.timezone", "");
-        // 9C-4：抖动抑制三项。此处登记只为让它们进入"已知键"集合（未知键检测取自 jar 内默认
-        // config.yml），实际判定由 AlertService 经 RawConfig 读取——决策层参数集中在决策层，
-        // 避免 ConfigData 再膨胀三个只在 AlertService 用到的字段。
+        // 9C-4：抖动抑制两项。实际判定由 AlertService 经 RawConfig 读取——决策层参数集中在决策层，
+        // 避免 ConfigData 再膨胀只在 AlertService 用到的字段。这里的读取**不登记已知键**
+        // （未知键集合只取自 jar 内 config.yml），它只产生两个副作用：缺键汇总 + 类型校验告警。
+        // f-s03-data-07：repush-delta 必须用 readDouble——AlertService 以 getDouble 消费，
+        // 用 readInt 时用户写 8.5 会被判"类型错误、已改用 8"，而实际生效的仍是 8.5。
         readInt("alerts.flap-window-seconds", 180);
-        readInt("alerts.repush-delta", 8);
+        readDouble("alerts.repush-delta", 8.0);
         // === 每日摘要与 webhook（Wave 7D） ===
         fresh.alerts_dailySummaryEnabled = readBool("alerts.daily-summary.enabled", false);
         fresh.alerts_dailySummaryTime = readString("alerts.daily-summary.time", "08:00");
@@ -295,6 +304,8 @@ public class ConfigManager {
         flushMissingKeys();
 
         // A9a（Wave4 修正）：全部填充与校验完成后单次发布——中途抛异常则 this.config 保持旧值（reload 按旧配置继续）
+        // f-s03-data-06：先写时刻再发布引用，读者若读到新引用则不会再看到旧的 publishedAtMillis
+        this.publishedAtMillis = System.currentTimeMillis();
         this.config = fresh;
 
         // 9A-11：未知键检测（已知键集合取自 jar 内默认 config.yml，避免代码侧手工维护的清单漂移）
@@ -439,7 +450,28 @@ public class ConfigManager {
                 + "# 9A-11：配置结构版本（插件自动写入，请勿手改；用于识别旧版配置并补齐新增键）"
                 + System.lineSeparator()
                 + CONFIG_VERSION_KEY + ": " + CURRENT_CONFIG_VERSION + System.lineSeparator();
-            Files.write(path, text.getBytes(StandardCharsets.UTF_8));
+            // f-s03-data-03：Files.write(path, ...) 是 CREATE+TRUNCATE_EXISTING+WRITE，原地截断后重写；
+            // 写入中途被杀（磁盘满 / JVM 崩溃 / 强杀进程）会留下半写的 config.yml，且备份无人接线回滚。
+            // 改为「同目录临时文件 + ATOMIC_MOVE」：目标要么是旧全文，要么是新全文，不存在半写态。
+            // 临时文件必须与目标同目录（跨文件系统 ATOMIC_MOVE 不保证原子），并在失败时清理。
+            Path tmp = new File(configFile.getParentFile(), "config.yml.tmp-writeback").toPath();
+            try {
+                Files.write(tmp, text.getBytes(StandardCharsets.UTF_8));
+                try {
+                    Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING,
+                        StandardCopyOption.ATOMIC_MOVE);
+                } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                    // 极少数文件系统不支持原子移动：退回普通替换（仍优于原地截断，窗口更窄）
+                    Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING);
+                }
+            } finally {
+                // 清理失败不能掩盖"已写入成功"的结论：move 成功后 tmp 本就不存在，此处只兜底异常路径
+                try {
+                    Files.deleteIfExists(tmp);
+                } catch (Exception ignored) {
+                    // 残留的 tmp 不影响 config.yml 的正确性
+                }
+            }
             return true;
         } catch (Exception e) {
             plugin.getLogger().warning("[PerfScope] " + Messages.get("config.version.append-failed",
@@ -824,7 +856,12 @@ public class ConfigManager {
         try {
             loaded = Bukkit.getWorlds();
         } catch (Throwable t) {
-            // 世界系统尚未就绪（极早期加载 / 测试桩），跳过校验
+            // 世界系统尚未就绪（极早期加载 / 测试桩），跳过校验。
+            // f-s03-err-02：与下方"世界列表为空"分支保持同一可见性——两者都是"本次没校验"，
+            // 异常这条曾零日志静默吞掉，服主会以为世界名校验跑过且全绿。
+            // 复用既有键（本文件无权新增 i18n 键），异常类型与消息作为后缀附在本地化句子之后。
+            plugin.getLogger().info("[PerfScope] " + Messages.get("config.worlds.skipped", "worlds")
+                + " [" + t.getClass().getSimpleName() + ": " + t.getMessage() + "]");
             return Collections.emptyList();
         }
         if (loaded == null || loaded.isEmpty()) {
@@ -875,6 +912,27 @@ public class ConfigManager {
             cfg.tps_warningThreshold, cfg.tps_criticalThreshold, 18.0, 15.0, false);
         cfg.tps_warningThreshold = tps[0];
         cfg.tps_criticalThreshold = tps[1];
+        // f-s03-logic-01：sanitizePair 的上界是数值域 1e7，而 TPS 的合法阈值上限应取指标域。
+        // 上界不拦时 tps.warning_threshold: 25 合法通过，窗口均值（恒 ≤20.5）< 25 使 DIAG-TPS-PERSIST
+        // 在覆盖率达标后永久命中。取 20.5 而非 20.0：启动瞬间服务端会报 >20 的读数，
+        // 卡 20.0 会把「想按 20.1 卡住下跌」的正常配置误判并非静默回退。
+        if (cfg.tps_warningThreshold > TPS_CEILING || cfg.tps_criticalThreshold > TPS_CEILING) {
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.threshold-out-of-range",
+                "tps.warning_threshold/critical_threshold", TPS_CEILING,
+                cfg.tps_warningThreshold, cfg.tps_criticalThreshold));
+            cfg.tps_warningThreshold = 18.0;
+            cfg.tps_criticalThreshold = 15.0;
+        }
+        // 验收 IMPACT_UNVERIFIED 的闭合（2026-11-04）：(20.0, 20.5] 是「近恒真区」——
+        // 稳态 TPS 上界就是 20.0，阈值写 20.2 会让 avg < 20.2 在健康服务器上近乎恒真。
+        // 不改配置值（改 20.0 会把用户合法的 20.1 配置判非法并回退成 18.0，反而更迟钝），
+        // 也不改规则判据（任何 ≥20.0 的阈值都天然近恒真，钳到 20.0 无实质改善）。
+        // 采用与 f-s03-data-04 相同的「warn-only」口径：把这个恒真区变成**可见**的提示，
+        // 让服主自己决定是否要一个如此灵敏的阈值，而不是让规则静默地永久命中。
+        if (cfg.tps_warningThreshold >= TPS_TAUTOLOGY_FLOOR || cfg.tps_criticalThreshold >= TPS_TAUTOLOGY_FLOOR) {
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.tps-near-ceiling",
+                TPS_TAUTOLOGY_FLOOR, cfg.tps_warningThreshold, cfg.tps_criticalThreshold));
+        }
 
         // MSPT（高值差，warning 应 <= critical）
         double[] mspt = sanitizePair("mspt.warning_threshold/critical_threshold",
@@ -980,6 +1038,20 @@ public class ConfigManager {
             plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.history-interval",
                 "history.sample-interval-seconds", cfg.history_sampleIntervalSeconds, 60));
             cfg.history_sampleIntervalSeconds = 60;
+        }
+        // f-s03-data-04：本类（≥1 即合法）与 HistoryStore（>180 只 warning、改不了值）是同一键的两个
+        // 执法者，合法域不一致——3600 秒能让 30 分钟窗内只剩 0-1 条样本，DIAG-MEM-LEAK / DIAG-TPS-PERSIST
+        // 因 MIN_SAMPLES 永久 skip。不改值（超过 180 是用户可理解的低内存取舍，强制回退属 breaking），
+        // 只在配置侧把后果说出来，让"校验通过"不再等于"静默失效"。
+        if (cfg.history_sampleIntervalSeconds > HISTORY_INTERVAL_TREND_SAFE_SEC) {
+            boolean zh = Messages.LOCALE_ZH.equals(Messages.activeLocale());
+            plugin.getLogger().warning("[PerfScope] history.sample-interval-seconds="
+                + cfg.history_sampleIntervalSeconds
+                + (zh ? " 超过 " + HISTORY_INTERVAL_TREND_SAFE_SEC + " 秒：30 分钟诊断窗口内样本不足，"
+                      + "趋势规则（DIAG-MEM-LEAK / DIAG-TPS-PERSIST）会长期跳过；建议回到 60 秒"
+                      : " exceeds " + HISTORY_INTERVAL_TREND_SAFE_SEC + "s: too few samples per 30-minute "
+                      + "diagnostic window, so trend rules (DIAG-MEM-LEAK / DIAG-TPS-PERSIST) will keep being "
+                      + "skipped; 60 seconds is recommended"));
         }
 
         // === history.retention-days：非法值（≤0）钳到 7 并 warning（Wave 8B，与全仓 clamp 口径一致） ===
@@ -1103,6 +1175,26 @@ public class ConfigManager {
     private static final double MAX_DOUBLE_THRESHOLD = 10_000_000.0;
 
     /**
+     * f-s03-logic-01：TPS 阈值上界 = 20.5，与 {@code CoreRules} 过滤异常样本的 {@code 20.5} 同口径。
+     *
+     * <p>为什么不用理论满值 20.0：启动瞬间服务端会读到略高于 20 的 TPS，把阈值卡在 20.0 会让
+     * 「想按 20.1 卡住一切下跌」的正常配置被判非法并静默回退到 18.0（告警变迟钝）。
+     * 代价是 {@code (20.0, 20.5]} 属近恒真区，由 {@link #TPS_TAUTOLOGY_FLOOR} 的
+     * warn-only 提示负责暴露，不改用户配置值（见 validateThresholds）喵。</p>
+     */
+    private static final double TPS_CEILING = 20.5;
+
+    /**
+     * f-s03-logic-01 残留：稳态 TPS 的上界。阈值 >= 此值时，
+     * {@code avg1m < threshold} 在健康服务器上近乎恒真，DIAG-TPS-PERSIST 会永久命中。
+     * 只警告不改值——压到 20.0 会误伤「按 20.1 卡下跌」的合法配置，属 breaking change。
+     */
+    private static final double TPS_TAUTOLOGY_FLOOR = 20.0;
+
+    /** f-s03-data-04：趋势规则仍可用的采样间隔上界（秒）——与 HistoryStore 的 DIAGNOSIS_MAX_INTERVAL_SEC 同值。 */
+    private static final int HISTORY_INTERVAL_TREND_SAFE_SEC = 180;
+
+    /**
      * T4：int 阈值对校验（高值差）——warning &gt; critical 时记 warning 并回退默认值。
      *
      * <p><b>9A-6 修正</b>：原实现只检查 {@code w <= c}，不设下界。于是
@@ -1128,7 +1220,8 @@ public class ConfigManager {
     /**
      * 阈值回退告警（9A-6：按真实原因分类，不再统一说"倒置"）。
      *
-     * @param outOfRange true = 越界（负数/超上限）；与 nonFinite 同时为 false 时才是真正的"倒置"
+     * @param outOfRange true = 越界（负数/超上限）；false = 倒置（非有限值已由
+     *                   {@link #warnThresholdNonFinite} 分流，不会进本方法）
      */
     private void warnThresholdFallback(String key, boolean outOfRange, Object w, Object c) {
         if (outOfRange) {
@@ -1146,8 +1239,31 @@ public class ConfigManager {
             + Messages.get("config.check.threshold-non-finite", key, w, c));
     }
 
+    /**
+     * 当前生效的配置快照（不可变；{@link #load()} 成功后整体替换）。
+     *
+     * <p><b>可空契约（f-s02-contract-05）</b>：本方法<b>可能返回 {@code null}</b>——
+     * 插件构造期到 {@code load()} 成功之间、以及 {@code load()} 抛异常且从未成功过时，
+     * {@code config} 字段一直是 {@code null}。返回类型上标注 {@link Nullable}，
+     * 并有单测锁住「null 时各消费方不 NPE」的路径喵。</p>
+     *
+     * <p>此前 javadoc 完全缺失，导致 7 个调用点判空方言分裂：6 处直接解引用、
+     * 1 处显式判空。统一口径为「调用方按需判空，不得假定非空」喵。</p>
+     */
+    @org.jetbrains.annotations.Nullable
     public ConfigData get() {
         return config;
+    }
+
+    /**
+     * f-s03-data-06：当前配置的发布时刻（epoch ms）；{@link #load()} 尚未成功时返回 0。
+     *
+     * <p>用途：判断一份 {@code MetricsSnapshot}（其 {@code timestamp} 为采集时刻）是否与当前
+     * 配置属于同一代次。快照时刻早于本值即"旧配置下采集、新配置下求值"，此时
+     * {@code unavailable}/{@code disabledModules} 与阈值不是同一代，结论不该照常输出。</p>
+     */
+    public long publishedAtMillis() {
+        return publishedAtMillis;
     }
 
     public WorldSettings getWorldSettings(String worldName) {
@@ -1174,7 +1290,7 @@ public class ConfigManager {
         public final boolean success;
         /** 失败原因 / 成功时的简述。 */
         public final String message;
-        /** 本次读取到的 config-version（缺键 = 0）。 */
+        /** 本次生效的 config-version：写回成功时取当前版本（磁盘上的旧值已被补写），写回失败时为磁盘读到的值（缺键 = 0）。 */
         public final int configVersion;
         /** 是否因缺 config-version 而把版本号写回了磁盘。 */
         public final boolean versionKeyWritten;
@@ -1228,7 +1344,7 @@ public class ConfigManager {
      * 配置数据容器
      */
     public static class ConfigData {
-        /** 9A-11：本次加载读到的 config-version（旧版配置为 0）。 */
+        /** 9A-11：本次加载生效的 config-version；写回成功时等于当前版本，写回失败时才是磁盘读到的旧值（缺键 = 0）。 */
         public int configVersion;
 
         // 常规

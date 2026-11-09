@@ -194,6 +194,10 @@ public final class ReportMessages {
             "[PerfScope] 报告生成器已关闭，本次报告请求已忽略");
         put(en, zh, "report.log.task-failed",
             "[PerfScope] Report generation task failed: {0}", "[PerfScope] 报告生成任务异常: {0}");
+        // f-s05-err-06：ensureRegistered 的 catch 此前无日志，键表未合并时报告正文会打印原始键名。
+        put(en, zh, "report.log.register-failed",
+            "[PerfScope] Failed to merge report message keys; report text will fall back to raw keys: {0}",
+            "[PerfScope] 报告文案表合并失败，报告正文将回退为原始键名: {0}");
         // f-s06-conc-02 / N-2：超时告警原先在 ReportGenerator 里是硬编码英文，与同文件其余
         // 8 条控制台告警全部走键表的既有约定不一致，zh 服务器会看到英文。
         put(en, zh, "report.log.await-timeout",
@@ -207,6 +211,13 @@ public final class ReportMessages {
         put(en, zh, "report.log.clean-limit",
             "[PerfScope] Cleanup cap reached ({0} reports); remaining expired files will be handled on the next run",
             "[PerfScope] 单次清理已达上限 {0} 个报告，剩余超期文件将在下次清理时处理");
+        // f-s05-err-07：删除失败此前完全静默（File.delete() 返回 false 被丢弃）。
+        put(en, zh, "report.log.delete-failed",
+            "[PerfScope] Failed to delete expired report {0} ({1}); it may be locked by another process or the directory is read-only",
+            "[PerfScope] 删除超期报告失败 {0}（{1}），可能被其它进程占用或目录只读");
+        put(en, zh, "report.log.delete-failed-summary",
+            "[PerfScope] {0} expired reports could not be deleted this run (see the first failure above)",
+            "[PerfScope] 本次共 {0} 个超期报告删除失败（首条原因见上）");
         put(en, zh, "report.log.dir-unavailable",
             "[PerfScope] Report directory unavailable (creation failed): {0}; report generation skipped",
             "[PerfScope] 报告目录不可用（创建失败）: {0}，本次报告生成已跳过");
@@ -241,7 +252,16 @@ public final class ReportMessages {
             // 的键并进默认表，随后原子发布新的语言快照。
             Messages.load(plugin);
         } catch (Exception | LinkageError e) {
-            // 展示层绝不能反过来阻止插件启动：失败时报告文案会退回键名（可见、可排查）
+            // f-s05-err-06：catch 体此前只有注释，失败后 report.* 全部回退为键名（报告正文里
+            // 出现 "report.html.title" 这类文本），而控制台没有任何"为什么"——注释所称
+            // "可见、可排查"仅在用户打开报告时才成立。此处补一条 WARNING，仍不阻止启动。
+            // 注意：本分支的典型成因就是键表没合并成功，此时 Messages.get 会退回键名本身，
+            // 故必须再判一次，否则"解释"本身也变成一串键名。
+            String msg = Messages.get("report.log.register-failed", e);
+            if (msg.startsWith("report.log.")) {
+                msg = "[PerfScope] Failed to merge report messages; report text will fall back to raw keys: " + e;
+            }
+            plugin.getLogger().warning(msg);
         }
     }
 

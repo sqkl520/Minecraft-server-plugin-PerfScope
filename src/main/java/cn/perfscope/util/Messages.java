@@ -21,7 +21,6 @@ import cn.perfscope.PerfScope;
 import cn.perfscope.config.ConfigManager;
 
 import java.io.File;
-import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
@@ -115,19 +114,6 @@ public final class Messages {
      * 它不是文案键，绝不进入覆盖表（否则会成为一条永远读不到的脏 key）。
      */
     private static final String LANGUAGE_KEY = "language";
-
-    /**
-     * 配置侧语言字段的候选名。
-     *
-     * <p>{@code ConfigManager.ConfigData} 的 {@code general_language} 字段由另一批改动引入，
-     * 与本文件不同步。为了让本文件能<b>独立编译</b>、并在字段就位后自动生效，这里用反射查找
-     * （先找公开字段，再兜底找非公开字段），而不是直接引用字段名——直接引用会让编译依赖
-     * "另一个 Agent 已先落地"这一时序假设。字段名以下划线风格（{@code general_language}，与
-     * ConfigData 现有命名一致）为主，另兼容驼峰写法 {@code generalLanguage}。找不到字段时按
-     * {@link #DEFAULT_LOCALE} 处理，<b>不回退去读裸 YAML</b>：那会绕过 ConfigManager 的类型校验，
-     * 使消息层看到的语言与插件其余部分看到的不一致。</p>
-     */
-    private static final String[] LANGUAGE_FIELD_NAMES = {"general_language", "generalLanguage"};
 
     /** 占位符：只认 {@code {数字}}，其余花括号一律按字面量处理。 */
     private static final Pattern PLACEHOLDER = Pattern.compile("\\{(\\d+)\\}");
@@ -421,24 +407,34 @@ public final class Messages {
         }
     }
 
-    /** 把已注册的模块表合并进 {@code BUILTIN}，并重建当前语言的快照。 */
-    private static synchronized void mergeModules() {
+    /**
+     * 把已注册的模块表合并进 {@code BUILTIN}，并重建当前语言的快照。
+     *
+     * <p>f-s03-contract-06：本方法不持有 {@code plugin}，无法自行记日志；键集合不一致的键
+     * 由调用方 {@link #load} 统一打 WARNING（{@code registerModule} 的 javadoc 承诺的那条）。</p>
+     *
+     * @return 只有一种语言、另一种已被键名补齐的键；无差异时为空列表
+     */
+    private static synchronized List<String> mergeModules() {
         if (modulesLoaded || EXTRA_EN.isEmpty()) {
-            return;
+            return List.of();
         }
         Map<String, String> en = new LinkedHashMap<>(EN_DEFAULTS);
         Map<String, String> zh = new LinkedHashMap<>(ZH_DEFAULTS);
         en.putAll(EXTRA_EN);
         zh.putAll(EXTRA_ZH);
         // 键集合对齐：任何一边缺键都以英文表为基准补齐（值 = 键名，明显的"未翻译"标记）
+        List<String> mismatched = new ArrayList<>();
         for (String k : en.keySet()) {
             if (!zh.containsKey(k)) {
                 zh.put(k, k);
+                mismatched.add(k);
             }
         }
         for (String k : zh.keySet()) {
             if (!en.containsKey(k)) {
                 en.put(k, k);
+                mismatched.add(k);
             }
         }
         Map<String, Map<String, String>> all = new HashMap<>();
@@ -450,6 +446,7 @@ public final class Messages {
         // 用新默认表重建当前快照（保留当前语言与用户覆盖）
         String cur = snapshot.locale();
         snapshot = new Snapshot(cur, defaultsOf(cur), snapshot.overrides());
+        return mismatched;
     }
 
     // ==================================================================================
@@ -505,7 +502,14 @@ public final class Messages {
         // 9D Phase 1：先把各模块的文案表合并进来，再决定语言快照——
         // 否则首次 load 会在模块注册之前跑，模块的键永远进不了默认表。
         touchModules();
-        mergeModules();
+        // f-s03-contract-06：registerModule 的 javadoc 承诺"键集合不一致记 WARNING"。
+        // mergeModules 不持有 plugin，改由这里统一发；补齐在 mergeModules 内已完成。
+        List<String> mismatched = mergeModules();
+        if (!mismatched.isEmpty()) {
+            warn(plugin, "内置文案表的键集合不一致（" + mismatched.size()
+                + " 个键只在一种语言里存在，已用键名补齐，该语言下会显示键名）: "
+                + String.join(", ", mismatched));
+        }
         String locale = detectLocale(plugin, true);
         Map<String, String> userOverrides;
         try {
@@ -675,9 +679,16 @@ public final class Messages {
                 + "（使用内置默认，避免中英混排）: " + e.getMessage());
             return;
         }
-        warn(plugin, "检测到旧版 messages.yml（无 language 标签，内容与内置默认一致，未做自定义），"
-            + "已备份为 " + backup.getName() + "，并按当前语言 \"" + locale + "\" 生成新文件");
-        writeDefaultFile(plugin, file, locale);
+        // f-s05-err-08：完成态日志必须在写入成功之后打。旧文件此刻已被移走，
+        // 若写入失败，用户手上既没有旧文件也没有模板，日志必须同时说明「备份在哪」与「没有模板」。
+        if (writeDefaultFile(plugin, file, locale)) {
+            warn(plugin, "检测到旧版 messages.yml（无 language 标签，内容与内置默认一致，未做自定义），"
+                + "已备份为 " + backup.getName() + "，并按当前语言 \"" + locale + "\" 生成新文件");
+        } else {
+            warn(plugin, "检测到旧版 messages.yml（无 language 标签，内容与内置默认一致，未做自定义），"
+                + "已备份为 " + backup.getName() + "，但按当前语言 \"" + locale + "\" 生成新文件失败："
+                + "本次使用内置默认，且暂时没有可编辑的 messages.yml（旧文件已改名为备份，可从备份恢复或重启后重试）");
+        }
     }
 
     /**
@@ -727,16 +738,18 @@ public final class Messages {
      * 承载了"language 标签为什么必须与配置一致""占位符怎么用"这类不能省的说明。
      * 换行统一用 {@code \n}（Bukkit 读取与平台无关），使不同机器生成的备份/文件可直接对比。</p>
      */
-    private static void writeDefaultFile(PerfScope plugin, File file, String locale) {
+    private static boolean writeDefaultFile(PerfScope plugin, File file, String locale) {
         try {
             File parent = file.getParentFile();
             if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
                 warn(plugin, "无法创建插件数据目录，messages.yml 未生成（将使用内置默认）");
-                return;
+                return false;
             }
             Files.write(file.toPath(), buildDefaultFileContent(locale).getBytes(StandardCharsets.UTF_8));
+            return true;
         } catch (Exception | LinkageError e) {
             warn(plugin, "messages.yml 写入失败（将使用内置默认）: " + e.getMessage());
+            return false;
         }
     }
 
@@ -901,12 +914,13 @@ public final class Messages {
     }
 
     /**
-     * 从配置快照读取语言值（反射）。
+     * 从配置快照读取语言值（直连字段，编译期已确认存在）。
      *
-     * <p>为什么用反射：{@code general_language} 字段由另一批改动加入 {@code ConfigManager.ConfigData}，
-     * 本文件必须能在字段尚未存在时独立编译。字段就位后无需再改这里——查找会自动命中。
-     * 不缓存 {@link Field} 句柄：本方法只在启动/reload 调用，反射查找的成本可以忽略，
-     * 而缓存会让"字段后来才加上"的场景在同一个 JVM 里永远拿不到（类结构变了缓存却不会刷新）。</p>
+     * <p>f-s03-contract-07：旧实现用反射按候选名查找 {@code general_language}，理由是字段
+     * "由另一批改动引入、本文件需能独立编译"。字段现已就位，反射 helper（{@code readField} /
+     * {@code findField} / {@code LANGUAGE_FIELD_NAMES}）全仓零调用点，已删除；javadoc 同步订正，
+     * 不再声称以反射为现行实现。若将来有人给 {@code ConfigData} 的该字段改名，编译期就会失败，
+     * 这正是我们想要的信号，而不是运行期悄悄退化成"永远默认语言"。</p>
      *
      * @return 配置值（可能为 null / 空白）；读不到时返回 null（调用方按默认语言处理）
      */
@@ -919,45 +933,7 @@ public final class Messages {
             // 配置尚未加载：用默认语言，绝不因此抛异常
             return null;
         }
-        // 直连字段（编译期已确认存在）。反射分支保留为兜底：
-        // 若将来有人把 ConfigData 的字段改名，编译期就会失败，届时删除本方法即可，
-        // 而不是让运行期悄悄退化成"永远默认语言"。
         return data.general_language;
-    }
-
-    /** 依次尝试候选字段名，返回第一个可读到的值；全部失败返回 null。 */
-    private static Object readField(Object target, String[] names) {
-        Class<?> type = target.getClass();
-        for (String name : names) {
-            Field field = findField(type, name);
-            if (field == null) {
-                continue;
-            }
-            try {
-                return field.get(target);
-            } catch (Exception | LinkageError e) {
-                // 换下一个候选名；全部失败时由调用方回退默认语言
-            }
-        }
-        return null;
-    }
-
-    /** 先找公开字段（ConfigData 的字段风格），再兜底找非公开字段（命名一致但可见性不同）。 */
-    private static Field findField(Class<?> type, String name) {
-        try {
-            return type.getField(name);
-        } catch (NoSuchFieldException ignored) {
-            // 继续尝试非公开字段
-        } catch (Exception | LinkageError e) {
-            return null;
-        }
-        try {
-            Field field = type.getDeclaredField(name);
-            field.setAccessible(true);
-            return field;
-        } catch (Exception | LinkageError e) {
-            return null;
-        }
     }
 
     /**

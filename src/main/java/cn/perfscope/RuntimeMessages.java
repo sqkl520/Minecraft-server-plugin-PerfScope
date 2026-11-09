@@ -171,6 +171,11 @@ public final class RuntimeMessages {
         put(en, zh, "run.compat.folia-cancel-failed",
             "[PerfScope] Failed to cancel the Folia task: {0}",
             "[PerfScope] 取消 Folia 任务失败: {0}");
+        // f-s02-contract-04：取消路径的统一日志键（Bukkit / Folia 两条分支共用，
+        // 带异常类型以便区分"任务已结束"与"调度器内部错误"）。
+        put(en, zh, "run.compat.task-cancel-failed",
+            "[PerfScope] Failed to cancel a scheduled task (swallowed, the caller continues): {0}",
+            "[PerfScope] 取消定时任务失败（已吞掉异常，调用方继续执行）: {0}");
 
         Messages.registerModule(en, zh);
     }

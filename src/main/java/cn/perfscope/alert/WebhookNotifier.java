@@ -80,8 +80,13 @@ public class WebhookNotifier {
     /** 复用的 HttpClient（异步；构建一次） */
     private final HttpClient httpClient;
 
-    /** 失败日志限频：上次输出失败日志的时间（epoch ms，0 = 从未）。仅主线程/异步回调原子性不敏感（单写者近似） */
-    private volatile long lastFailureLogAtMs = 0L;
+    /**
+     * 失败日志限频：上次输出失败日志的时间（epoch ms，0 = 从未）。
+     * f-s01-conc-02：调用者是 HttpClient 的异步完成回调，多个失败可能并发进入；
+     * 原先的 volatile long read-check-write 会同时放行，改为 AtomicLong 以保证限频精确。
+     */
+    private final java.util.concurrent.atomic.AtomicLong lastFailureLogAtMs =
+        new java.util.concurrent.atomic.AtomicLong(0L);
 
     /** 初始化时一次性配置快照（enabled/type/url）；reload 后由 {@link #reload()} 刷新 */
     private volatile boolean ready = false;
@@ -179,6 +184,13 @@ public class WebhookNotifier {
                 .build();
             httpClient.sendAsync(request, HttpResponse.BodyHandlers.discarding())
                 .whenComplete((resp, err) -> {
+                    // f-s01-err-11 / f-s01-conc-03：异步回调可能在插件 onDisable 之后才回来。
+                    // HttpClient 在 JDK 17 无关闭路径、句柄也未保存（无法 cancel），所以这里
+                    // 以 isEnabled() 兜底：停用后不再触碰插件代码（logger/配置），
+                    // 避免关服窗口内产生归属不明、且会被吞掉的告警日志。
+                    if (!plugin.isEnabled()) {
+                        return;
+                    }
                     if (err != null) {
                         // 9A-16（漏洞 1）：只记异常类型。err.getMessage() 可能内嵌完整 URL/token
                         // （如 IllegalArgumentException: Illegal character in path at index N: https://...）
@@ -413,11 +425,15 @@ public class WebhookNotifier {
      */
     private void logFailure(String detail) {
         long now = System.currentTimeMillis();
-        long last = lastFailureLogAtMs;
+        // f-s01-conc-02：CAS 推进时间戳，只有推进成功的那一个线程获得输出权。
+        // 比较-交换-重试的写法在这里不必要：败者直接放弃即可（它的信息与胜者同类）。
+        long last = lastFailureLogAtMs.get();
         if (now - last < 60_000L) {
             return;
         }
-        lastFailureLogAtMs = now;
+        if (!lastFailureLogAtMs.compareAndSet(last, now)) {
+            return;
+        }
         plugin.getLogger().warning("[告警] webhook 推送失败（同类 60 秒内不重复记）: " + detail);
     }
 

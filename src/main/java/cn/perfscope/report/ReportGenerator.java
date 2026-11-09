@@ -46,6 +46,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 
 /**
  * 性能报告生成器 - 支持 HTML / TXT / JSON 三种格式
@@ -66,6 +67,21 @@ public class ReportGenerator {
 
     // P0-11：线程安全的日期格式化器（SimpleDateFormat 非线程安全，已删除）
     private static final DateTimeFormatter FILE_TS = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss-SSS");
+    /** f-s05-sec-03：本插件报告文件的完整名字形态（与 {@link #FILE_TS} + {@link #writeReportAtomically} 对齐）。 */
+    private static final Pattern REPORT_FILE_NAME = Pattern.compile(
+        "^perfscope-\\d{4}-\\d{2}-\\d{2}_\\d{2}-\\d{2}-\\d{2}-\\d{3}(-\\d+)?\\.(html|txt|json)$");
+    /**
+     * f-s05-sec-03 的补充（验收 N-A6）：上面那条只校验位数，{@code perfscope-2026-13-03_...}
+     * （13 月）、{@code ..._25-05-07-...}（25 时）仍会被判成本插件产物并删除。此处按
+     * {@link #FILE_TS} 的字段值域收紧：月 01-12、日 01-31、时 00-23、分 00-59、秒 00-59。
+     *
+     * <p>日只校 01-31 不校月内天数（2 月 30 日仍会放行）：该文件仍然**只可能**由本插件命名，
+     * 因为插件自己不会产出非法日期；放宽这一位是为了避免闰年/月末逻辑在这里重复实现一遍。
+     * 真正的所有权判据是「形如本插件的时间戳」而非「时间戳是合法日期」。</p>
+     */
+    private static final Pattern REPORT_FILE_NAME_STRICT = Pattern.compile(
+        "^perfscope-\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])"
+            + "_([01]\\d|2[0-3])-[0-5]\\d-[0-5]\\d-\\d{3}(-\\d+)?\\.(html|txt|json)$");
     private static final DateTimeFormatter DISPLAY_TS = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     // A5/T2b：单次清理最多删除的报告文件数硬上限——防止时钟异常/误配导致"一次删空"式批量误删
     private static final int MAX_CLEAN_PER_RUN = 50;
@@ -285,6 +301,7 @@ public class ReportGenerator {
         if (files == null) return;
 
         int deleted = 0;
+        int deleteFailed = 0;   // f-s05-err-07：删除失败计数（首个立即记，其余汇总一条）
         for (File file : files) {
             // a. 仅处理普通文件，且文件名必须匹配本插件生成模式
             if (!file.isFile() || !isReportFileName(file.getName())) continue;
@@ -299,18 +316,35 @@ public class ReportGenerator {
                 }
                 if (file.delete()) {
                     deleted++;
+                } else {
+                    // f-s05-err-07：delete() 返回 false 此前被静默丢弃。Windows 上文件被浏览器/
+                    // 杀软占用或目录只读时删除恒失败，这些文件永不清理且无任何诊断线索。
+                    // 逐文件记 WARNING 会在批量占用时刷屏，故与 clean-limit 同范式：只记首个并计数。
+                    if (deleteFailed == 0) {
+                        plugin.getLogger().warning(Messages.get("report.log.delete-failed",
+                            file.getName(), file.getAbsolutePath()));
+                    }
+                    deleteFailed++;
                 }
             }
+        }
+        if (deleteFailed > 1) {
+            plugin.getLogger().warning(Messages.get("report.log.delete-failed-summary", deleteFailed));
         }
     }
 
     /**
      * T2a：报告文件名判定——仅 {@code perfscope-<时间戳>[-N].html|txt|json} 视为本插件产物。
      * 加前缀+后缀双条件，避免误删用户在 reports/ 中自建的文件。
+     *
+     * <p>f-s05-sec-03：前缀+后缀不足以宣称所有权——管理员自建的 {@code perfscope-notes.txt}、
+     * {@code perfscope-2026.html} 同样满足，超期后会被清理逻辑当成自己的产物删掉。故改为按
+     * {@link #FILE_TS} 的完整格式（{@code yyyy-MM-dd_HH-mm-ss-SSS}）做正则校验；{@code -N}
+     * 是 {@link #writeReportAtomically} 换名重试产生的后缀，必须一并放行，否则碰撞文件永不清理。</p>
      */
     private static boolean isReportFileName(String name) {
-        if (name == null || !name.startsWith("perfscope-")) return false;
-        return name.endsWith(".html") || name.endsWith(".txt") || name.endsWith(".json");
+        return name != null && REPORT_FILE_NAME.matcher(name).matches()
+            && REPORT_FILE_NAME_STRICT.matcher(name).matches();
     }
 
     /**
@@ -363,8 +397,12 @@ public class ReportGenerator {
         html.append("<div class=\"card-grid\">\n");
 
         // P0-5：unavailable 模块显示"不可用"；P0-13：MSPT/CPU -1 哨兵显示"未知"
-        String unavailable = htmlMsg("report.common.unavailable");
-        String unknown = htmlMsg("report.common.unknown");
+        // f-s05-logic-03：这两个变量会被传进 htmlCard，而 htmlCard 内部会 escapeHtml 一次。
+        // 这里若再用 htmlMsg（= escapeHtml + Messages.get）就会双重转义——默认文案里没有 &<>，
+        // 但用户在 messages.yml 里覆盖成 "N/A <unknown>" 时会被渲染成 "N/A &amp;lt;unknown&amp;gt;"。
+        // 故此处取裸文案，转义交给 htmlCard 单点负责。
+        String unavailable = Messages.get("report.common.unavailable");
+        String unknown = Messages.get("report.common.unknown");
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_TPS)) {
             html.append(htmlCard(Messages.get("report.html.card.tps"), unavailable, "unknown", ""));
         } else {
@@ -385,9 +423,11 @@ public class ReportGenerator {
         } else {
             // 9A-0：min/max 为 -1 表示该采集路径不提供极值（avg-only / TPS 反推），
             // 渲染"未采集"而不是把平均值复制成假极值（旧实现输出 "最小 12.3 | 最大 12.3"）
+            // f-s05-logic-03：range 会作为 subtitle 传进 htmlCard，转义由 htmlCard 单点负责，
+            // 故这里取裸文案（原用 htmlMsg 会双重转义，用户覆盖含 &<> 的文案时出现 &amp;amp;）。
             String range = (snap.msptMin <= 0 || snap.msptMax <= 0)
-                ? htmlMsg("report.html.mspt.range-uncollected")
-                : htmlMsg("report.html.mspt.range",
+                ? Messages.get("report.html.mspt.range-uncollected")
+                : Messages.get("report.html.mspt.range",
                     String.format(java.util.Locale.ROOT, "%.2f", snap.msptMin), String.format(java.util.Locale.ROOT, "%.2f", snap.msptMax));
             html.append(htmlCard(Messages.get("report.html.card.mspt"),
                 String.format(java.util.Locale.ROOT, "%.2f ms", snap.msptAvg) + msptEstimateTag(snap),
@@ -920,11 +960,12 @@ public class ReportGenerator {
     /**
      * {@code alerts.health} 的取值。
      *
-     * <p>只有<b>真正的采集失败</b>才算 {@code degraded}。模块被服主主动关闭、或平台不支持，
-     * 都属于"按预期运行"，不应污染健康度——否则 CI 门禁会对健康的服务器永久报警。</p>
+     * <p>只有<b>真正的采集失败</b>才算 {@code degraded}。模块被服主主动关闭、平台不支持、
+     * 或仍在首轮预热窗口内（{@code warmingUp}，默认 10 秒内自愈），都属于"按预期运行"，
+     * 不应污染健康度——否则 CI 门禁会对健康的服务器永久报警。</p>
      *
      * <p>取值：{@code ok}（无不可用）/ {@code degraded}（有采集失败）/ {@code partial}
-     * （仅配置禁用或平台跳过，无采集失败）。{@code partial} 是新增取值，旧脚本
+     * （仅配置禁用、平台跳过或预热中，无采集失败）。{@code partial} 是新增取值，旧脚本
      * 若只认 {@code ok} 会把它当异常——这是有意的：它确实不完全健康，只是原因不是故障。</p>
      */
     private static String healthOf(MetricsSnapshot snap) {
@@ -932,6 +973,11 @@ public class ReportGenerator {
             return "ok";
         }
         for (String module : snap.unavailable) {
+            // f-s05-logic-01（同类残留）：预热不是故障。warmingUp ⊆ unavailable，
+            // 若不在此跳过，启动/重载后 10 秒内的报告会把"马上自愈"判成 degraded。
+            if (snap.warmingUp.contains(module)) {
+                continue;
+            }
             if (CAUSE_FAILED.equals(unavailableCause(snap, module))) {
                 return "degraded";
             }
@@ -1088,10 +1134,24 @@ public class ReportGenerator {
         }
     }
 
+    /**
+     * 字节数 → 人类可读文案（f-s05-logic-04）。
+     *
+     * <p>换档判据必须与输出精度同口径：旧实现按原始字节判档、却按 {@code %.1f} 输出，
+     * 于是 {@code 1048575}（比 1 MB 少 1 字节）落进 KB 档并被格式化成 {@code "1024.0 KB"}，
+     * {@code 1073741823} 变成 {@code "1024.0 MB"}——读者看到"1024 KB"，会以为该进位却没进位。</p>
+     *
+     * <p>修法：判档前先按目标精度**四舍五入**，用舍入后的值判档。这样 1048575 先舍到 1024.0，
+     * 判档看到 1024.0 ≥ 1024 → 进 MB 档，输出 {@code "1.0 MB"}，与直觉一致。</p>
+     */
     private String formatBytes(long bytes) {
+        if (bytes < 0) return bytes + " B";
+        // KB 档用 1 位小数 -> 舍入步长 0.1 KB = 102.4 字节
         if (bytes < 1024) return bytes + " B";
-        if (bytes < 1024 * 1024) return String.format(java.util.Locale.ROOT, "%.1f KB", bytes / 1024.0);
-        if (bytes < 1024 * 1024 * 1024) return String.format(java.util.Locale.ROOT, "%.1f MB", bytes / (1024.0 * 1024.0));
+        double kb = Math.round(bytes / 102.4) / 10.0;   // 与 %.1f KB 同精度
+        if (kb < 1024.0) return String.format(java.util.Locale.ROOT, "%.1f KB", kb);
+        double mb = Math.round(bytes / (1024.0 * 1024.0) * 10.0) / 10.0;   // 与 %.1f MB 同精度
+        if (mb < 1024.0) return String.format(java.util.Locale.ROOT, "%.1f MB", mb);
         return String.format(java.util.Locale.ROOT, "%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0));
     }
 

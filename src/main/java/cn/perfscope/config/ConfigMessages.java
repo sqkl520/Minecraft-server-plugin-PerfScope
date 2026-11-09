@@ -208,6 +208,16 @@ public final class ConfigMessages {
             "Configuration check: {0} is out of range (must satisfy 0 <= value <= {1}); "
                 + "reverted to the defaults: w={2} c={3}",
             "配置校验：{0} 数值越界（要求 0 ≤ 值 ≤ {1}），已回退默认值：w={2} c={3}");
+        // f-s03-logic-01 残留闭合：阈值落在近恒真区 (20.0, 20.5] 时只警告、不改值。
+        // 与 config.check.history-interval 的 warn-only 口径一致，避免 breaking change。
+        put(en, zh, "config.check.tps-near-ceiling",
+            "Configuration check: TPS warning/critical threshold is at or above {0} "
+                + "(w={1} c={2}); steady-state TPS never exceeds 20.0, so the sustained-low-TPS "
+                + "rule will fire on an otherwise healthy server. Value kept as configured; "
+                + "lower it if this is not intended.",
+            "配置校验：TPS 告警阈值 ≥ {0}（w={1} c={2}）；稳态 TPS 上限为 20.0，"
+                + "「TPS 持续低位」规则因此在健康服务器上也会命中。已按原值保留，"
+                + "若非预期请调低该阈值");
         put(en, zh, "config.check.threshold-inverted",
             "Configuration check: {0} has its warning/critical thresholds inverted; "
                 + "reverted to the defaults: w={1} c={2}",

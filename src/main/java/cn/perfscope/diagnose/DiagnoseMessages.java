@@ -101,9 +101,10 @@ public final class DiagnoseMessages {
             "TPS 持续低位");
         put(en, zh, "diag.DIAG-TPS-PERSIST.detail",
             "15-minute average {0}, window average over the last {1} min {2} (warning line <{3}), "
-                + "window low {4} — not an occasional jitter: this is sustained load",
+                + "window low {4} — the rule fires when either measure falls below the warning line; "
+                + "compare the 15-minute average with that line to tell a brief dip from sustained load",
             "15 分钟均值 {0}、近 {1} 分钟窗口均值 {2}（告警线 <{3}），窗口最低 {4}"
-                + "——非偶发抖动，属持续负载");
+                + "——任一口径低于告警线即命中；对照 15 分钟均值与该告警线，可区分短暂回落与持续负载");
         put(en, zh, "diag.DIAG-TPS-PERSIST.suggestion",
             "Check these in order: 1) /perfscope hotspot for entity pile-up coordinates; "
                 + "2) /perfscope memory for memory pressure; 3) compare the drop-off point in "
@@ -217,6 +218,11 @@ public final class DiagnoseMessages {
         put(en, zh, "diag.skip.rule-exception",
             "Rule evaluation threw {0}",
             "规则评估异常：{0}");
+        // f-s03-data-06：reload 后快照仍是旧配置代次采集的，不能用它配新阈值求值
+        put(en, zh, "diag.skip.stale-config",
+            "Configuration was reloaded after this sample was collected; evaluating only once a "
+                + "sample from the current configuration is available (normally within one cycle)",
+            "配置已重载，但本样本仍是在旧配置下采集的；需等到当前配置下采集的样本才能评估（通常一个采集周期内）");
 
         // ==================== 控制台日志（与玩家侧文案分开） ====================
         put(en, zh, "diag.log.rule-failed",

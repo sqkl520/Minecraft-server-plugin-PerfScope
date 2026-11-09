@@ -429,7 +429,7 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         // MSPT 过高建议（v1.2 A8：触发条件改为读 config 阈值，原硬编码 50）
         if (thresholdColors.levelOf(ThresholdColors.Metric.MSPT, snap.msptAvg) == ThresholdColors.Level.CRITICAL) {
             sender.sendMessage(Component.text(Messages.get("cmd.advice.mspt-critical",
-                (int) configManager.get().mspt_criticalThreshold), RED));
+                (int) thresholdOf(cfgNow(), "mspt_criticalThreshold", 50.0)), RED));
             sender.sendMessage(Component.text(Messages.get("cmd.advice.mspt-suggestion"), GRAY));
             sender.sendMessage(Component.text(Messages.get("cmd.advice.spark-hint"), GRAY));
         }
@@ -539,7 +539,7 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         // v1.2 A8：触发条件与文案数值改为读 config 阈值（原硬编码 50）
         if (thresholdColors.levelOf(ThresholdColors.Metric.MSPT, snap.msptAvg) == ThresholdColors.Level.CRITICAL) {
             sender.sendMessage(Component.text(Messages.get("cmd.advice.mspt-critical",
-                (int) configManager.get().mspt_criticalThreshold), RED));
+                (int) thresholdOf(cfgNow(), "mspt_criticalThreshold", 50.0)), RED));
             sender.sendMessage(Component.text(Messages.get("cmd.advice.mspt-suggestion"), GRAY));
             sender.sendMessage(Component.text(Messages.get("cmd.advice.spark-hint"), GRAY));
         }
@@ -647,10 +647,31 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 });
         }
 
-        if (snap.totalEntities > configManager.get().entities_totalCriticalThreshold) {
-            sender.sendMessage(Component.text(Messages.get("cmd.entities.critical-warning"), RED));
-        } else if (snap.totalEntities > configManager.get().entities_totalWarningThreshold) {
-            sender.sendMessage(Component.text(Messages.get("cmd.entities.warning"), YELLOW));
+        // f-s02-logic-03：世界视图必须判该世界自己的实体数与覆盖阈值，否则单世界页会打出全服级警告。
+        // world == null（全服视图）保持原行为：全服总数 vs 全局阈值。
+        Integer alertEntities;
+        int warnThreshold;
+        int criticalThreshold;
+        if (world == null) {
+            alertEntities = snap.totalEntities;
+            warnThreshold = (int) thresholdOf(cfgNow(), "entities_totalWarningThreshold", 2000.0);
+            criticalThreshold = (int) thresholdOf(cfgNow(), "entities_totalCriticalThreshold", 3000.0);
+        } else {
+            // 该世界不在 map 里 = 0 实体 → null → 不报警
+            alertEntities = snap.entitiesByWorld.get(world.getName());
+            // worlds 段无覆盖时 getWorldSettings 返回 null → 回退全局（同 ThresholdColors / showWorld 口径）
+            ConfigManager.WorldSettings ws = configManager.getWorldSettings(world.getName());
+            warnThreshold = ws != null ? ws.entities_totalWarningThreshold
+                : (int) thresholdOf(cfgNow(), "entities_totalWarningThreshold", 2000.0);
+            criticalThreshold = ws != null ? ws.entities_totalCriticalThreshold
+                : (int) thresholdOf(cfgNow(), "entities_totalCriticalThreshold", 3000.0);
+        }
+        if (alertEntities != null) {
+            if (alertEntities > criticalThreshold) {
+                sender.sendMessage(Component.text(Messages.get("cmd.entities.critical-warning"), RED));
+            } else if (alertEntities > warnThreshold) {
+                sender.sendMessage(Component.text(Messages.get("cmd.entities.warning"), YELLOW));
+            }
         }
     }
 
@@ -742,7 +763,7 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
 
         if (thresholdColors.levelOf(ThresholdColors.Metric.MEMORY, snap.heapUsagePercent) == ThresholdColors.Level.CRITICAL) {
             sender.sendMessage(Component.text(Messages.get("cmd.memory.critical-warning",
-                configManager.get().memory_heapCriticalThreshold), RED));
+                (int) thresholdOf(cfgNow(), "memory_heapCriticalThreshold", 95.0)), RED));
             sender.sendMessage(Component.text(Messages.get("cmd.memory.critical-advice"), GRAY));
         }
     }
@@ -1059,7 +1080,19 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
      */
     private void showTrend(CommandSender sender, String[] args) {
         var fileStore = plugin.getHistoryFileStore();
-        int maxDays = configManager.get().history_persistRetentionDays;
+        int retentionDays = (int) thresholdOf(cfgNow(), "history_persistRetentionDays", 7.0);
+        // f-s02-logic-04：天数上界必须跟"数据实际来自哪里"走。
+        // 旧实现一律用保留天数（默认 7）当上界，但文件持久化不可用时会回退到内存环，
+        // 而内存环的容量上限是 24 小时——于是 `trend 7` 会输出
+        // "近 7 天（1440 个样本，来源: 内存环）"，把 24 小时的数据标成 7 天喵。
+        // 现在先探一次文件是否可用，再决定上界：
+        //   文件可用 -> retentionDays（文件里真有那么多天）
+        //   文件不可用 -> 1（内存环只保证约 24 小时）
+        long sinceMsForProbe = System.currentTimeMillis() - retentionDays * 24L * 60L * 60L * 1000L;
+        List<HistorySample> fileProbe =
+            fileStore == null ? List.of() : fileStore.loadRecentDays(retentionDays, sinceMsForProbe);
+        boolean fileUsable = !fileProbe.isEmpty();
+        int maxDays = fileUsable ? retentionDays : 1;
         int days = 1;
         if (args.length > 1) {
             try {
@@ -1069,10 +1102,18 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             }
         }
         days = Math.max(1, Math.min(maxDays, days));
+        if (!fileUsable && retentionDays > 1) {
+            // 请求值被上界压过时明说原因，否则用户会以为参数没生效
+            sender.sendMessage(Component.text(
+                Messages.get("cmd.trend.days-clamped-memory", retentionDays, maxDays), YELLOW));
+        }
 
         long sinceMs = System.currentTimeMillis() - days * 24L * 60L * 60L * 1000L;
         // 合并单一事实源：优先文件持久化（跨重启）；不可用/空时回退内存环（本进程会话）
-        List<HistorySample> samples = fileStore == null ? List.of() : fileStore.loadRecentDays(days, sinceMs);
+        // 复用上面的探针结果：days <= retentionDays 时探针已覆盖本次请求的范围，无需二次读盘
+        List<HistorySample> samples = (fileUsable && days == retentionDays)
+            ? fileProbe
+            : (fileStore == null ? List.of() : fileStore.loadRecentDays(days, sinceMs));
         boolean fromFile = !samples.isEmpty();
         if (!fromFile) {
             samples = historyStore.since(sinceMs);
@@ -1086,6 +1127,22 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         String source = Messages.get(fromFile ? "cmd.trend.source-file" : "cmd.trend.source-memory");
         sender.sendMessage(goldLabel(Messages.get("cmd.trend.range-label"))
             .append(Component.text(Messages.get("cmd.trend.range", days, samples.size(), source), WHITE)));
+
+        // f-s04-csv-06：skippedLines() 此前全仓零调用点——文件里有坏行（半写/损坏/列数不符）时
+        // trend 只说"来源：内存环"，不告诉用户为什么走了回退、丢了多少行。降级原因必须可见，
+        // 否则"数据看着变少了"永远只能靠猜喵。
+        if (fileStore != null) {
+            long skipped = fileStore.skippedLines();
+            if (skipped > 0) {
+                sender.sendMessage(Component.text(
+                    Messages.get("cmd.trend.skipped-lines", skipped), YELLOW));
+            }
+            if (!fromFile) {
+                // 有持久化目录却拿不到文件样本：把"为什么回退"讲明白
+                sender.sendMessage(Component.text(
+                    Messages.get("cmd.trend.file-unavailable", fileStore.directory()), GRAY));
+            }
+        }
 
         HistorySample oldest = samples.get(0);
         HistorySample latest = samples.get(samples.size() - 1);
@@ -1346,7 +1403,11 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         }
         String lastError = collector.lastCollectError();
         if (lastError != null && !lastError.isEmpty()) {
-            sender.sendMessage(Component.text(Messages.get("cmd.status.last-error", lastError), GRAY));
+            // f-s02-sec-02：异常原文里常含绝对路径（/srv/mc/plugins/... 或 C:\Users\<服主名>\...）
+            // 与完整堆栈片段，而 /perfscope status 的受众是 perfscope.use，未必是服主本人。
+            // 聊天框只给「异常类型 + 首句」的脱敏摘要，完整原文留在控制台日志里（那里本来就有）。
+            sender.sendMessage(Component.text(
+                Messages.get("cmd.status.last-error", scrubForChat(lastError)), GRAY));
         }
         if (collector.isCollectorDead() || cycleFailures >= 10) {
             sender.sendMessage(Component.text(Messages.get("cmd.status.cycle-action"), YELLOW));
@@ -1590,10 +1651,17 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 player.sendMessage(Component.text(Messages.get("monitor-on"), GREEN));
             } else {
                 monitoringPlayers.remove(player.getUniqueId());
+                // f-s02-conc-03：noop 与"关服中"要分开报——前者是调度不可用（可重试），
+                // 后者是插件正在停用（重试无意义）。旧实现把两种都报成"启动失败，详见控制台"，
+                // 而关服分支根本没往控制台写任何东西，用户按提示去查什么也查不到喵。
+                boolean shutdown = monitorShutdown;
                 boolean zh = Messages.LOCALE_ZH.equals(Messages.activeLocale());
-                player.sendMessage(Component.text(zh
-                    ? "实时监测启动失败（调度不可用，详见控制台）"
-                    : "Live monitoring failed to start (scheduler unavailable; see the console)", RED));
+                player.sendMessage(Component.text(shutdown
+                    ? (zh ? "插件正在停用，实时监测已不可用"
+                          : "The plugin is shutting down; live monitoring is unavailable")
+                    : (zh ? "实时监测启动失败（调度不可用，详见控制台）"
+                          : "Live monitoring failed to start (scheduler unavailable; see the console)"),
+                    RED));
             }
         }
     }
@@ -1639,7 +1707,11 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
      */
     private boolean startMonitorTask() {
         if (monitorShutdown) {
-            return true; // 9B-5：关服后不再拉起；回执路径维持原状（属 f-s02-conc-03 的范围）
+            // f-s02-conc-03：关服中"任务没装上"= false，不是 true。
+            // 旧实现返回 true 只为让回执路径维持原状，代价是 toggleMonitor 保留刚加入的订阅，
+            // 而 shutdown() 已 clear() 过集合 —— 这个 UUID 就永久留在 Set 里无人服务。
+            // 现在如实返回 false，由 toggleMonitor 撤销订阅并给出区分度更高的提示喵。
+            return false;
         }
         if (!monitorTaskStarting.compareAndSet(false, true)) {
             return true; // 另一线程正在安装：它装好的任务同样覆盖本线程刚加入的订阅者
@@ -1688,6 +1760,27 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             MetricsSnapshot snap = collector.getLatest();
             if (snap == null) return;
 
+            // f-s02-actionbar-02：采集停摆后 getLatest() 会一直返回同一张旧快照，
+            // ActionBar 就会永远显示"健康"的 TPS/MSPT，比不显示更误导——运维看不到掉线信号。
+            // 与 /perfscope status 同口径：collector.isStale() 为真时推一条明确的过期提示，
+            // 而不是继续渲染旧数值。
+            if (collector.isStale()) {
+                Component staleMsg = Component.text(
+                    Messages.get("cmd.actionbar.stale", collector.staleForMs()), RED);
+                for (Iterator<UUID> it = monitoringPlayers.iterator(); it.hasNext();) {
+                    UUID uuid = it.next();
+                    Player player = Bukkit.getPlayer(uuid);
+                    if (player == null || !player.isOnline()) {
+                        it.remove();
+                        continue;
+                    }
+                    if (player.getAddress() != null) {   // 同 sendActionBar 的连接守卫
+                        player.sendActionBar(staleMsg);
+                    }
+                }
+                return;
+            }
+
             // P0-12：显式 Iterator 遍历清理离线玩家，避免 CME；A2（T1d）保留该清理并叠加发送前守卫
             for (Iterator<UUID> it = monitoringPlayers.iterator(); it.hasNext();) {
                 UUID uuid = it.next();
@@ -1700,7 +1793,7 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             }
         } catch (Exception | LinkageError t) {
             // general.debug 门控堆栈（与 safeCollect 同款日志口径）
-            if (configManager.get().general_debug) {
+            if (cfgNow() != null && cfgNow().general_debug) {
                 plugin.getLogger().log(Level.WARNING, "[PerfScope] monitor push failed (skipped this round)", t);
             } else {
                 plugin.getLogger().warning("[PerfScope] monitor push failed (skipped this round): " + t.getMessage());
@@ -1732,7 +1825,10 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             .append(snap.unavailable.contains(MetricsSnapshot.MODULE_TPS)
                 ? Component.text(Messages.get("cmd.state.unavailable"), GRAY) : formatTpsComponent(snap.tps1m))
             // 9A-2：Folia 上追加极简口径标记（ActionBar 空间有限，用 "gr" 缩写并在 /perfscope tps 展开说明）
-            .append(ServerCompat.isTpsGlobalScope() ? Component.empty() : Component.text(" gr", GRAY))
+            // f-s02-actionbar-04：TPS 不可用时数值已渲染"不可用"，再追加 " gr" 会得到
+            // "TPS: unavailable gr" 这种自相矛盾的组合——口径标记只对真实数值有意义。
+            .append(snap.unavailable.contains(MetricsSnapshot.MODULE_TPS) || ServerCompat.isTpsGlobalScope()
+                ? Component.empty() : Component.text(" gr", GRAY))
             .append(Component.text(
                 Messages.get("cmd.actionbar.segment", Messages.get("cmd.unit.mspt")), GRAY))
             .append(msptUnavailable
@@ -1751,7 +1847,11 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 Messages.get("cmd.actionbar.segment", Messages.get("cmd.unit.entities")), GRAY))
             .append(snap.unavailable.contains(MetricsSnapshot.MODULE_ENTITIES)
                 ? Component.text(Messages.get("cmd.state.unavailable"), GRAY)
-                : Component.text(String.valueOf(snap.totalEntities), WHITE))
+                // f-s02-actionbar-05：同一份快照在 chat 侧走 thresholdColors 着色，
+                // ActionBar 却恒 WHITE——实体数超阈值时两处颜色矛盾（聊天红/黄、ActionBar 白）。
+                : Component.text(String.valueOf(snap.totalEntities),
+                    thresholdColors.colorOf(thresholdColors.levelOf(
+                        ThresholdColors.Metric.ENTITIES, snap.totalEntities))))
             .append(Component.text(
                 Messages.get("cmd.actionbar.segment", Messages.get("cmd.unit.memory")), GRAY))
             .append(snap.unavailable.contains(MetricsSnapshot.MODULE_MEMORY)
@@ -1953,6 +2053,61 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         return world;
     }
 
+    /**
+     * f-s02-err-03：配置快照的空安全取用入口。
+     *
+     * <p>{@link ConfigManager#get()} 的契约是**可空**（构造期到 {@code load()} 成功之间为 null），
+     * 但本类此前 7 个调用点里只有 1 处判空、6 处直接解引用。当前虽不可达（配置加载失败即
+     * fail-fast），但这种"靠不变量隐式兜底"的写法在重构时一碰就炸——统一收口到本方法喵。</p>
+     */
+    private ConfigManager.ConfigData cfgNow() {
+        return configManager == null ? null : configManager.get();
+    }
+
+    /**
+     * 从配置快照读一个数值字段，快照为 null 时回退给定默认值。
+     *
+     * <p>只用于本类的**展示与建议**路径：配置不可用时应显示"建议阈值"的合理默认，
+     * 而不是让整条命令抛 NPE。真正依赖配置的判定（告警开关、采集间隔）走各自的 fail-fast 路径喵。</p>
+     */
+    private double thresholdOf(ConfigManager.ConfigData cfg, String field, double fallback) {
+        if (cfg == null) {
+            return fallback;
+        }
+        switch (field) {
+            case "mspt_criticalThreshold":     return cfg.mspt_criticalThreshold;
+            case "memory_heapCriticalThreshold": return cfg.memory_heapCriticalThreshold;
+            case "entities_totalWarningThreshold":  return cfg.entities_totalWarningThreshold;
+            case "entities_totalCriticalThreshold": return cfg.entities_totalCriticalThreshold;
+            case "history_persistRetentionDays":    return cfg.history_persistRetentionDays;
+            default: return fallback;
+        }
+    }
+
+    /**
+     * f-s02-sec-02：把异常原文压成可安全进聊天框的摘要。
+     *
+     * <p>规则：只保留异常类型与消息的**首句**，把 Windows / POSIX 绝对路径替换为
+     * {@code <path>}。完整原文仍在控制台日志（{@code lastCollectError} 的同时已经
+     * 由采集层 {@code SEVERE}/{@code WARNING} 落过一份），所以脱敏不损失排障能力喵。</p>
+     */
+    private static String scrubForChat(String raw) {
+        if (raw == null || raw.isEmpty()) {
+            return "";
+        }
+        String s = raw;
+        // Windows 盘符路径（含空格）：C:\a b\c  ->  <path>
+        s = s.replaceAll("[A-Za-z]:\\\\[^\\s:;,'\"()\\[\\]]+", "<path>");
+        // POSIX 绝对路径：/srv/mc/... -> <path>
+        s = s.replaceAll("(^|[\\s(])/(?:[^\\s:;,'\"()\\[\\]]+/)+[^\\s:;,'\"()\\[\\]]*", "$1<path>");
+        // 只保留首句，避免把堆栈片段带进聊天框
+        int nl = s.indexOf('\n');
+        if (nl > 0) {
+            s = s.substring(0, nl) + " …";
+        }
+        return s.length() > 200 ? s.substring(0, 200) + " …" : s;
+    }
+
     private Component formatTpsComponent(double tps) {
         // v1.2 A8：改为读 config 阈值（原硬编码 18/15，与默认巧合一致）
         NamedTextColor color = thresholdColors.colorOf(
@@ -2003,10 +2158,20 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         return sb.toString();
     }
 
+    /**
+     * 字节数 → 人类可读文案（f-s05-logic-04；与 {@code ReportGenerator.formatBytes} 同构）。
+     *
+     * <p>换档判据必须与输出精度同口径：旧实现按原始字节判档、却按 {@code %.1f} 输出，
+     * 于是 {@code 1048575} 被格式化成 {@code "1024.0 KB"}、{@code 1073741823} 变成
+     * {@code "1024.0 MB"}——读者看到"1024 KB"会以为该进位却没进位。</p>
+     */
     private String formatBytes(long bytes) {
+        if (bytes < 0) return bytes + " B";
         if (bytes < 1024) return bytes + " B";
-        if (bytes < 1024 * 1024) return String.format(java.util.Locale.ROOT, "%.1f KB", bytes / 1024.0);
-        if (bytes < 1024 * 1024 * 1024) return String.format(java.util.Locale.ROOT, "%.1f MB", bytes / (1024.0 * 1024.0));
+        double kb = Math.round(bytes / 102.4) / 10.0;   // 与 %.1f KB 同精度
+        if (kb < 1024.0) return String.format(java.util.Locale.ROOT, "%.1f KB", kb);
+        double mb = Math.round(bytes / (1024.0 * 1024.0) * 10.0) / 10.0;   // 与 %.1f MB 同精度
+        if (mb < 1024.0) return String.format(java.util.Locale.ROOT, "%.1f MB", mb);
         return String.format(java.util.Locale.ROOT, "%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0));
     }
 

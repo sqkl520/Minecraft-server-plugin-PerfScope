@@ -212,22 +212,36 @@ public final class SchedulerAdapter {
 
         /**
          * 取消任务。Bukkit 路径直接 cancel；Folia 路径经 {@link FoliaSchedulerBridge}
-         * 直连 ScheduledTask.cancel()。句柄为空（调度失败/无操作句柄）时为无操作；
-         * 取消异常被吞并记 warning，不抛给调用方。
+         * 直连 ScheduledTask.cancel()。句柄为空（调度失败/无操作句柄）时为无操作。
+         *
+         * <p><b>f-s02-contract-04</b>：本 javadoc 原先承诺「取消异常被吞并记 warning，不抛给调用方」，
+         * 但只有 Folia 分支有 try——Bukkit 分支的 {@code cancel()} 一旦抛出就直接冒泡给调用方，
+         * 零日志。而调用方都在关服/退订路径上，异常冒泡会中断「取消其余句柄」的循环。
+         * 现两条分支统一：都吞异常并按 debug 门控记 warning，兑现注释承诺喵。</p>
          */
         public void cancel() {
             if (bukkitTask != null) {
-                bukkitTask.cancel();
+                try {
+                    bukkitTask.cancel();
+                } catch (Exception | LinkageError e) {
+                    logCancelFailure(e);
+                }
                 return;
             }
             if (foliaTask != null) {
                 try {
                     FoliaSchedulerBridge.cancel(foliaTask);
                 } catch (Throwable t) {
-                    if (plugin != null) {
-                        plugin.getLogger().warning(Messages.get("run.compat.folia-cancel-failed", t.getMessage()));
-                    }
+                    logCancelFailure(t);
                 }
+            }
+        }
+
+        /** 取消失败的单点日志出口（两条分支共用，避免文案与门控各写一份）。 */
+        private void logCancelFailure(Throwable t) {
+            if (plugin != null) {
+                plugin.getLogger().warning(Messages.get("run.compat.task-cancel-failed",
+                    t.getClass().getSimpleName() + ": " + t.getMessage()));
             }
         }
     }

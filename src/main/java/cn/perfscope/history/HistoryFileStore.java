@@ -86,7 +86,14 @@ public class HistoryFileStore {
     private static final String FILE_PREFIX = "history-";
     private static final String FILE_SUFFIX = ".csv";
 
-    /** 9A-18：列名（顺序即 {@link HistorySample} 的组件顺序，也是旧格式的位置口径）。 */
+    /**
+     * f-s04-csv-05：列名（顺序即 {@link HistorySample} 的组件顺序，也是旧格式的位置口径）。
+     *
+     * <p>本数组是 CSV 行序的**唯一真相源**：{@link #HEADER} 由它派生，{@link #format} 的
+     * 取值顺序也按它逐项走。旧实现里 {@code format()} 手写 7 段字符串拼接，与 {@code COLUMNS}
+     * 是两份独立定义——单侧重排或改名就会让表头序与数据行序悄悄漂移，而读取端按列名映射，
+     * 结果是**数据被安到错误的列上**且不报错喵。</p>
+     */
     private static final String[] COLUMNS = {
         "epochMs", "tps1m", "msptAvg", "heapUsagePercent",
         "playerCount", "totalEntities", "totalLoadedChunks"
@@ -436,10 +443,32 @@ public class HistoryFileStore {
         }
     }
 
+    /**
+     * 序列化一条样本为 CSV 行。
+     *
+     * <p>f-s04-csv-05：<b>按 {@link #COLUMNS} 索引取值</b>，不再手写拼接。
+     * 列名与取值从此共用一份顺序定义——表头与数据行不可能再错位喵。</p>
+     */
     private static String format(HistorySample sample) {
-        return sample.timestamp() + "," + sample.tps1m() + "," + sample.msptAvg() + ","
-            + sample.heapUsagePercent() + "," + sample.playerCount() + ","
-            + sample.totalEntities() + "," + sample.totalLoadedChunks();
+        Object[] values = {
+            sample.timestamp(), sample.tps1m(), sample.msptAvg(),
+            sample.heapUsagePercent(), sample.playerCount(),
+            sample.totalEntities(), sample.totalLoadedChunks()
+        };
+        if (values.length != COLUMNS.length) {
+            // 编译期抓不到（数组长度是运行期事实），但这是纯代码常量，一旦不等就是开发期笔误
+            throw new IllegalStateException(
+                "CSV schema mismatch: COLUMNS has " + COLUMNS.length + " entries but HistorySample has "
+                    + values.length + " components");
+        }
+        StringBuilder sb = new StringBuilder(96);
+        for (int i = 0; i < values.length; i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append(values[i]);
+        }
+        return sb.toString();
     }
 
     /**

@@ -245,14 +245,15 @@ public final class PerfScope extends JavaPlugin {
     }
 
     /**
-     * 9A-10 #5：关闭报告执行器。
-     *
-     * <p>{@link ReportGenerator#shutdown()} 使用 {@code shutdownNow()}——关服阶段丢弃排队的报告请求、
-     * 中断正在进行的写盘，绝不让主线程为一份没人看的报告多等 IO。已生成的文件不受影响。</p>
-     */
-    /**
      * 关闭历史文件写线程（9A-18）：必须在采集任务停止之后调用——
      * 写线程要把队列中尚未落盘的样本刷完再退出，否则关服瞬间的最后一批数据会丢。
+     *
+     * <p><b>f-s06-contract-07</b>：本方法此前被两段 javadoc 同时描述——一段讲报告执行器
+     * （{@code ReportGenerator#shutdown()} 用 {@code shutdownNow()}），紧贴在它上面；
+     * 另一段才是真正讲写线程的。前一段是「关闭报告执行器」的说明在重构后**失去了宿主**，
+     * 于是悬空到了本方法头上，读者会以为本方法用 {@code shutdownNow()} 中断写线程——
+     * 实际它调的是 {@link HistoryFileStore#shutdown()}，语义是**刷完队列再退出**，
+     * 与 {@code shutdownNow()} 正好相反。现已把两段各归其位喵。</p>
      */
     private void shutdownHistoryFileStore() {
         if (historyFileStore != null) {
@@ -264,6 +265,12 @@ public final class PerfScope extends JavaPlugin {
         }
     }
 
+    /**
+     * 关闭报告执行器（9A-10 #5）。
+     *
+     * <p>{@link ReportGenerator#shutdown()} 使用 {@code shutdownNow()}——关服阶段丢弃排队的报告请求、
+     * 中断正在进行的写盘，绝不让主线程为一份没人看的报告多等 IO。已生成的文件不受影响。</p>
+     */
     private void shutdownReportGenerator() {
         if (reportGenerator != null) {
             try {
@@ -577,6 +584,18 @@ public final class PerfScope extends JavaPlugin {
         }
     }
 
+    /**
+     * 当前插件实例（{@link #onEnable} 发布，{@link #onDisable} 置 {@code null}）。
+     *
+     * <p><b>f-s06-contract-06</b>：本方法全仓<b>零调用点</b>——审计标为「死 API」。
+     * 之所以保留而不删除：它是插件的标准外部访问入口，第三方插件/脚本通过
+     * {@code Bukkit.getPluginManager().getPlugin("PerfScope")} 拿到实例后，本方法提供
+     * 「静态可达」的便捷路径；删除属公开 API 变更（{@code PUBLIC_API_CHANGE}），
+     * 需作者裁决，不应由审计批次顺手决定喵。</p>
+     *
+     * <p>契约：可能返回 {@code null}（插件未启用/已停用）。调用方必须判空喵。</p>
+     */
+    @org.jetbrains.annotations.Nullable
     public static PerfScope getInstance() {
         return instance;
     }

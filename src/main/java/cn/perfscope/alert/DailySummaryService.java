@@ -70,6 +70,13 @@ public class DailySummaryService {
     /** 9A-14：覆盖不足阈值——少于该分钟数一律标注"数据不足"（不再用"近 N 分钟"冒充每日）。 */
     private static final int MIN_COVERAGE_MINUTES = 60;
 
+    /**
+     * f-s01-logic-03：历史环可提供的覆盖上界（与 {@code HistoryStore.WINDOW_MS} 同值，24 小时）。
+     * 摘要的"应有多少数据"分母必须用它封顶——历史环结构上不可能提供超过 24h 的样本，
+     * 用开机时长做分母会让开机 >48h 的服务器永远被判为"覆盖不足"。
+     */
+    private static final long HISTORY_RETENTION_MS = 24L * 60L * 60L * 1000L;
+
     private final PerfScope plugin;
     private final ConfigManager configManager;
     private final WebhookNotifier webhookNotifier;
@@ -168,8 +175,20 @@ public class DailySummaryService {
                 plugin.getLogger().warning(logText("daily.log.state-dir-failed"));
                 return;
             }
-            java.nio.file.Files.write(f.toPath(),
+            // f-s01-data-03：与 alerts.state 同口径——临时文件 + 原子替换。
+            // 原实现原地截断写：进程被强杀或磁盘写满时文件会停在半截 ISO 日期串，
+            // loadSentDate 解析失败 → 视为"今天没发过" → 当日重复推送一份摘要。
+            java.io.File tmp = new java.io.File(f.getParentFile(), "daily-summary.state.tmp");
+            java.nio.file.Files.write(tmp.toPath(),
                 (date.toString() + System.lineSeparator()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            try {
+                java.nio.file.Files.move(tmp.toPath(), f.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                java.nio.file.Files.move(tmp.toPath(), f.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
         } catch (Exception e) {
             plugin.getLogger().warning(logText("daily.log.sent-date-write-failed", e.getMessage()));
         }
@@ -277,16 +296,26 @@ public class DailySummaryService {
         // 9A-14：覆盖是否"够格"叫每日摘要——两个判据：绝对下限 60 分钟，或不足开机时长的 50%
         long bootMs = bootTimeMs();
         long sinceBootMs = bootMs > 0 ? Math.max(0, now - bootMs) : 0L;
-        boolean thinCoverage = coverageMinutes < MIN_COVERAGE_MINUTES
-            || (sinceBootMs > 2L * 60L * 60L * 1000L && coverageMs < sinceBootMs / 2);
+        // f-s01-logic-03：分母必须封顶在历史环的保留窗口。裸用开机时长时，开机 > 48h 的服务器
+        // 恒满足 coverageMs < sinceBootMs/2（coverageMs 结构上不可能超过 24h），
+        // thinCoverage 因此永真，daily.title.full "完整覆盖"分支不可达。
+        long expectedMs = sinceBootMs > 0 ? Math.min(sinceBootMs, HISTORY_RETENTION_MS) : HISTORY_RETENTION_MS;
+        // f-s01-logic-07：两个原因分开存。合并成一个布尔量后文案只能断言"不足 50%"，
+        // 而在只触发 60 分钟下限时（例如刚重启 30 分钟、覆盖 25 分钟）该断言与自身数据矛盾。
+        boolean belowFloor = coverageMinutes < MIN_COVERAGE_MINUTES;
+        boolean belowRelative = sinceBootMs > 2L * 60L * 60L * 1000L && coverageMs < expectedMs / 2;
+        boolean thinCoverage = belowFloor || belowRelative;
 
         String title;
         String coverageText;
         if (thinCoverage) {
             title = Messages.get("daily.title.thin",
                 java.time.Instant.ofEpochMilli(bootMs > 0 ? bootMs : now).atZone(zone).toLocalTime().format(HH_MM));
-            coverageText = Messages.get("daily.note.thin", coverageMinutes,
-                sinceBootMs > 0 ? DurationFormat.duration(sinceBootMs) : Messages.get("daily.note.24h"));
+            String expectedText = sinceBootMs > 0
+                ? DurationFormat.duration(expectedMs) : Messages.get("daily.note.24h");
+            coverageText = belowRelative
+                ? Messages.get("daily.note.thin", coverageMinutes, expectedText)
+                : Messages.get("daily.note.floor", coverageMinutes, MIN_COVERAGE_MINUTES);
         } else {
             title = Messages.get("daily.title.full", coverageMinutes);
             coverageText = null;
@@ -355,7 +384,10 @@ public class DailySummaryService {
         }
 
         lastSentDate = today;
-        persistSentDate(today);   // 9A-6：发送成功后立即落盘，重启后同日不再重发
+        // f-s01-data-04：游标语义是「尝试过」而非「送达过」——投递路径（控制台/OP/webhook）都是
+        // 条件性的且 webhook 异步不可观测，故无条件落盘；当日不再重试，同日重启也不补发。
+        // 控制台通道永不空转，故实际送达概率很高。
+        persistSentDate(today);
     }
 
     // ==================== 9A-14：统计辅助 ====================

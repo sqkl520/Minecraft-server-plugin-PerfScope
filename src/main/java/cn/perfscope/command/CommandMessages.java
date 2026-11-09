@@ -220,8 +220,8 @@ public final class CommandMessages {
             "未发现已知问题（已评估 {0}/{1} 条高置信规则）");
         put(en, zh, "cmd.diagnose.partial",
             "No issues found, but the result is incomplete ({0}/{1} rules evaluated; "
-                + "{2} skipped for lack of evidence)",
-            "未发现问题，但结论不完整（已评估 {0}/{1} 条，其余 {2} 条因证据不足未评估）");
+                + "{2} not evaluated — see the reason for each below)",
+            "未发现问题，但结论不完整（已评估 {0}/{1} 条，其余 {2} 条未评估，逐条原因见下）");
         put(en, zh, "cmd.diagnose.advice-label", "  Advice: ", "  建议: ");
         put(en, zh, "cmd.diagnose.skipped-title",
             "Rules not evaluated ({0}):", "未评估的规则（{0} 条）:");
@@ -241,6 +241,19 @@ public final class CommandMessages {
             "last {0} day(s) ({1} samples, source: {2})",
             "近 {0} 天（{1} 个样本，来源: {2}）");
         put(en, zh, "cmd.trend.valid-samples", " ({0} valid samples)", "（{0} 个有效样本）");
+        // f-s04-csv-06：skippedLines() 此前零调用点，坏行被静默丢弃、降级原因不可见。
+        put(en, zh, "cmd.trend.skipped-lines",
+            "Warning: {0} line(s) in the history files could not be parsed and were skipped "
+                + "(half-written or malformed rows); the figures above exclude them",
+            "注意：历史文件中有 {0} 行无法解析已被跳过（半写或格式损坏），以上统计不含这些行");
+        put(en, zh, "cmd.trend.file-unavailable",
+            "File persistence returned no samples; falling back to the in-memory ring. Directory: {0}",
+            "文件持久化未取到样本，已回退到内存环。目录: {0}");
+        // f-s02-logic-04：天数上界跟数据来源走——内存环只有约 24 小时，不能标成 N 天。
+        put(en, zh, "cmd.trend.days-clamped-memory",
+            "Note: history persistence is unavailable, so the in-memory ring only covers about 24 hours; "
+                + "the requested {0} day(s) was clamped to {1}",
+            "注意：历史持久化不可用，内存环只覆盖约 24 小时，请求的 {0} 天已收窄为 {1} 天");
         put(en, zh, "cmd.trend.coverage",
             "Coverage: {0} – {1} (local time)", "覆盖: {0} ～ {1}（本地时区）");
 
@@ -413,6 +426,10 @@ public final class CommandMessages {
         // 这样英文的 "TPS: " 与中文的 "TPS: " 共用一条前缀，冒号/分隔符形态随语言走
         put(en, zh, "cmd.actionbar.lead", "{0}: ", "{0}: ");
         put(en, zh, "cmd.actionbar.segment", " | {0}: ", " | {0}: ");
+        // f-s02-actionbar-02：采集停摆时不再渲染旧快照的"健康"数值，改为明确提示已过期多久。
+        put(en, zh, "cmd.actionbar.stale",
+            "[PerfScope] No data for {0} - collection has stopped; run /perfscope status",
+            "[PerfScope] 已 {0} 无数据——采集已停止，请执行 /perfscope status");
 
         // ==================== 帮助 ====================
         put(en, zh, "cmd.help.root.display", "/perfscope", "/perfscope");
