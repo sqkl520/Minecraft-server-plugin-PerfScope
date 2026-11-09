@@ -42,8 +42,16 @@ $script:Steps = @()
 $script:MvnCmd = 'D:\maven\apache-maven-3.9.9\bin\mvn.cmd'
 $script:DefaultJavaHome = 'D:\Java\zulu21.48.17-ca-jdk21.0.10-win_x64'
 
-if ($RepoRoot -eq '') { $RepoRoot = Join-Path (Split-Path $PSScriptRoot -Parent) 'PerfScope' }
-if ($Harness -eq '') { $Harness = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'testharness' }
+# Path defaults. The script used to live in the PARENT workspace, so "one level up, then
+# PerfScope" resolved to this repo. It now lives INSIDE the repo at tools/, so one level up
+# IS the repo -- appending 'PerfScope' again lands on <repo>/PerfScope and every step fails
+# with "pom.xml not found" (same bug that hit verify-release-artifact.mjs; observed 2026-11-09).
+#
+# Layout:  <Server plugin>/  ─┬─ PerfScope/PerfScope/  (this repo)
+#                             └─ testharness/
+# From tools/ inside the repo, the harness needs THREE levels up, not two.
+if ($RepoRoot -eq '') { $RepoRoot = Split-Path $PSScriptRoot -Parent }
+if ($Harness -eq '') { $Harness = Join-Path (Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent) 'testharness' }
 
 # tier selection: -L3 implies L2 implies L1
 $tier = 1
