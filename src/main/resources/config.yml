@@ -16,6 +16,7 @@ config-version: 1
 # | alerts.cooldown-seconds           | 秒                                      |
 # | history.sample-interval-seconds   | 秒                                      |
 # | hotspots.sample-every-cycles      | 采集周期数（1 周期 ≈ update_interval）  |
+# | hotspots.scan-shards              | 分片数（1 个分片 = 一轮扫描的一块）     |
 # | history.retention-days            | 天                                      |
 # | report.auto_export_interval       | 分钟                                    |
 # | report.retention_days             | 天（0 = 永久保留）                      |

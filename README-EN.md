@@ -213,7 +213,8 @@ history:
 
 hotspots:
   enabled: true
-  sample-every-cycles: 30       # Hotspot full-sweep throttle (every N collection cycles, ~30s)
+  sample-every-cycles: 30       # Hotspot refresh throttle (one full round every N cycles, ~30s)
+  scan-shards: 10               # Incremental scan shards (1 = off; higher = cheaper per tick, slower refresh)
 
 # Per-world overrides
 worlds:
@@ -272,7 +273,7 @@ general:
 A performance plugin that cannot explain its own overhead is self-contradictory. The design principle here is **keep heavy work off the main thread**:
 
 - **Async JVM metrics** — memory/CPU/GC/runtime info is read from MXBeans on an async thread and published as a whole snapshot for the main thread to reuse; no long blocking on the main thread. The only disk-related main-thread action is a non-blocking *enqueue* of the history sample once every 60 seconds (an `offer` that drops-and-counts when the queue is full); the actual writing is batched on the `perfscope-history-writer` daemon thread;
-- **Main thread does lightweight Bukkit reads only** — TPS/MSPT/players every cycle; entities/chunks every 5 cycles and tile entities every 10 are **built-in constants**, hotspot chunks every 30 (`hotspots.sample-every-cycles`, configurable), reusing caches in between;
+- **Main thread does lightweight Bukkit reads only** — TPS/MSPT/players every cycle; entities/chunks every 5 cycles and tile entities every 7 are **built-in constants**; hotspot chunks are scanned **incrementally in shards**: one round still covers every loaded chunk, but it is split into `hotspots.scan-shards` pieces (default 10) spread across several collection cycles, cutting per-cycle cost to about 1/10 (a full round completes every 30 cycles by default; other cycles reuse the last complete round);
 - **Guarded player-layer pushes** — the per-second ActionBar push only runs while a player has monitor on, and skipped (not crashed) the moment they disconnect.
 
 **Measured (JFR, 90-second window, build under test: a 2026-10-18 master snapshot, *not* the v1.2 release; empty server + 1 bot / `view-distance=5` / ~121 loaded chunks)**:
