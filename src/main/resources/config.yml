@@ -42,7 +42,13 @@ general:
   # bStats 匿名统计 (https://bstats.org): 仅上报插件使用量/服务端环境等匿名数据，无个人信息。
   # 关闭方式二选一: 此处设为 false, 或在 plugins/bStats/config.yml 中设 enabled: false (对全服所有插件生效)
   #
-  # 上报内容（全部为分桶后的整数/枚举，不含玩家名、世界名、插件列表、配置内容、告警文本）:
+  # ⚠️ 上报内容分两层，粒度不同，请按需阅读：
+  #
+  # 【A 层：bStats 库自动上报（本插件无法逐项控制）】
+  #   服务端类型与版本、插件版本、操作系统名与版本号(如 "Windows 10")、CPU 核心数、
+  #   当前在线玩家数【精确值，未分桶】、正版/离线模式、服务器 UUID（随机生成，非服务器地址）
+  #
+  # 【B 层：本插件自定义图表（已分桶）】
   #   server_software   服务端类型（Paper/Spigot/Bukkit/Folia）
   #   language          当前界面语言（en/zh/other）
   #   module_enabled    各采集模块的开关状态
@@ -50,6 +56,8 @@ general:
   #   entity_count_bucket / loaded_chunks_bucket / peak_players_bucket / heap_max_mb_bucket
   #                     规模量级桶（如 1000 表示 "不超过 1000"），用于判断大服的真实规模
   #   world_count / loaded_plugins   世界数与插件数
+  #
+  # 两层都不会上报：玩家名、世界名、坐标、插件列表、配置文件内容、告警文本、服务器地址。
   bstats-enabled: true
 
 # TPS 监测
@@ -201,6 +209,14 @@ alerts:
   # 但从 92% 跳到 99% 是用户想知道的。只有变化达到该幅度才重推。
   # 设 0 = 恢复旧的"冷却到期就重推"行为。
   repush-delta: 8
+
+  # 复燃最短间隔（秒，默认 60，0 = 关闭）
+  # 告警恢复后，只有在该窗口内再次越界才算"复燃"（推送"（问题再次出现）"）：
+  # 窗口取短值，因为几秒内又坏了确实该立即告知，而不是等冷却。
+  # 设 0 = 关闭复燃识别：不再区分"复燃"与"新告警"，再次越界按普通新告警处理。
+  #   注意：普通新告警仍受 alerts.cooldown-seconds 约束，故并非"无视冷却立即推送"。
+  # 负值或非数值回退默认 60 秒。
+  refire-min-interval-seconds: 60
 
   # 每日摘要 (3 行概况：最低 TPS / 峰值实体与内存 / 告警统计；推送到控制台、在线 OP 与 webhook)
   # 补发语义：若配置时刻已过且当日未发（如服务端在彼时停机），启动/重载后补发一次，保证"每天都到"

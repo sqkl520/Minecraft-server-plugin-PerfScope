@@ -81,11 +81,11 @@ PerfScope 自 v1.1 起专注 **Paper 系**服务端，深度依赖 Paper 原生 
 | `/perfscope history` | 历史摘要（近 24 小时：最低 TPS / 峰值实体 / 峰值内存） |
 | `/perfscope hotspot` | 热点区块定位（实体密度 Top3 + 坐标，含主导类型） |
 | `/perfscope diagnose` | 智能诊断（规则引擎：结论 + 参数级建议；`diag` 仍是全量诊断别名） |
-| `/perfscope trend [天数]` | 趋势摘要（跨重启历史持久化，默认 1 天） |
+| `/perfscope trend [天数]` | 趋势摘要（跨重启历史持久化，默认 1 天）。持久化不可用时自动回退到内存环并把天数收窄为 1 天；历史文件里有坏行会明确报出行数 |
 | `/perfscope gc` | GC 统计（各收集器详情） |
 | `/perfscope report [格式]` | 导出性能报告（html/txt/json） |
-| `/perfscope monitor` | 切换 ActionBar 实时监测 |
-| `/perfscope status` | 插件自身状态（采集是否存活/模块三态/历史/告警） |
+| `/perfscope monitor` | 切换 ActionBar 实时监测（采集停摆时改为提示"已 N 无数据"而不是继续显示旧数值） |
+| `/perfscope status` | 插件自身状态（采集是否存活/模块三态/历史/告警）。最近的采集异常只显示脱敏摘要（异常类型 + 首句，绝对路径替换为 `<path>`），完整原文在控制台日志 |
 | `/perfscope reload` | 重载配置文件 |
 | `/perfscope help` | 查看命令帮助 |
 
@@ -133,7 +133,13 @@ GC: 42 次 / 5.23 秒
 4. 编辑 `plugins/PerfScope/config.yml` 进行自定义配置
 5. 使用 `/perfscope` 查看性能数据
 
-> 数据披露：本插件内置 bStats 匿名使用统计（默认启用，不收集玩家/服主个人信息）。当前版本作者尚未注册 bStats 项目 ID，**不会发送任何数据**；ID 注册后自动生效。可在 `plugins/bStats/config.yml` 或本插件 config.yml 的 `general.bstats-enabled: false` 关闭。
+> 数据披露：本插件内置 bStats 匿名使用统计（**默认启用**），项目 ID 为 **35061**（<https://bstats.org/plugin/bukkit/PerfScope/35061>），**数据已实际上报**。上报内容分两层，粒度不同：
+>
+> **A 层 — bStats 库自动上报（本插件无法逐项控制）**：服务端类型与版本、插件版本、操作系统名与版本号、CPU 核心数、**当前在线玩家数（精确值，未分档）**、正版/离线模式、服务器 UUID（随机生成，非服务器地址）。
+>
+> **B 层 — 本插件自定义图表（已分档）**：服务端软件类型、启用模块组合、界面语言、实体数/加载区块数/峰值玩家数/堆上限的**量级档位**、世界数量、已安装插件数量、webhook 通道类型。
+>
+> **两层都不会上传**：玩家名、世界名、坐标、聊天内容、插件列表、配置文件内容、告警文本、服务器地址。可在 `plugins/bStats/config.yml` 或本插件 config.yml 的 `general.bstats-enabled: false` 关闭。
 
 ## 配置
 
@@ -196,6 +202,7 @@ alerts:
   debounce-cycles: 3        # 防抖：连续 N 个采集周期超标才首次推送 (1 = 首次出现即推)
   flap-window-seconds: 180  # 抖动窗口：该窗口内的「恢复→再越界」视为同一次事故，不重复通知
   repush-delta: 8           # 同级别重推的数值变化阈值：变化小于它时不重推（只作用于 cpu:system）
+  refire-min-interval-seconds: 60  # 复燃最短间隔：恢复后只有在该窗口内再次越界才算「复燃」（0 = 关闭复燃识别，再次越界按普通新告警处理，仍受 cooldown-seconds 约束）
   daily-summary:
     enabled: false          # 每日摘要开关
     time: "08:00"           # 每日摘要时刻 (本地时区 HH:mm)
@@ -329,6 +336,16 @@ mvn clean package
 ```
 
 JAR 文件将生成在 `target/` 目录。
+
+仓库内置单元测试（JUnit 5，`src/test/java`），`mvn clean package` 会先跑测试再打包：
+
+```bash
+mvn test                    # 只跑测试
+mvn test -Dtest=CsvLayoutTest   # 跑单个测试类
+mvn clean package -DskipTests   # 跳过测试打包
+```
+
+测试依赖为 `test` 作用域，不会进入最终 JAR 喵。
 
 ## 许可证
 

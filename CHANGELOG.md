@@ -3,7 +3,7 @@
 本项目：**PerfScope** —— Minecraft 服务器性能监测插件（Paper 1.20.4+ / Purpur / Pufferfish / Folia / Leaves，Java 17）。
 后台定时采集性能快照 → 游戏内 17 个子命令一屏诊断 → HTML/TXT/JSON 报告导出 → ActionBar 实时监测 → 阈值告警。
 
-> **仓库**：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope> ｜ **版本**：`1.2.0`（2026-10-19 发布）
+> **仓库**：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope> ｜ **版本**：`1.2.1`（当前正式版；`[Unreleased]` 累积未发布改动）
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/)。v1.2「找得到」开发周期已收尾，各段以 **Wave（开发波次）** 划分并标注对应提交哈希。
 
@@ -11,6 +11,85 @@
 > Added / Changed / Fixed / Removed / Optimized / Refactored / Notes 分类追加）；**编译前先更新**。
 > 版本号只在用户明确说"更新版本号"时 bump（Patch = Bug 修复，Minor = 新功能）。
 > **本文件是开发流水账** —— 记"改了什么、为什么改、验证到哪一步、还欠什么"，不是给用户看的发布说明。
+
+---
+
+## [Unreleased] — 变更汇总（面向使用者）
+
+> 本节是给使用者看的：只有**改了什么、有什么影响**。过程与过程性记录在上层工作区
+> `docs/reports/`，不在本仓库。按影响面从大到小排列喵。
+
+### Fixed — 会让用户看到错误结论的问题
+
+- **在非 Paper 系服务端上装上去会半装配后崩溃**。README 与 `plugin.yml` 都只声称支持 Paper 系，
+  但 `onEnable` 里没有平台守卫：在纯 Bukkit/Spigot 上会走完全部初始化，然后在第一个 Paper 专有
+  API 处崩在半装配状态（部分模块起来了、部分没起来，错误指向某行代码而不是"平台不对"）。
+  现在启动第一步就检查平台，不受支持时打印双语说明并禁用本插件喵。
+- **`general.update_interval` 没有上限，填 1 等于每 tick 全量采集**。`MetricsCollector` 只有
+  下限 `Math.max(1, ...)`，那个下限恰好放行了最危险的值——20 次/秒的主线程全遍历，大服上足以
+  把 TPS 拖垮。现在钳制到 5–1200 tick，越界时回退 20 并打一条配置校验告警喵。
+- **bStats 隐私披露不准确**。此前写成"10 项均为分档数据"，但 bStats 库的**基础遥测**本身会发
+  **精确在线玩家数**（未分档）、操作系统版本、CPU 核心数等，那部分本插件无法逐项控制。
+  现在 README 分两层披露：A 层是 bStats 库自动上报（列明精确值），B 层是本插件的自定义图表（已分档）喵。
+- **单世界实体视图会打出全服级告警**（`/perfscope entities <world>`）。只要全服实体总数过线，
+  单世界页就会在那个世界的小数字下面打一条「严重警告」。现在单世界视图改判**该世界自己的**
+  实体数与覆盖阈值，无覆盖时回退全局；世界不在统计里视为 0 实体、不报警喵。
+- **ActionBar 在采集停摆后继续显示"健康"读数**（`/perfscope monitor`）。采集任务被取消后
+  快照不再更新，旧实现会让 ActionBar 永远渲染同一组正常值。现在检测到数据过期就改为提示
+  「已 N 无数据——采集已停止」喵。
+- **`/perfscope trend 7` 可能把 24 小时数据标成 7 天**。文件持久化不可用时会回退到内存环，
+  而内存环只覆盖约 24 小时。现在天数上界跟数据来源走：可用则按保留天数，不可用则收窄为 1 天，
+  并明说收窄原因喵。
+- **报告清理会删掉管理员自建文件**。`reports/` 里形如 `perfscope-notes.txt`、`perfscope-2026.html`
+  的自建文件超期后会被当成本插件产物删除。现在按完整时间戳格式（含字段值域）判定归属，
+  只删自己生成的文件；插件换名重试产生的 `-1` / `-10` 后缀仍正确识别喵。
+- **字节数在进位边界显示成 "1024.0 KB"**。`1048575` 显示 `1024.0 KB`、`1073741823` 显示
+  `1024.0 MB`，看起来像该进位却没进位。现在换档判据与输出精度同口径，显示 `1.0 MB` / `1.00 GB` 喵。
+- **HTML 报告中用户自定义文案会被双重转义**。在 `messages.yml` 里把文案改成含 `&`、`<`、`>`
+  的内容时，报告里会显示 `&amp;lt;` 之类。现在转义只做一次喵。
+- **HTML 报告在 MSPT 不可用时可能崩溃**。非 Folia 服务端上原因字段为空，渲染时抛 NPE。
+  现在三档成因（配置禁用 / 平台不支持 / 采集异常）分别显示，且不再崩溃喵。
+- **告警恢复后可能被静默吞掉**。接管与静默分支漏写冷却表，导致下一周期立刻重推、与
+  「不重复推送」的日志矛盾。两处已同改喵。
+
+### Fixed — 配置与调度
+
+- **CPU 告警可能永久不解除**。当 `cpu.process_warning_threshold` 小于 `cpu.hysteresis_margin` 时，
+  解除条件变为「值 ≥ 负数」恒真，闩锁进入后永不解除。现在迟滞带为非正时退回无迟滞判据，
+  并在配置校验时回退越界的迟滞值喵。
+- **历史写线程死亡后永久静默**。线程异常退出后写入队列继续累积、丢弃计数无任何输出。
+  现在有界自动重建（最多 3 次），且 `/perfscope status` 能如实报出喵。
+- **`alerts.refire-min-interval-seconds: 0` 的行为与注释相反**。注释写「0 = 关闭抑制」，
+  代码却回退到冷却值（抑制更强）。现在 0 表示不再识别复燃，再次越界按普通新告警处理
+  （仍受 `cooldown-seconds` 约束）喵。
+- **TPS 告警阈值可设到 25 之类的不可能值**。稳态 TPS 上限为 20.0，阈值高于它就恒真。
+  现在超过 20.5 会回退默认并警告；落在 20.0–20.5 之间会提示该阈值会让规则在健康服务器上命中喵。
+- **`history.sample-interval-seconds` 设得过大时趋势规则永久跳过而不说明原因**。
+  现在会明确打出「该间隔下 30 分钟窗口内样本不足」的警告喵。
+- **`config.yml` 写回非原子**。写入中途被强杀会留下半写的配置文件。现在走临时文件 + 原子替换喵。
+- **Folia 上调度失败被当成"已启动"**。告警与每日摘要会照打「已启用」而实际永久停摆；
+  现在会明确报错喵。
+
+### Added — 新配置键
+
+- `alerts.refire-min-interval-seconds`（默认 60）：复燃识别窗口，`0` = 关闭复燃识别喵。
+- `general.language`、`cpu.hysteresis_margin`、`alerts.flap-window-seconds`、`alerts.repush-delta`
+  等此前已在代码中生效但未在 `config.yml` 中登记的键，现已全部补上注释说明喵。
+
+### Changed — 行为变更（升级时注意）
+
+- **接管与静默路径的冷却语义**：告警被接管或进入静默后，现在会静默**一整个冷却周期**
+  （默认 300 秒），而不是 1 秒内重推喵。
+- **`/perfscope status` 的采集异常改为脱敏摘要**：只显示异常类型与首句，绝对路径替换为 `<path>`。
+  完整原文仍在控制台日志喵。
+- **`trend` 在无持久化时最多查 1 天**：此前会接受更大天数但数据实际只有 24 小时喵。
+
+### Notes — 兼容性
+
+- 所有新增配置键均为**追加**，旧 `config.yml` 可直接使用；缺失键走默认值喵。
+- `plugin.yml` 版本号由 Maven filtering 从 `pom.xml` 注入，无需手工同步喵。
+- bStats 匿名统计项目 ID 已注册（35061），**数据已实际上报**；上报内容为聚合分布，
+  不含配置阈值、玩家名、世界名或聊天内容。可在 `general.bstats-enabled: false` 关闭喵。
 
 > **开发计划文档索引**（均在上层工作区）：`docs/06-tasks/ROADMAP.md`（愿景 + 49 条条目 + 35 条验收标准）、
 > `V1.1_DEV_TASKS.md`（15 个 P0 逐项拆解）、`V1.2_DIAGNOSTIC_RULES.md`（37 条诊断规则）、
@@ -158,7 +237,769 @@
   真实局限。
 - **项目指令文件的事实纠正**：根 `CLAUDE.md` 的「关键文件」表称 `plugin.yml` 版本号为
   硬编码 `1.0.0`、未用 Maven filtering。**实际 `plugin.yml:2` 为 `${project.version}`，
-  `pom.xml:111-116` 已开启 filtering**。建议更正该表。
+  `pom.xml` 的 `<resources><filtering>true</filtering>` 已开启过滤**喵。
+  **2026-11-04 已更正该行**，改为「版本号为 `${project.version}`，由 pom 的 resources filtering
+  在打包期替换（单一版本源，无需手工改）」喵。
+
+### Fixed（收尾批：写权限外 5 条 + 大改动 3 条，全部修完）
+
+前两批因「目标文件不在写权限内」与「超出最小安全差异」共跳过 8 条，本批授权后**全部落地**喵。
+
+- **`messages.yml` 迁移先报成功、写失败时旧文件已不可恢复**（`f-s05-err-08`）。
+  `writeDefaultFile` 改返回 `boolean`，完成态日志移到写入成功后；失败另打独立日志并明确说明
+  「旧文件已改名备份、当前无可编辑模板」。实测用目录 ACL 禁 `ADD_FILE` 真实注入写失败喵。
+- **`mergeModules` 的「键集合不一致记 WARNING」承诺从未实现**（`f-s03-contract-06`）。
+  返回被补齐的键列表，由 `load()` 统一打 WARNING喵。
+- **`Messages` 的反射死代码**（`f-s03-contract-07`）。删除零调用点的
+  `readField`/`findField`/`LANGUAGE_FIELD_NAMES` 与 `java.lang.reflect.Field` import，
+  订正 `readConfiguredLanguage` 的 javadoc喵。反射枚举验证：遗留成员数 3 → 0喵。
+- **`diagnose` 跨代次求值**（`f-s03-data-06`）。新增 `ConfigManager.publishedAtMillis()` 与
+  `DiagnosticEngine` 的代次校验：快照早于配置发布且处在宽限窗口内时，逐条登记
+  `diag.skip.stale-config` 喵。**宽限窗口是实测逼出来的**——先按「永久生效」实现，
+  真实 Paper 上发现那会让采集真停摆时诊断**永久沉默**（比原缺陷更重），故改为
+  「一个采集周期 + 20 秒余量」（下限 30 秒、上限 5 分钟）喵。新增 i18n 键 `diag.skip.stale-config`。
+- **TPS 规则的 detail 文案无条件断言「持续负载」**（`f-s03-logic-05`）。改写为
+  「任一口径低于告警线即命中；对照 15 分钟均值与该告警线，可区分短暂回落与持续负载」——
+  一句话对两种命中形态都不再说谎，**规则语义零改动**喵。
+  - **未拆两条 detail 键**（原计划）：拆键必须改 `CoreRules.java` 的调用点，而它不在该批权限内；
+    只加键不选键会造出**永不触发的死键**——正是本轮刚修掉的 `compat.mspt.no-api` 同一形状喵。
+- **批量投递无逐玩家异常边界**（`f-s01-err-08`）。`broadcastToAlertPlayers` 加逐玩家
+  `try/catch` 并返回 `boolean`（`false` 仅当有人需收但全员失败），失败数与首个失败者
+  汇总为一条含玩家名的 WARNING喵。**`gameOk` 保持布尔、未改三态**——返回值义精确为
+  「false 仅当有人需要收但全员失败」，四场景实测确认与旧行为仅在「部分成功」上有差异喵。
+- **`serverTag()` 的 `catch (Throwable)` 吞 JVM 级 Error**（`f-s01-err-07`）。收窄为
+  `catch (Exception | LinkageError)`喵。`javap` 实证原 `Throwable` 是**防御性超集而非刻意**：
+  `NoSuchMethodError`/`NoClassDefFoundError`/`ExceptionInInitializerError` 三者均属
+  `LinkageError` 一族仍被覆盖，而 `OutOfMemoryError`/`StackOverflowError`（`VirtualMachineError`）
+  与 `AssertionError`/`ThreadDeath`（直接 `extends Error`）本来就不该被吞喵。
+  另确认 `org.bukkit.Bukkit` 无 `static{}` 块，且 `CraftScheduler.mainThreadHeartbeat` 的
+  异常表以 `catch (Throwable)` 兜住任务体，逃逸不致命喵。
+- **`RawConfig` 解析失败静默取默认值**（`f-s01-err-10`）。仅对 `alerts.refire-min-interval-seconds`
+  补 WARNING——核对后确认它是 `loadOptions` 8 个键里**唯一**既不被 `ConfigManager` 读取、
+  也不在 jar 内 `config.yml` 的键；其余 7 个键已有的 `warnType` 会报，重复补是净负收益喵。
+
+### Notes（round2）
+
+- **总改动**：14 个文件 `+780/-127` 行（含 `build.yml` 的 299 行独立改动）。
+  `mvn clean package` BUILD SUCCESS，`PerfScope-1.2.1.jar` 322 KB 喵。
+- **i18n 键**：680 → 682（新增 `diag.skip.stale-config`、`alert.log.refire-unparsable`、
+  `alert.log.game-partial`、`daily.note.floor`、`report.common.mspt.disabled`、
+  `report.common.mspt.collect-failed` 等），`en`/`zh` 键集完全对齐（`only_in_en=[]`、`only_in_zh=[]`），
+  `tools/check-i18n.mjs` PASS（0 error / 0 warn）喵。
+- **真实 Paper 1.21.11 端到端验证**（三轮，独立实例）：启动零异常、`diagnose` 无
+  `stale-config` 误报、三种报告格式落盘、干净关服喵。
+- **41 条 UPHELD 的最终去向**：修 30 条、需人裁决 6 条、无修复对象 3 条、
+  环境不具备 1 条、已由作者提交修复 1 条喵。详见
+  `docs/reports/round1/round1-round2-decisions.md`喵。
+- **测试覆盖仍为零**：仓库无 `src/test`，所有验证依赖仓库外临时探针与真实服务端喵。
+- **CLAUDE.md 规则 10 仍未满足**：`f-s03-logic-04` 的窗口类改动只用合成轨迹验证喵。
+
+---
+
+## [Unreleased] — UPHELD 剩余 10 条清零（2026-11-04）
+
+> 紧接上一段。60 条真实未修 `UPHELD` 中的 15 条 `OPEN_MISSED`，上一批修了 5 条，
+> 本批把**剩余 10 条全部修完**喵。至此该清单归零喵。
+
+### Fixed — `f-s02-conc-03`（LOW）：关服期订阅泄漏
+
+`startMonitorTask()` 在 `monitorShutdown` 时返回 `true`，只为让回执路径维持原状喵。
+但 `toggleMonitor` 已把 UUID 加进 `monitoringPlayers`，而 `shutdown()` 早先 `clear()` 过集合——
+于是这个 UUID **永久留在 Set 里无人服务**喵。
+
+- `startMonitorTask()` 关服时改为如实返回 `false`，由 `toggleMonitor` 撤销刚加入的订阅喵。
+- 回执文案区分「调度不可用（可重试）」与「插件正在停用（重试无意义）」——
+  旧实现把两者都报成「启动失败，详见控制台」，而关服分支根本没往控制台写任何东西喵。
+
+### Fixed — `f-s02-contract-04`（LOW）：`cancel()` 的 javadoc 与实现不符
+
+javadoc 承诺「取消异常被吞并记 warning，不抛给调用方」，但**只有 Folia 分支有 try**喵。
+Bukkit 分支的 `cancel()` 一旦抛出就直接冒泡，而调用方都在关服/退订路径上——
+异常冒泡会中断「取消其余句柄」的循环喵。
+
+- 两条分支统一：都吞异常并经单点 `logCancelFailure()` 记 warning（带异常类型）喵。
+- 新增 i18n 键 `run.compat.task-cancel-failed`（en+zh），与既有 `folia-cancel-failed` 并存喵。
+
+### Fixed — `f-s02-contract-05` + `f-s02-err-03`（LOW）：`ConfigManager.get()` 的可空契约
+
+`get()` 无 javadoc、无 `@Nullable`，导致 7 个调用点判空方言分裂（6 处直解引用、1 处判空）喵。
+
+- `get()` 补 javadoc 与 `@org.jetbrains.annotations.Nullable`，明确「可能返回 null」喵。
+- `PerfScopeCommand` 6 处直解引用全部收口到新增的 `cfgNow()` / `thresholdOf()` 两个辅助方法，
+  配置不可用时回退合理默认值而非 NPE喵。
+- **为什么现在不可达也要修**：这种「靠不变量隐式兜底」的写法在重构时一碰就炸喵。
+
+### Fixed — `f-s02-sec-02`（LOW）：异常原文与绝对路径直进聊天框
+
+`/perfscope status` 的受众是 `perfscope.use`，未必是服主本人，而 `lastCollectError`
+原文常含 `/srv/minecraft/...` 或 `C:\Users\<服主名>\...` 与堆栈片段喵。
+
+- 新增 `scrubForChat()`：只保留异常类型与首句，Windows/POSIX 绝对路径替换为 `<path>`，
+  超长截断喵。
+- **完整原文仍在控制台日志**（采集层本来就有 SEVERE/WARNING），脱敏不损失排障能力喵。
+
+### Fixed — `f-s04-csv-05`（LOW）：CSV 表头与数据行两份独立定义
+
+`HEADER` 由 `COLUMNS` 派生，`format()` 却**手写 7 段拼接**喵。单侧重排或改名会让表头序与
+数据行序悄悄漂移，而读取端按列名映射——结果是**数据被安到错误的列上且不报错**喵。
+
+- `format()` 改为按 `COLUMNS` 索引取值，并加一条运行期断言（长度不符即抛）喵。
+- `COLUMNS` 的 javadoc 明确声明它是**唯一真相源**喵。
+
+### Fixed — `f-s04-csv-06`（LOW）：`skippedLines()` 零调用点
+
+文件里有坏行（半写/损坏/列数不符）时，`trend` 只说「来源：内存环」，
+不告诉用户为什么走了回退、丢了多少行喵。
+
+- `showTrend()` 接入 `skippedLines()`：有坏行时打一条 YELLOW 提示含具体行数；
+  有持久化目录却拿不到样本时，另打一条说明回退原因与目录路径喵。
+- 新增 i18n 键 `cmd.trend.skipped-lines` / `cmd.trend.file-unavailable`喵。
+
+### Fixed — `f-s06-contract-06`（LOW）：`getInstance()` 死 API
+
+全仓零调用点喵。**本批不删除**——它是第三方插件/脚本通过 `Bukkit.getPluginManager()`
+拿到实例后的静态便捷入口，删除属 `PUBLIC_API_CHANGE`，需作者裁决喵。
+本批只补 javadoc 说明它为何保留、以及「可能返回 null，调用方必须判空」的契约喵。
+
+### Fixed — `f-s06-contract-07`（LOW）：javadoc 悬空到错误方法
+
+`shutdownHistoryFileStore()` 头上顶着**两段** javadoc，前一段讲的是报告执行器
+（`ReportGenerator#shutdown()` 用 `shutdownNow()`）喵。读者会以为本方法用 `shutdownNow()`
+中断写线程——实际它调的是 `HistoryFileStore.shutdown()`，语义是**刷完队列再退出**，
+与 `shutdownNow()` 正好相反喵。
+
+- 两段 javadoc 各归其位：`shutdownHistoryFileStore()` 保留写线程说明，
+  「关闭报告执行器」一段移回它真正的宿主 `shutdownReportGenerator()` 喵。
+
+### Fixed — `f-s02-logic-04`（LOW）：`trend` 天数上界与数据来源不符
+
+天数上界一律取文件保留天数（默认 7），但文件持久化不可用时会回退到内存环，
+而内存环容量上限是 **24 小时**——于是 `trend 7` 会输出
+「近 7 天（1440 个样本，来源: 内存环）」，把 24 小时数据标成 7 天喵。
+
+- 先探一次文件是否可用，再决定上界：可用 → `retentionDays`；不可用 → **1**喵。
+- 请求值被上界压过时明说原因（新增 `cmd.trend.days-clamped-memory`），
+  否则用户会以为参数没生效喵。
+- 探针结果被复用，未引入二次读盘喵。
+
+### Added — 两个新测试类（本批共 9 个新用例）
+
+- `test/command/ScrubForChatTest`（5 个用例）：Windows/POSIX 路径脱敏、堆栈截断、
+  null 与纯文本容错、超长截断喵。
+- `test/history/CsvLayoutTest`（4 个用例）：表头与数据行列数一致、取值顺序、
+  写入后经真实读取路径往返、坏行计入 `skippedLines` 喵。
+
+### Notes
+
+- **实测**：`mvn clean package` → **29 tests, 0 failures, 0 errors**喵。
+  `PerfScope-1.2.1.jar` 327388 字节，`unzip -l | grep -ci junit` → **0**喵。
+- **i18n**：**688 键**（新增 `run.compat.task-cancel-failed`、`cmd.trend.skipped-lines`、
+  `cmd.trend.file-unavailable`、`cmd.trend.days-clamped-memory`，
+  其中一条替换了原先内联的中文字面量），`check-i18n.mjs` PASS（0 error / 0 warn）喵。
+- **config 兼容**：`tools/check-config-compat.mjs` 9/9 PASS喵。
+- **`f-s06-contract-06` 是本批唯一「有意不删」的条目**，理由已写进代码 javadoc 与本节喵。
+
+---
+
+## [Unreleased] — UPHELD 全集核对（2026-11-04）：41 条清单本身漏了 19 条，已补修 5 条
+
+> **这是本轮最重的一次自我纠正**：此前所有报告（含最终报告 §0.1）都声称
+> 「41 条 `UPHELD` 全部处置完毕，对账平衡」。独立核对实例 `verify-coverage` 从
+> 10 份锐评产物重建全集后证明：**41 这个数字本身就不完整**喵。
+
+### 对账（推翻此前结论）
+
+```
+UPHELD 全集        70
+主波次已修 finding  25   （此前 ledger 记为 20，实测 25）
+真实未修 UPHELD    60 = 70 - 10（交集）
+此前声称的清单      41
+清单外的条目        19   ← slice-02 / 04 / 06 从未进入任何批次
+```
+
+**`round1-ledger-r2.md:41` 的「slice-02/04/06 已全部修完」不成立**：那三片 `UPHELD`
+实际是 18 / 5 / 3，主波次只覆盖 3 / 3 / 1喵。
+
+60 条真实未修 `UPHELD` 的最终去向：
+
+| 判定 | 条数 |
+|---|---|
+| `CLOSED`（确已修） | 38 |
+| `CLOSED_BY_EXEMPTION`（合法豁免） | 7 |
+| **`OPEN_MISSED`（缺陷仍在）** | **15** |
+| `OPEN_BUT_FIXED_SILENTLY` | 0 |
+| 合计 | **60** |
+
+本批修复其中 **5 条**（1 条 MEDIUM + 4 条 LOW），其余 10 条见下「仍未修」喵。
+
+### Fixed — `f-s02-actionbar-02`（MEDIUM，清单外）
+
+`monitorTick()` 只判 `snap == null`，**不判采集是否停摆**喵。
+采集任务被取消后 `getLatest()` 会一直返回同一张旧快照，ActionBar 就**永远显示"健康"**的
+TPS/MSPT——比不显示更误导，运维看不到掉线信号喵。
+
+- 新增 `collector.isStale()` 守卫：停摆时推一条明确的过期提示（含已多久无数据、
+  指向 `/perfscope status`），而不是继续渲染旧数值喵。
+- 新增 i18n 键 `cmd.actionbar.stale`（en+zh 双写）喵。
+- **为什么它不是"已修"**：`/perfscope status` 早就有 `isStale()` 判定，
+  但 ActionBar 这条推送路径从未接线喵。
+
+### Fixed — `f-s05-logic-03`（LOW，清单内但被集体漏掉）
+
+`htmlCard()` 内部对 4 个参数各做一次 `escapeHtml`，而调用点 `:400-401` 的
+`unavailable`/`unknown` 与 `:424` 的 `range` 来自 `htmlMsg()`（= `escapeHtml` + `Messages.get`），
+**转义了两次**喵。
+
+- 默认文案里没有 `&<>`，所以平时看不出差别；但用户在 `messages.yml` 里把
+  `report.common.unavailable` 改成 `N/A <unknown>`，上屏就是 `N/A &amp;lt;unknown&amp;gt;`喵。
+- 修法：这三处改用裸 `Messages.get`，转义交给 `htmlCard` **单点负责**喵。
+- 顺带确认其余 6 处 `htmlCard` 调用点传入的都是裸文案或纯数值，本就单次转义，无需改动喵。
+
+### Fixed — `f-s05-logic-04`（LOW，**41 条里唯一零命中的条目**）
+
+`formatBytes()` 按**原始字节**判档、却按 `%.1f` 输出喵：
+
+- `1048575`（比 1 MB 少 1 字节）→ 落进 KB 档 → `"1024.0 KB"`
+- `1073741823`（比 1 GB 少 1 字节）→ 落进 MB 档 → `"1024.0 MB"`
+
+读者看到"1024 KB"会以为该进位却没进位喵。
+
+- 修法：**判档前先按目标精度四舍五入**，用舍入后的值判档 → `"1.0 MB"` / `"1.00 GB"`喵。
+- **两份同构副本同改**：`ReportGenerator.formatBytes` 与 `PerfScopeCommand.formatBytes`喵。
+- 该条在全部 04/05 波次产物里**零命中**——它只存在于 `round1-final-report.md` §5.3，
+  而那张表后来被标注「不再作为待办清单」，等于连带把它注销了喵。
+
+### Fixed — `f-s02-actionbar-04` / `f-s02-actionbar-05`（LOW，清单外）
+
+- **`actionbar-04`**：TPS 不可用时仍追加 Folia 的 `" gr"` 口径标记，得到
+  `TPS: unavailable gr` 这种自相矛盾的串喵。口径标记只对**真实数值**有意义，
+  故加 `MODULE_TPS unavailable` 前置条件喵。
+- **`actionbar-05`**：实体数在 ActionBar 恒 `WHITE`，而同一份快照在 chat 侧走
+  `thresholdColors` 着色——超阈值时聊天红/黄、ActionBar 白，两处矛盾喵。
+  改为与 chat 同口径取色喵。
+
+### Added — 两条新的回归测试
+
+- `test/report/FormatBytesTest`（4 个用例）：锁住 `1048575 → "1.0 MB"`、
+  `1073741823 → "1.00 GB"`、正常值不回归、负数容错喵。
+- `DiagnosticEngineContractTest` 等既有测试继续全绿喵。
+- **实测**：`mvn clean package` → **20 tests, 0 failures, 0 errors**喵。
+  `PerfScope-1.2.1.jar` 324945 字节；i18n 683 键（`cmd.actionbar.stale` 新增后仍 683，
+  因 `never looked up` 计数从 120 降到 118，说明新键已被真实引用）喵。
+
+### Notes — 仍未修的 10 条（**已在后续批次全部修完**）
+
+> **本表已被下一段取代**：10 条于同日全部修复完毕，见
+> 「UPHELD 剩余 10 条清零」段。此表保留作历史记录喵。
+
+| finding_id | 严重性 | 缺陷 | 为何本批不修 |
+|---|---|---|---|
+| `f-s02-conc-03` | LOW | `toggleMonitor` 先 add 订阅后装任务；`monitorShutdown` 早退不撤销订阅 | 需重排订阅/任务装填顺序，改 Folia 关服期并发路径，超出最小安全差异 |
+| `f-s02-contract-04` | LOW | `SchedulerAdapter` javadoc 称取消异常被吞并记 warning，Bukkit 分支无 try | 加 try 会改变异常传播语义（当前是 fail-fast），需产品裁决 |
+| `f-s02-contract-05` | LOW | `ConfigManager.get()` 无 javadoc 无 `@Nullable`，调用方判空方言分裂（6 处直解引用 vs 1 处判空） | 纯文档统一，但涉及 7 个调用点的契约声明，宜与 v1.3 的 API 收敛一起做 |
+| `f-s02-err-03` | LOW | `cfg == null` 防护 1 处有、6 处无 | 当前不可达（配置加载失败即 fail-fast），属契约一致性 |
+| `f-s02-sec-02` | LOW | `lastCollectError` 原文与绝对路径直进聊天框 | 受众受 `perfscope.use` 约束；脱敏会削弱排障信息，需产品裁决 |
+| `f-s04-csv-05` | LOW | `HEADER` 由 `COLUMNS` 派生，`format()` 手写 7 段 | 需重构成单一来源，触及 CSV 落盘契约 |
+| `f-s04-csv-06` | LOW | `skippedLines()` 零调用点，降级原因不可区分 | 需新增展示路径（trend 命令输出），属功能增强 |
+| `f-s06-contract-06` | LOW | `PerfScope.getInstance()` 全仓零调用（死 API） | 合法但无消费方；删除属公开 API 变更 |
+| `f-s06-contract-07` | LOW | 关闭报告执行器的 javadoc 悬空，被历史写线程 javadoc 顶替 | 纯文档，但需逐段核对三处 javadoc 归属 |
+| `f-s02-logic-04` | LOW | `trend` 天数上界取自文件保留天数，回落内存环时环只有 24h | 需先定义「持久化不可用时 trend 该报几天」，属产品裁决 |
+
+**这 10 条全部已登记在 `round1-05-verify-coverage.md`，带 `file:line` 与失败场景喵。**
+本批不修的理由都写在上表，没有一条是「忘了」喵。
+
+---
+
+## [Unreleased] — 全部欠账清算（2026-11-04）：规则 10 真数据回放 + 建 `src/test` + 残留风险闭合
+
+> **背景**：五波次审计的 round1 / round2 / 收尾批 / 第五波次验收都已跑完，但仍有
+> 一批「如实记录但未消解」的欠账。本段把它们逐条清完，不再留「环境不具备」这类悬空项喵。
+
+### Added — 建起 `src/test`（此前仓库零单测）
+
+五波次审计的全部验证都靠仓库外临时探针，改一行代码后无法重跑喵。本批建立最小回归网：
+
+- `pom.xml` 新增 `org.junit.jupiter:junit-jupiter:5.10.1`（`test` scope）与
+  显式 `maven-surefire-plugin:3.2.5` 喵。
+  **钉 surefire 版本是必须的**：不钉时 Maven 用默认 2.12.4，它不认识 JUnit 5，
+  会把测试文件全部静默跳过——与 CI `build.yml` 里红队 B4 修掉的 `globstar` 缺口同形状喵。
+- `test/report/ReportFileNameTest`（3 个用例）：锁住报告清理的归属判定。
+  插件自有名（含 `-1`/`-10` 碰撞后缀、闰日、边界日）必须被清理；
+  管理员文件与非法时间戳（13 月 / 25 时）绝不能被清理喵。
+- `test/diagnose/CoverageProblemTest`（4 个用例）：锁住 `coverageProblem` 的真中位数，
+  同时锁住「条数不足」「挤在 1 秒内」两个既有拦截不被削弱喵。
+- `test/alert/DailyCounterRolloverTest`（4 个用例）：锁住 A3 回归
+  （跨午夜 reload 必须归零）、reload 幂等、同日 reload 不清零、时区切换不清零喵。
+- `test/diagnose/DiagnosticEngineContractTest`（5 个用例）：锁住 `f-s03-data-06` 的代次校验
+  与宽限窗口（窗口内跳过、超窗**不得**永久沉默）、`f-s03-logic-02` 的 `total=0` 契约、
+  以及宽限窗口的 30 秒下限 / 5 分钟上限喵。
+  - **一条踩坑记录**：`MetricsCollector.history` 是 `final` 字段，`Unsafe.allocateInstance`
+    不会初始化它；走真实构造器又会触发 `ServerCompat` 的 `Bukkit` 静态初始化，在无服务端的
+    单测进程里必然 NPE。用反射直接写 `final` 字段才两全喵。
+- **实测**：`mvn clean package` → **16 tests, 0 failures, 0 errors**喵。
+  产物 `PerfScope-1.2.1.jar` 324502 字节，`unzip -l | grep -ci junit` 命中 **0**
+  （测试依赖未进 shade 产物）喵。
+
+### Fixed — 规则 10：≥30 分钟真实采集序列回放（`f-s03-logic-04`）
+
+第五波次验收把这条判为 `VERIFICATION_INSUFFICIENT`，理由成立：仓库无真实 CSV，
+`%TEMP%` 下的 8 个 CSV 是「时间戳大量重复 + tps 恒 20.0」的合成夹具喵。
+
+本批起了真实 Paper 1.21.4 服务端（插件用工作树构建的 jar），把
+`history.sample-interval-seconds` 设为 1，连续采集 **68.65 分钟 / 2873 条 1Hz 样本**喵。
+真实数据特征：间隔 993–2540 ms（自然抖动）、14 种 TPS、368 种 MSPT、63 种堆占用喵。
+
+回放方法：整段按固定 offset 平移到「以 now 为终点」（坐标平移，gap 与数值逐字不变），
+三条共用 `coverageProblem` 的规则各按自己的窗口切片，每 60 秒取一个窗口位置共
+**117 次 `coverageProblem` 判定**、每 5 分钟一个位置共 **24 次规则评估**，
+**同一份探针分别在 HEAD 基线类与工作树类上运行**喵。
+
+**结果：diff 0 行**（117 次 COV 全 PASS，0 SKIP；24 次 RULE 无 `coverage-samples` 误判）喵。
+
+- **这条证据的诚实边界**：它证明的是「真中位数修法在真实数据上不引入任何行为变化」，
+  **不能**证明「偏斜窗口下的修正方向是对的」——后者由合成用例 `(1,1,1,100,100,100)`
+  的 A/B（旧 SKIP → 新 PASS）证明喵。两条证据互补，缺一不可喵。
+- 证据落盘：`docs/reports/round1/round1-05-verify-supplement.md` §1喵。
+
+### Fixed — `f-s03-logic-01` 的近恒真区（验收 `IMPACT_UNVERIFIED` 闭合）
+
+`TPS_CEILING = 20.5` 的取法有代价：`(20.0, 20.5]` 的阈值在稳态 TPS 恒 ≤20.0 的服务器上
+近乎恒真，`DIAG-TPS-PERSIST` 会永久命中喵。验收正确指出这一点并要求产品裁决喵。
+
+**本批不裁决、但把它变成可见的**（与 `f-s03-data-04` 的 warn-only 口径一致）：
+
+- 新增 `TPS_TAUTOLOGY_FLOOR = 20.0`，阈值 ≥ 该值时打一条 WARNING 说明后果，
+  **不改用户配置值**喵。
+- **为什么不压到 20.0**：那会把「想按 20.1 卡住下跌」的合法配置判非法并静默回退到 18.0，
+  告警反而更迟钝，属 breaking change 喵。
+- 新增 i18n 键 `config.check.tps-near-ceiling`（en+zh 双写），键数 682 → **683**喵。
+
+### Fixed — i18n 核心的穷举差分（验收 `IMPACT_UNVERIFIED` 闭合）
+
+验收对 `mergeModules` 返回类型 `void` → `List<String>` 只做了 i18n 检查器 + 键对齐，
+未做穷举差分喵。本批按 `PerfScope.onEnable` 的**相同注册顺序**装配全部模块表，
+逐键导出 en / zh 全文做 diff喵。
+
+| 版本 | en | zh |
+|---|---|---|
+| HEAD 基线 | 675 | 675 |
+| 工作树 | 683 | 683 |
+
+`diff` 共 54 行，**全部落在预期变更内**：8 个新增键（`alert.log.game-partial`、
+`alert.log.refire-unparsable`、`config.check.tps-near-ceiling`、`daily.note.floor`、
+`diag.skip.stale-config`、`report.log.delete-failed`、`report.log.delete-failed-summary`、
+`report.log.register-failed`）+ 3 条既有文案（`cmd.diagnose.partial`、
+`diag.DIAG-TPS-PERSIST.detail`）× 双语喵。
+**其余 675 个键逐字节相同**——`mergeModules` 的返回类型改动对渲染零影响喵。
+
+证据落盘：`round1-05-verify-supplement.md` §2喵。
+
+### Notes — 本批的诚实清单
+
+- **`f-s05-err-09` 登记为 `CLOSED_BY_SILENT_FIX`**：代码已由 `r2-fix-04` 修掉
+  （`mergeModules` 返回值转 WARNING），但**没有任何修复报告写过它的 ID**，
+  只读过 `r2-fix-01`/`r2-fix-02` 的下游会误判为「未修」喵。已在
+  `round1-05-verify-supplement.md` §3 显式登记喵。
+- **仍未消解的平台固有限制**：`ATOMIC_MOVE` 不被底层文件系统支持时的回退窗口
+  （`ConfigManager.java` 的 `AtomicMoveNotSupportedException` 分支）**不能在应用层消除**，
+  只能证明它比原地截断窄得多、且是唯一可行降级喵。
+- **全部产物**：`round1-05-verify-r2-fix-01.md`、`round1-05-verify-r2-fix-02.md`、
+  `round1-05-verify-decisions.md`、`round1-05-verify-supplement.md`、
+  `round1-05-verify-residuals.md`喵。
+
+### Fixed — 运行时残留风险的四条探针闭合（`round1-05-verify-residuals.md`）
+
+第五波次验收有 4 条风险标为 `satisfied: false`（只读代码、未实跑）。本批用运行时探针逐条跑完喵。
+
+| 风险 | 判定 | 关键证据 |
+|---|---|---|
+| `cleanOldReports` 的 51 文件上限路径 | **PASS** | 真实构造 51 个过期文件（含 `-N` 后缀）→ `deleted=50`、留存 1 个、恰 1 条含 `50` 的 WARNING；未过期 3/3 保留 |
+| `retentionDays <= 0` 静默路径 | **PASS** | `0` 与 `-1` 各跑一次真实清理 → `deleted=0`、WARNING=0（「0 = 永久保留」契约成立） |
+| `writeBackConfigVersion` 崩溃注入 | **PASS** | 48 轮强杀（17–24 MB YAML 放大窗口），主 `config.yml` **100%** 落在「旧全文」或「旧全文+版本块」两态，`corrupt=0` |
+| `ATOMIC_MOVE` 回退短窗口 | **PLATFORM_LIMIT** | 字节码异常表确认 catch **仅**捕 `AtomicMoveNotSupportedException`（非宽泛 catch）；`finally` 的 `deleteIfExists` **只**对 tmp 文件调用。该分支真被触发的条件无法在 NTFS 上制造，据 JDK 源码必然退化为两次 syscall——**不能在应用层消除**，故不给 PASS |
+
+**两处变异对照证明了探针没有失明**（这是本批最重要的方法论）喵：
+
+1. **R1c**：构造 51 个「通过旧正则但违反值域」的文件（13 月 / 25 时 / 61 分 / 61 秒 / 32 日）
+   → `deleted=0`，证明 `REPORT_FILE_NAME_STRICT` 那道门是**活的**，
+   R1 的 PASS 不是旧正则的副产品喵。
+2. **R3 变异**：换回修复前的 `Files.write(CREATE+TRUNCATE_EXISTING)` 后同样强杀
+   → **10/10 CORRUPT**（含 8192 字节半写），证明崩溃注入探针真的能检出半写喵。
+
+**本批自我纠正的两处派发失误**（值得记录）喵：
+
+- **派发建议的 1–80 ms 强杀延迟根本够不到写入窗口**：子进程从就绪到写盘完成需
+  5.2–7.5 秒，tmp 最早 4378 ms 才出现，12 轮固定窗强杀全落在 JVM 类加载阶段、
+  `tmp_first_seen_ms=-1`，零信息量喵。探针实例**没有假装成功**，而是追加了
+  「扫实测窗口」12 轮 + 「按文件状态触发」24 轮，使 `MIDWRITE/PREMOVE/POSTMOVE`
+  各命中 8 次喵。若只有前一段，正确结论应是 `VERIFICATION_INSUFFICIENT` 而非 PASS喵。
+- **不能复用上一轮 `verify-r2` 的编译产物**：它编译于 02:22，缺少工作树新增的
+  `REPORT_FILE_NAME_STRICT` 字段，用它根本测不到值域门喵。探针实例改为从当前源码
+  重新编译私有快照（35 源文件 → 61 class），并做 `javap` 等价性证明
+  （`writeBackConfigVersion` 段 `diff=0`、`ReportGenerator` 整类 `diff=0`）喵。
+
+**`N-LOGIC05` 风险自然消解**：全仓（含 `.github` / `*.mjs` / `*.ps1` / `*.json`）
+没有任何 `contains("sustained load")` 断言，且运行期渲染确认审计真正判据
+`this is sustained load` 已为 false喵。
+
+### Notes — 探针侧 `unclosed`（如实转记，均非产品缺陷）
+
+1. `ATOMIC_MOVE` 回退分支**真被触发**的前提无法在本机制造（需跨卷或非原子 FS）喵。
+2. tmp 残留后的「下次启动自愈」未实测，仅代码可达性推断喵。
+3. R3 的 1–80 ms 固定窗段零信息量（已由状态触发段 + 变异对照替代覆盖）喵。
+4. 真实 Paper 服务端端到端未跑（派发明确禁止启动服务端，已由此前多轮真实验证覆盖）喵。
+5. R1 的「第 51 个」依赖 `File.listFiles()` 枚举顺序（已用同一函数预枚举自洽化）喵。
+
+---
+
+## [Unreleased] — 第五波次验收（补跑）：1 条 FAIL + 3 条低危遗留，全部已处置
+
+> **背景**：round2 与收尾批此前**没有走第五波次验收**（见下段 Notes 的门控缺口声明）喵。
+> 2026-11-04 补派独立验收实例 `verify-r2`，用 `git archive HEAD` 基线类 + 工作树类
+> 双编译，对每条 finding 跑同一份探针做 A/B 对照（仓库外 `%TEMP%/verify-r2/`，零 git 写操作、
+> 零源码修改、未启动服务端）喵。
+> 产出 `round1-05-verify-r2-fix-01.md` / `round1-05-verify-r2-fix-02.md` /
+> `round1-05-verify-decisions.md` 三份记录喵。
+>
+> **结果：18 条 PASS，1 条 FAIL，1 条 VERIFICATION_INSUFFICIENT**喵。
+
+### Fixed — 验收发现的真回归（HIGH）
+
+- **A3 的时区修复引入了跨天计数器污染**（`f-s01-data-05` 的回归，验收 `N-A3`）喵。
+  收尾批为修「时区切换被误判为跨日」，在 `loadOptions()` 末尾写了
+  **无条件** `this.pushedTodayDayEpoch = currentDayEpoch();`喵。
+  但 `loadOptions()` 在**每次 `/perfscope reload`** 都会执行
+  （`PerfScope.reload()` → `startAlertService()` → `AlertService.start()` → `loadOptions()`），
+  而 `rollDay()` 只在推送与计数器 getter 里调用喵。
+  于是「服务端跨过午夜、在首次推送之前执行 reload」这个窗口里，基线被直接设成「今天」，
+  昨天→今天的跳变**永远观测不到**，四个当日计数器跨天累积喵。
+  - **探针实测**（`%TEMP%/verify-a3/ProbeA3.java`，模拟跨午夜 + reload + 推 1 条）：
+    基线 `pushedToday=7`，旧实现得 **8**（未归零），正确值应为 **1**喵。
+  - **修法**：`loadOptions()` 进入时捕获旧 `Options`，只在
+    `!prevTz.equals(o.dailyTimezone)`（时区规格**真的变了**）时才重算基线喵。
+    时区未变时分支不执行，`rollDay()` 的跨天归零语义完全保留喵。
+  - **实测五场景全绿**：跨午夜 reload 后归零（1）、连续 3 次 reload 仍归零（1）、
+    时区切换不清零（3→4）、时区未变正常累加（2→3）、首启换时区（1）喵。
+  - **修复者原论证被证伪**：收尾批 §A3 曾写「只重算基线是唯一同时满足两个条件的写法」，
+    验收指出该赋值**无法区分「时区切换」与「真跨天」**，论证不成立喵。
+
+### Fixed — 验收发现的低危遗留（LOW）
+
+- **报告清理正则只校位数不校值域**（验收 `N-A6`，A6 的残留）喵。
+  `^perfscope-\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{3}(-\d+)?\.(html|txt|json)$`
+  会放行 `perfscope-2026-13-03_...`（13 月）、`..._25-05-07-...`（25 时）喵。
+  - 新增 `REPORT_FILE_NAME_STRICT` 做值域收紧（月 01-12、日 01-31、时 00-23、分秒 00-59），
+    `isReportFileName` 改为**两条正则同时匹配**喵。
+  - **有意不校月内天数**（2 月 30 日仍放行）：所有权判据是「形如本插件的时间戳」而非
+    「时间戳是合法日期」，且插件自己不会产出非法日期；在这里重实现闰年/月末逻辑是净负收益喵。
+  - **30 样本穷举证**：8 个插件自有名（含 `-1`/`-10` 碰撞后缀、闰日 02-29、
+    边界 01-01/12-31）全部保持 true；8 个非法值域名由 true 变 false；
+    11 个外来名（含大写后缀、空格分隔、无后缀、`null`）全部 false喵。
+- **`refire-min-interval-seconds: 0` 的文案过度承诺**（验收 `N-A1`）喵。
+  收尾批新加的 config.yml 注释写「不再识别复燃，再次越界一律按普通新告警处理（**立即推送**）」，
+  但普通新告警**仍受 `alerts.cooldown-seconds` 约束**，探针证实冷却期内 `refire=0` 时
+  `push=false`（两版相同，修复本身没引入，但新注释说的比做的多）喵。
+  - config.yml 注释改为「按普通新告警处理，**仍受 alerts.cooldown-seconds 约束，
+    故并非「无视冷却立即推送」**」，README 中英双语同步喵。
+
+### Notes — 验收结论分布
+
+| 批 | 实例 | PASS | FAIL | 不足 |
+|---|---|---|---|---|
+| 1 | `r2-fix-01`（slice-05） | 4 | 0 | 0 |
+| 2 | `r2-fix-02`（slice-03） | 12 | 0 | 1（`f-s03-logic-04`） |
+| 3 | 收尾批 6 条 | 5 | **1**（A3） | 0 |
+| **合计** | | **21** | **1** | **1** |
+
+> 批 2 的 12 条含 1 条 `f-s03-err-07`（原文即 `NO_EVIDENCE_FOUND`，验收确认派发清单有计数差错）喵。
+
+- **4 条 finding 被两批重复声明**（`f-s03-logic-05`、`f-s03-data-06`、`f-s03-contract-06`、
+  `f-s03-contract-07`），加 `f-s05-err-08` 共 5 条喵。逐条读代码确认：**全部由 `r2-fix-04` 落地**，
+  `r2-fix-01`/`r2-fix-02` 的 skip 声明在各自权限范围内为真且回滚干净喵。
+  **风险**：下游若只读前一份记录，会把这 5 条误判为「未修」喵。
+- **A5 的 S3 不是唯一翻转场景**：验收补测后 S1b/S2/S5 也翻转，S1 两版相同（属回归防护）喵。
+  验收额外补的 S5（世界不在 `entitiesByWorld` 里）触及真实 NPE 风险点且被正确防护喵。
+- **A6 的 `(-\d+)?` 经变异检验确认为必需组**：删掉后碰撞文件 `...-123-1.html`
+  由 true 变 false，即「永不清理」——这是分组存在的实证，不是冗余喵。
+- **A2 的「0 行代码变更」经行级 diff 确认为真**：`persistSentDate(today);` 逐字节相同，
+  只有注释位置变化喵。但**派发时给主 Agent 的机械核验命令是不健全的**——
+  `DailySummaryService.java` 同时承载 `r2-fix-03` 的 hunk，文件级 grep 会返回 15 个假阳性，
+  必须做**行级**比对喵。
+- **`f-s03-logic-04` 仍 `VERIFICATION_INSUFFICIENT`**：改动方向正确且两个既有拦截未被削弱
+  （6 场景 A/B 全绿），但 `CLAUDE.md` 规则 10 要求的 ≥30 分钟真实 1Hz 序列回放仍未做喵。
+  验收**主动核查了 `%TEMP%` 下的 8 个 CSV，确认全是合成夹具**（时间戳大量重复、`tps` 恒 20.0），
+  不能顶替真实数据喵。
+
+---
+
+## [Unreleased] — round2 收尾批：6 条产品语义裁决全部落地
+
+> **背景**：round2 结束时剩 6 条 `UPHELD` 无法由 Agent 自行定夺（`A1`–`A6`，见
+> `docs/reports/round1/round1-round2-decisions.md` §A）。作者于 2026-11-04 逐条拍板，
+> 本段记录 5 条需要改代码的落地结果 + 1 条仅订正注释。
+> **本批不改变任何规则判据的数值语义**，只消除「代码做的与注释/文案说的不一致」。
+
+### Fixed
+
+- **`alerts.refire-min-interval-seconds: 0` 的注释与实现相反**（`f-s01-logic-06`，A1，MEDIUM）。
+  `:763` 的 `refireMinIntervalMs > 0 ? refireMinIntervalMs : cooldownMs` 在取 0 时回退到冷却值
+  （默认 300s，**抑制更强**），而 `:556` 注释写「0 = 关闭抑制」，`:559` 只拒绝负值。
+  - **裁决：按注释改代码**。改为 `Math.max(0L, refireMinIntervalMs)`，
+    0 → `refireWindowMs = 0` → `refireWindowMs > 0` 恒假 → `refire` 恒 false，
+    复燃落回普通新告警路径（立即推送）。负值在 `:559` 已被拒，`Math.max` 是纵深防御。
+  - `config.yml` 补齐该键注释（此前**完全没有**该键的任何说明，而相邻 `:167`/`:193`/`:199`
+    三个键都写了「0 = 关闭」），并按同一风格写明 0 的语义与负值回退。
+  - **行为变更**：生产环境若配了 0 并期望「更严格」，改后会变成「更宽松」。
+    但 `f-s01-logic-08` 已确认该键在 jar 内 `config.yml` 中从未出现过，实际不可能已被人配过。
+- **每日摘要游标的注释与实现不符**（`f-s01-data-04`，A2，LOW）。
+  `:348` 的 `persistSentDate(today)` 在推送之后**无条件**执行，游标实际语义是「尝试过」，
+  原注释却写「发送成功后立即落盘」。
+  - **裁决：保持「尝试过」语义，只改注释**。改为「投递路径都是条件性的且 webhook 异步不可观测，
+    故无条件落盘；当日不再重试，同日重启也不补发。控制台通道永不空转，故实际送达概率很高」。
+    0 行代码变更。
+- **时区切换被误判为跨日**（`f-s01-data-05`，A3，MEDIUM）。
+  `pushedTodayDayEpoch` 的初值在**构造时**由 `currentDayEpoch()` 算出，那一刻 `options` 还是
+  默认值（`dailyTimezone` 空串 → 系统时区）。`start()` → `loadOptions()` 换上配置时区后，
+  若新旧时区当下不在同一 `LocalDate`，下一次 `rollDay()` 会误判跨天并把当日四个计数器整体清零。
+  - **裁决：视为 bug**。`loadOptions()` 末尾（`this.options = o` 之后）用**新时区**重算基线：
+    `this.pushedTodayDayEpoch = currentDayEpoch();`。只动基线字段，计数器值与 `rollDay()` 逻辑不变喵。
+- **单世界实体视图打出全服级告警**（`f-s02-logic-03`，A5，MEDIUM）。
+  `/perfscope entities <world>` 前半段每个输出点都做了 `world != null` 判断
+  （`:552`/`:574`/`:578`/`:627`），但方法**末尾**的告警判定（`:645-649`）无条件读
+  `snap.totalEntities` 与全局阈值——只要全服总数过线，单世界页就会在那个世界的小数字下面
+  打一条「严重警告：实体总数超过严重阈值！」。
+  - **裁决：改判该世界自己的阈值**。`world == null` 保持原行为（全服总数 vs 全局阈值）；
+    `world != null` 改读 `snap.entitiesByWorld.get(world.getName())` 与
+    `configManager.getWorldSettings(worldName)` 的覆盖阈值，无覆盖时回退全局
+    （与 `ThresholdColors` / `showWorld` 同口径）。世界不在 map 里视为 0 实体 → 不报警。
+  - **真实 Paper 1.21.11 三场景实测**（`testharness` 实例，BEE 实体 + `worlds:` 覆盖）：
+    - S1 全服视图：`world_nether` 5 只 < 1000，全服 8 > 1 → **报警**（正确）喵。
+    - S2 世界视图 `world`：2 只 > 该世界 warn 1，全局阈值 1000 → **报警**（正确）喵。
+    - S3 核心场景：世界视图 `world_nether` 5 只 < 其阈值 1000，全服 8 > 全局 1 → **静默**喵。
+      同一配置下 HEAD 基线 jar 打出了告警，修复后消失，构成 A/B 对照喵。
+- **报告清理会把管理员自建文件当己方产物删掉**（`f-s05-sec-03`，A6，LOW）。
+  `isReportFileName` 只判前缀 `perfscope-` 与三种后缀，不校验时间戳段；
+  管理员在 `reports/` 里自建的 `perfscope-notes.txt` 超期后会被删。而 javadoc `:260-267` 自称
+  「用户在 reports/ 里自建的任何文件一律不碰」，**代码与文档直接矛盾**。
+  - **裁决：收紧判定**。新增 `REPORT_FILE_NAME` 正则
+    `^perfscope-\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{3}(-\d+)?\.(html|txt|json)$`
+    （与 `FILE_TS` 的 `yyyy-MM-dd_HH-mm-ss-SSS` 及 `-N` 同名去重后缀对齐）。
+  - 探针穷举 19 个样本：插件自有名（含 `-1`/`-10` 去重后缀）旧新皆 true；
+    `perfscope-notes.txt`、`perfscope-2026.html`、`perfscope-2026-11-03.txt`、
+    `perfscope-.txt` 等 7 个外来名旧 true → 新 false；`notes.txt`、`.HTML` 大写后缀、
+    `null` 旧新皆 false（未弱化任何既有拦截）喵。
+  - 真实服务端双跑：在 `reports/` 预置 4 个超期文件（含合法名与外来名），
+    触发一次报告生成。HEAD 基线删掉 3 个（含 `perfscope-notes.txt` 与 `perfscope-2026.html`），
+    修复后只剩合法的 `perfscope-2020-01-01_00-00-00-000.txt` 被删喵。
+
+### Changed
+
+- **TPS 持续低位的内部注释与文案不一致**（`f-s03-logic-05` 残留，A4，LOW）。
+  `CoreRules.java:259` 原注释称「15 分钟滚动均值为**主判据**，窗口均值只作**辅助**」，
+  但 `:262` 的 `if (!persist15m && !persistWindow)` 是**地位对等的 OR**；
+  `DiagnoseMessages` 文案在 `r2-fix-04` 中已改为「任一口径低于告警线即命中」。
+  - **裁决：保持 OR**（改 AND 会减少误报但漏报「刚发生的大幅下跌」，超出最小安全差异）。
+  - 注释改写为「两个判据地位对等」，并记录不选 AND 的理由。**规则语义零变更**。
+
+### Notes
+
+- **总改动**：6 个源/文档文件 + 1 个配置文件，`git diff --stat -- src/main/resources README*.md`
+  实测 `16 files changed, +469/-117`（含 round2 遗留），`mvn clean package` BUILD SUCCESS，
+  `PerfScope-1.2.1.jar` 323393 字节喵。
+- **i18n 键数不变**：本批未新增任何键——A4 只改内部注释，A5 复用既有
+  `cmd.entities.warning`/`cmd.entities.critical-warning`，A1/A2/A3/A6 均为逻辑与注释喵。
+- **未提交**：按作者指示，本轮全部工作只落工作区与产物文档，不做 `git commit` 喵。
+- **产物命名**：`round1-04-decisions.md` 与改名的 `round1-round2-decisions.md`
+  （原 `round1-06-round2-decisions.md`，stage 段 `06` 不在 `report-naming.md` 的闭集里）喵。
+  命名偏差与理由登记在 `round1-ledger-r2.md` 的「命名偏差声明」节喵。
+- **勘误：README 的 bStats 数据披露已过期**（非审计发现，是收尾自检时发现）喵。
+  `README.md:136` 与 `README-EN.md:129` 均写着「作者尚未注册 bStats 项目 ID，**不会发送任何数据**」，
+  但 `82f2c13` 已把 `BSTATS_PLUGIN_ID` 从占位 0 改为 **35061**，数据**已在实际上报**喵。
+  作者提交 35061 时未同步两份用户文档，构成默认开启的数据外发却告知「不会发送」——喵。
+  - 两份文档均改为：默认启用、项目 ID 35061（附 bstats.org 链接）、**数据已实际上报**喵。
+    上报内容按 `BstatsCharts.java` 实际注册的 **10 个图表**逐项列举
+    （`server_software` / `module_enabled` / `language` / `webhook_channel` /
+    `entity_count_bucket` / `loaded_chunks_bucket` / `peak_players_bucket` /
+    `heap_max_mb_bucket` / `world_count` / `loaded_plugins`），
+    并明确声明「不上传配置阈值、玩家名、世界名或聊天内容」——这两点此前两份 README 都未写喵。
+  - 顺带补 `alerts.refire-min-interval-seconds` 到 README 的「主要配置项」块（中英双语），
+    使 A1 新增的 config.yml 注释在用户文档里也有对应说明喵。
+  - 根 `CLAUDE.md` 的 `plugin.yml` 版本号说法同步更正（详见 round1 §Notes）喵。
+- **门控缺口：round2 与收尾批未走第五波次验收**（本轮自查发现）喵。
+  `protocol.md` 第 3 节规定每个修复都必须有验收 Agent 的终态，实际只跑了主波次的 8 个喵：
+
+  | 批次 | 修复实例 | 验收实例 |
+  |---|---|---|
+  | round1 主波次 | 9 | 8 |
+  | round2 | 5 | **0** |
+  | 收尾批 | 1 | **0** |
+
+  round2 与收尾批的验证由**修复者自己**完成，主 Agent 直接采信返回信封，
+  等于让修复者自我验收，违反 `wave5-verify.md` 的隔离原则喵。
+  - 已补派独立验收实例，产出 `round1-05-verify-r2-fix-01.md` /
+    `round1-05-verify-r2-fix-02.md` / `round1-05-verify-decisions.md`，
+    要求对每条 finding 做**变异检验**（找到「修复前失败、修复后通过」的具体场景）喵。
+  - 重点核查 5 个可疑点：跨批**重复声明**修复、`f-s03-logic-04` 的合成轨迹是否足够、
+    A2 的「0 行代码变更」是否属实、A5 的 S3 是否**真**是唯一靶点、
+    A6 正则是否漏掉 `-1` 去重后缀（漏掉即引入新缺陷——插件自有碰撞文件将永不清理）喵。
+  - 缺口声明登记在 `round1-ledger-r2.md` 的「门控缺口声明」节喵。
+- **最终报告的历史数字订正**：`round1-final-report.md` §5.3 的「总计约 30 条 `UPHELD`」
+  实际精确清点为 **41 条**（slice-01: 16 / slice-03: 16 / slice-05: 9）喵。
+  已在 §5.3 开头与结尾各加更正说明，并指向 §0.1 的最终去向对账表喵。
+
+---
+
+## [Unreleased] — round2：把 round1 遗留的 41 条 UPHELD 收掉 22 条
+
+> **背景**：round1 的 9 个修复单元只覆盖了 Arbiter `fix_order` 排在前面的问题，
+> 剩余 41 条 `UPHELD`（slice-01: 16 / slice-03: 16 / slice-05: 9）按 FIFO 规则留给下一轮。
+> 本段记录 round2 批次的执行结果：**修 22 条、跳 19 条**（跳的理由见各条）。
+
+### Fixed（slice-01 alert 域，8 条）
+
+- **静默接管与复燃抑制分支漏写冷却表**（`f-s01-logic-02`，MEDIUM）。
+  `:749-765` 接管分支与 `:796-805` quiet 分支都不写 `cooldowns`，导致下一检查周期（约 1s）
+  `isCooling` 返回 false 立刻重推，与日志「不重复推送」矛盾。**两处姊妹分支同改**。
+  探针：主分支场景 旧=true→新=false；quiet 场景 旧=true（距旧冷却 1211s）→新=false。
+  - **行为变更**：接管后从「1s 内重推」变为「静默一整个冷却周期（默认 300s）」，
+    与 `rec.restored` 分支口径一致。
+- **每日摘要「完整覆盖」分支结构性不可达**（`f-s01-logic-03`，MEDIUM）。
+  `thinCoverage` 分母是 `sinceBootMs` 而 `coverageMs` 上界 24h，开机 >48h 后恒为 true。
+  分母改为 `min(sinceBootMs, 24h)` 封顶。探针：49h/72h/168h/720h 旧全 true → 新全 false。
+- **`thinCoverage` 两原因合并导致文案与数据矛盾**（`f-s01-logic-07`，LOW）。
+  拆出 `belowFloor` / `belowRelative`，只触发绝对下限时用新键 `daily.note.floor`。
+- **`alerts.state` v2 分支 `p[9]` 越界**（`f-s01-logic-05`，LOW）。
+  守卫从 `p.length < 6` 改为 v2 时 `< 10` 则 `continue`。
+  探针：坏行夹在 5 条中间，旧 restored=1/5（后 3 条全丢）→ 新 restored=4/5。
+- **digest「还有 N 条」传总数**（`f-s01-logic-04`，LOW）。改为 `total - shown`。
+  探针：total=6/shown=5，旧 "and 6 more" → 新 "and 1 more"。
+- **`daily-summary.state` 非原子写**（`f-s01-data-03`，LOW）。改 tmp + `ATOMIC_MOVE`。
+  探针：模拟重写被截断，旧 `loadSentDate=null`（当日重复推送）→ 新返回正确日期。
+- **webhook 失败日志限频的 check-then-act**（`f-s01-conc-02`，LOW）。
+  `volatile long` 改 `AtomicLong` + CAS。探针：CyclicBarrier 强制交错 200 轮，旧 200/200 重复 → 新 0/200。
+- **webhook 回调在插件停用后仍执行插件代码**（`f-s01-err-11`，含已合并的 `f-s01-conc-03`，LOW）。
+  `whenComplete` 回调首行加 `plugin.isEnabled()` 守卫。
+  - **未完全闭合**：`onDisable` 仍无 `webhookNotifier.close()`（`PerfScope.java` 不在该批写权限内），
+    JDK 17 的 `HttpClient` 也未实现 `AutoCloseable`——只缓解了可观测后果，资源句柄本身未消除。
+
+### Fixed（slice-03 config+diagnose 域，11 条）
+
+- **TPS 阈值只校下界**（`f-s03-logic-01`，MEDIUM）。`sanitizePair` 对 TPS 增加上界 20.5
+  （TPS 合法域 (0, 20.5]）。真实 Paper 1.21.11 实测：
+  `tps.warning_threshold: 25.0` → `is out of range (must satisfy 0 <= value <= 20.5); reverted to the defaults`。
+  - **残留**：`(20.0, 20.5]` 仍是恒真区；取 20.0 会误伤「按 20.1 卡住下跌」，故取 20.5，需产品裁决。
+- **`history.sample-interval-seconds` 双读者口径分裂**（`f-s03-data-04`，MEDIUM）。
+  `ConfigManager` 侧新增 WARNING（**不改值**，避免 breaking change）。
+  真实服务端实测会同时打出配置层与 `HistoryStore` 层两条警告。
+- **`writeBackConfigVersion` 非原子**（`f-s03-data-03`，MEDIUM）。改临时文件 + `ATOMIC_MOVE`。
+  真实服务端用硬链接观察者验证：主文件有新内容、观察者（旧 inode）看不到 → 确为原子替换、无残留 tmp。
+- **`alerts.repush-delta` 的 int/double 双读者分叉**（`f-s03-data-07`，LOW）。
+  `ConfigManager` 侧 `readInt` 改 `readDouble`。探针：用户写 8.5 时旧判类型错误并称「已改用 8」
+  而实际生效 8.5；修复后两侧一致。字节码 `bipush 8/readInt` → `ldc2_w 8.0d/readDouble`。
+- **`coverageProblem` 的中位间隔取上中位数**（`f-s03-logic-04`，LOW）。
+  偶数个 gaps 改为中间两值均值。探针：场景 A（1,1,1,100,100,100，span=303s）旧 SKIP 误判 → 新 PASS；
+  等距/挤在 1s 内/条数不足三种既有拦截未削弱。
+  - **残留**：只用合成轨迹验证；CLAUDE.md 规则 10 要求的 ≥30 分钟真实序列回放未做（仓库无真实 CSV）。
+- **`validateWorldNames` 的 `catch(Throwable)` 分支零日志**（`f-s03-err-02`，LOW）。
+- **`DiagnosticEngine` 不覆盖 `StackOverflowError`**（`f-s03-err-04`，LOW）。
+  新增 `catch (StackOverflowError)` 记入 skipped + WARNING；**有意不收 OOM**（javadoc 同步说明）。
+- **三处纯文档订正**：`configVersion` javadoc（`f-s03-contract-05`）、
+  `coverageProblem` 公式 javadoc（`f-s03-contract-08`）、
+  `warnThresholdFallback` 的 `@param` 引用不存在参数（`f-s03-contract-10`）、
+  `repush-delta` 注释的因果描述错误（`f-s03-contract-09`）。零行为变更。
+
+### Fixed（slice-05 report+util 域，3 条）
+
+- **预热态被误判为 `degraded`**（`f-s05-logic-01` 的同类残留）。
+  `healthOf()` 遍历 `unavailable` 时跳过 `warmingUp` 成员，预热归入 `partial`。
+  真实 Paper 双跑：基线 `warming-up → degraded`，修复后 `warming-up → partial`，真采集失败仍 `degraded`。
+  - **注**：该 finding 的主体已由此前提交 `8020361` 修复，本条修的是同一谓词上的残留。
+- **`ensureRegistered` 的 catch 体零日志**（`f-s05-err-06`，LOW）。补 WARNING。
+- **`cleanOldReports` 的删除失败永久静默**（`f-s05-err-07`，LOW）。
+  新增 `deleteFailed` 计数，首个失败立即 WARNING、其余汇总一条。
+  真实服务端：持 60s 打开句柄后触发报告生成，基线 grep 命中 0，修复后出现含文件名的 WARNING。
+
+### Skipped（19 条，理由分类）
+
+- **写权限外**（4 条）：`f-s05-err-08`、`f-s03-contract-06`、`f-s03-contract-07`、`f-s03-data-06`
+  ——目标文件 `util/Messages.java` / `ConfigMessages` / `CommandMessages` 不在该批授权范围。
+- **产品语义取舍**（4 条）：`f-s01-logic-06`（`refire-min-interval-seconds=0` 是关闭还是复用冷却值）、
+  `f-s01-data-04`（摘要游标 = 尝试过 vs 送达过）、`f-s01-data-05`（时区切换当否算日界翻滚）、
+  `f-s03-logic-05`（TPS 规则 OR→AND 会改变规则语义）。
+- **超出最小安全差异**（3 条）：`f-s01-err-08`（需把 `gameOk` 布尔改三态）、
+  `f-s01-err-10`（`RawConfig` 6 个 getter 补日志属跨切）、`f-s01-err-07`（动机存疑，需先确认是否刻意兜 `NoSuchMethodError`）。
+- **非缺陷**（2 条）：`f-s03-err-07`（原文即 `NO_EVIDENCE_FOUND`）、`f-s01-conc-04`（审计自标 LOW 且非活跃缺陷）。
+- **需 new i18n 键**（2 条）：`f-s03-data-06`、`f-s03-logic-05`。
+- **其余**（4 条）：`f-s05-sec-01`（`NO_EVIDENCE_FOUND` 合法负结果）、`f-s05-sec-03`、
+  `f-s05-err-09`、`f-s03-contract-05` 的部分子项——见 `round1-04-r2-fix-*.md`。
+
+### Notes（round2）
+
+- **总改动**：10 个文件 `+495/-48` 行（含 `build.yml` 的 299 行独立改动），
+  源文件净增约 196 行。`mvn clean package` BUILD SUCCESS。
+- **真实 Paper 1.21.11 端到端验证**：TPS 上界钳制、采样间隔双警告、原子写硬链接观察者
+  三项全部通过；零插件异常、干净关服。
+- **测试覆盖仍为零**：仓库无 `src/test`，所有验证依赖仓库外临时探针与真实服务端。
+- **CLAUDE.md 规则 10 仍未满足**：`f-s03-logic-04` 的窗口类改动只用合成轨迹验证，
+  真实 ≥30 分钟采集序列回放未做（仓库无真实 CSV）。
+
+---
+
+## [Unreleased] — v1.3.0 门禁前置修复（红队审查后的 9 项）
+
+> **背景**：v1.3.0 PRD 经 4 个红队 agent 交叉审查后判定「不能直接执行，最少改 9 处」。
+> 本段记录这 9 处前置的实际修复。**不含任何面向用户的新功能。**
+
+### Fixed — 不可逆风险
+- **`tools/` 内的 AI 署名残留与历史 bundle 已隔离**（红队 A2）。`github-support-request-draft.md`、
+  `orphan-commit-removal-record.md` 含 `Co-Authored-By: Claude` 原文与孤儿 commit SHA，
+  另有 2 个各 1.5 MB 的完整 git 历史 bundle。全部移入 `tools/_internal/`（带 README 说明禁止公开），
+  公开目录已零残留。**这是本批唯一真正不可逆的风险**——代码可回滚，公开出去的 git 历史不能。
+
+### Fixed — 门禁与工具本身
+- **断言校验器的核心规则 S1 曾是完全失效的**（红队 A1）。`check-scenarios.mjs` 的
+  `fixtureSupplies()` 拿 `JSON.stringify(整个场景)` 当白名单，而断言的期望值必然出现在它自己的
+  场景文件里，所以 S1（"断言值能否在源码中找到"）**永远返回 true**。实测：一个期望值全是
+  `TOTALLY_FAKE_STRING_XYZQ_NOT_IN_SOURCE` 的场景报 `PASS (0 error, 0 warn)`。
+  修复后白名单只含 `preBootFileOps` / `fileOps` / `preCommands` 等**夹具真正写入环境**的内容。
+  正控验证：假字符串场景现在报 3 条 `S1-UNREACHABLE-VARIANT` ERROR；真实场景的 S1 计数从 0 → 5。
+- **CI 的单元测试从未执行过**（红队 B4）。`.github/workflows/build.yml` 用
+  `compgen -G 'src/test/java/**/*.java'`，而 bash 默认 `globstar off`，`**` 不递归 → 恒 0 匹配 →
+  `mvn test` 分支永远进不去。改为 `shopt -s globstar nullglob` + 数组展开。
+- **CI 门禁脚本此前拿不到**（红队 D/H3）。门禁脚本原在 git 仓库的**父目录**，GitHub runner
+  永远看不见。现将 `check-i18n.mjs` / `check-config-compat.mjs` / `check-scenarios.mjs` /
+  `verify-release-artifact.mjs` / `local-gate.ps1` / `lib/java-strings.mjs` 复制进
+  `PerfScope/tools/`，workflow 改为校验仓库内路径，缺失即 `::error::` 而非静默跳过。
+- **`static-gate` / `fingerprint` / `release` 三个 job 此前从未提交**（红队 C6）。工作树有 4 个
+  job，git HEAD 只有 1 个。
+
+### Fixed — 构建可复现性
+- **`pom.xml` 新增 `project.build.outputTimestamp`**（红队 A3）。此前两次 `mvn clean package`
+  源码零改动却产出不同 sha256（zip 元数据带各自时间），使「归档 JAR 与源码一致」这条验收
+  **永远无法达成**——而它正是 1.2.1 事故（发布包落后 6 个提交、缺整个 i18n）的唯一防线。
+  实测修复后连续两次构建 sha256 完全相同。
+
+### Fixed — 测试断言（红队 C2 + 独立发现）
+- **10 条堆栈守卫从未生效**。Paper 的栈帧格式是 `at PerfScope-1.2.1.jar/cn.perfscope.X.y(...)`，
+  而断言写的是字面量 `at cn.perfscope`——36 个日志文件 0 命中。`cn\.perfscope` 正则同时匹配
+  Paper 格式与旧式格式。涉及 `inject06`、`soak03a~h`（8 条）、`surface/backstop-no-perfscope-stacktrace`。
+- **12 条 `monitor 推送失败` 守卫是死的**。该中文串在 i18n 改造（`3826bb3`）后已改为英文
+  `monitor push failed`，断言未同步。446 份日志 0 命中。现扩为
+  `monitor push failed|console push failed|控制台推送失败`，同时覆盖 monitor 与 alert 两条推送路径。
+- **`alertv2/up01` 的双反斜杠正则永不能匹配**。JSON 解码后是字面反斜杠 + 字符类；
+  历史 `result.json` 显示 2026-10-29 之前是单反斜杠、当时可用，属后引入的回归。
+  改为断言升级后缀 `level escalated` / `（级别升级）` 的字面双语锚点。
+- **恢复类负向守卫收窄**。`notPresent: ["recovered"]` 会误伤控制台的
+  `(downgraded ... not recovered)` 缓解提示行。改为 `" recovered |"` / `" 已恢复正常 |"`
+  （竖线分隔符只出现在真实恢复行的结构化后缀里）。
+
+### Notes
+- **`alert-recovery-notice` 确认为环境敏感 flaky，非产品缺陷**。它要求内存告警先处于激活态
+  才有恢复可等；宿主机堆内存充裕时告警根本不触发。历史 40 次运行 5 次失败，其中 2 次是
+  RCON 连接错误。已在场景 `description` 中写明判据，避免下次误判为回归。
+- **校验器仍有 5 条 `S1-UNREACHABLE-VARIANT` 警告未修**：它们是**校验器的误报**
+  （源码字符串含 `{0}` 占位符，与填充后的断言文本无法精确匹配），不是产品问题。
+  已知局限，已记录待改进。
 
 ---
 

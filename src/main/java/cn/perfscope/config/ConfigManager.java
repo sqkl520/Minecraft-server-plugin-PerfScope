@@ -906,6 +906,15 @@ public class ConfigManager {
      * </ul>
      */
     private void validateThresholds(ConfigData cfg) {
+        // === 采集间隔 ===
+        // 必须最先校验：它决定后续所有节流周期的时间尺度，非法值会让"每 N 周期"全部失真。
+        if (cfg.general_updateInterval < UPDATE_INTERVAL_MIN || cfg.general_updateInterval > UPDATE_INTERVAL_MAX) {
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.update-interval",
+                "general.update_interval", cfg.general_updateInterval,
+                UPDATE_INTERVAL_MIN, UPDATE_INTERVAL_MAX, UPDATE_INTERVAL_DEFAULT));
+            cfg.general_updateInterval = UPDATE_INTERVAL_DEFAULT;
+        }
+
         // === 全局阈值对 ===
         // TPS（低值差，warning 应 >= critical）
         double[] tps = sanitizePair("tps.warning_threshold/critical_threshold",
@@ -1190,6 +1199,20 @@ public class ConfigManager {
      * 只警告不改值——压到 20.0 会误伤「按 20.1 卡下跌」的合法配置，属 breaking change。
      */
     private static final double TPS_TAUTOLOGY_FLOOR = 20.0;
+
+    /**
+     * 采集间隔的合法区间（tick）。
+     *
+     * <p>没有上限时，{@code general.update_interval: 1} 会让采集器每 tick 跑一次全量采集——
+     * 20 次/秒的主线程全遍历，在大服上直接把 TPS 拖垮。{@code MetricsCollector} 只有下限
+     * {@code Math.max(1, configuredInterval)}，那个下限恰好放行了最危险的值。</p>
+     *
+     * <p>下限取 5（4 次/秒）而不是 1：即使原始指标需要更高频率，也应由采集器内部
+     * 分级降频解决，而不是让用户把整个采集周期压到 tick 级。</p>
+     */
+    private static final int UPDATE_INTERVAL_MIN = 5;
+    private static final int UPDATE_INTERVAL_MAX = 1200;
+    private static final int UPDATE_INTERVAL_DEFAULT = 20;
 
     /** f-s03-data-04：趋势规则仍可用的采样间隔上界（秒）——与 HistoryStore 的 DIAGNOSIS_MAX_INTERVAL_SEC 同值。 */
     private static final int HISTORY_INTERVAL_TREND_SAFE_SEC = 180;

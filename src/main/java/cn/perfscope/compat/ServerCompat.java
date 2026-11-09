@@ -507,6 +507,20 @@ public final class ServerCompat {
     }
 
     /**
+     * 是否为受支持的服务端（Paper 系）。
+     *
+     * <p><b>为什么需要这个判断</b>：插件 README 与 {@code plugin.yml} 都只声称支持 Paper 系
+     * （Paper / Purpur / Pufferfish / Folia），但 {@code onEnable} 里没有任何平台守卫——
+     * 在纯 Bukkit / CraftBukkit 上装上去会走完全部初始化，然后在第一个
+     * Paper 专有 API 调用处崩在半装配状态（部分模块起来了、部分没起来）。</p>
+     *
+     * <p>fails-fast 比"装上去再说"好：服主立刻看到明确原因，而不是在一堆后续异常里猜。</p>
+     */
+    public static boolean isSupportedPlatform() {
+        return TYPE == ServerType.PAPER || TYPE == ServerType.FOLIA;
+    }
+
+    /**
      * 服务端类型枚举
      */
     public enum ServerType {

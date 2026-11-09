@@ -85,6 +85,27 @@ public final class PerfScope extends JavaPlugin {
     public void onEnable() {
         instance = this;
 
+        // 平台守卫（v1.3.0 P1）：本插件只支持 Paper 系。没有这道守卫时，纯 Bukkit/Spigot 上
+        // 会走完全部初始化、在第一个 Paper 专有 API 处崩在半装配状态——部分模块起来了、
+        // 部分没起来，而且错误信息指向具体某行而不是"平台不对"。
+        //
+        // 放在最前面：此刻还没有任何 Bukkit API 副作用（配置未读、任务未起、事件未注册），
+        // disablePlugin 之后不会有残留。
+        //
+        // 注意：这里 **不能** 用 Messages.get()——消息层要等 load() 之后才就绪，此时调用
+        // 只会拿到键名本身（见 Messages#resolve 的 fallback）。所以文案直接内联。
+        if (!ServerCompat.isSupportedPlatform()) {
+            getLogger().severe("[PerfScope] Unsupported server platform: " + ServerCompat.getServerName()
+                + ". This plugin targets the Paper family (Paper / Purpur / Pufferfish / Folia). "
+                + "Version checking may be wrong and some features are unavailable. "
+                + "Disabling PerfScope - delete the jar, or run it on Paper.");
+            getLogger().severe("[PerfScope] 不支持的服务端平台：" + ServerCompat.getServerName()
+                + "。本插件面向 Paper 系（Paper / Purpur / Pufferfish / Folia）。"
+                + "指标可能与事实不符，且部分功能不可用。已禁用 PerfScope —— 请删除本插件，或改用 Paper 系服务端。");
+            getServer().getPluginManager().disablePlugin(this);
+            return;
+        }
+
         // 9D 修（验收 HIGH）：横幅**推迟到 Messages.load() 之后**再打印。
         // 原先写在这里，而 load() 在下面十几行之后——于是 language: zh 的服务器
         // 首两行（插件名/服务端）永远是英文默认语言，正是"混排"最显眼的一处。

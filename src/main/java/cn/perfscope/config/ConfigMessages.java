@@ -184,6 +184,12 @@ public final class ConfigMessages {
         put(en, zh, "config.check.history-interval",
             "Configuration check: {0}={1} is invalid (must be at least 1); using {2} seconds instead",
             "配置校验：{0}={1} 非法（需 ≥1），已按 {2} 秒处理");
+        // 采集间隔没有上限会变成"主线程压测器"：update_interval: 1 = 每 tick 全量采集
+        // = 20 次/秒，大服上直接把 TPS 拖垮。MetricsCollector 只有下限 Math.max(1, ...)，
+        // 那个下限恰好放行了最危险的值。
+        put(en, zh, "config.check.update-interval",
+            "Configuration check: {0}={1} is out of range (must be {2}-{3} ticks); using {4} ticks instead",
+            "配置校验：{0}={1} 超出范围（需 {2}-{3} tick），已按 {4} tick 处理");
         put(en, zh, "config.check.history-retention",
             "Configuration check: {0}={1} is invalid (must be at least 1); using {2} days instead",
             "配置校验：{0}={1} 非法（需 ≥1），已按 {2} 天处理");

@@ -74,11 +74,11 @@ Additional notes:
 | `/perfscope history` | History summary (last ~24h: lowest TPS / peak entities / peak heap) |
 | `/perfscope hotspot` | Hotspot localization (entity-density top-3 chunks with coordinates) |
 | `/perfscope diagnose` | Smart diagnosis (rule engine: conclusions + parameter-level advice; `diag` stays the full-diagnostics alias) |
-| `/perfscope trend [days]` | Trend summary (cross-restart persistent history, default 1 day) |
+| `/perfscope trend [days]` | Trend summary (cross-restart persistent history, default 1 day). Falls back to the in-memory ring and clamps to 1 day when persistence is unavailable; unparsable history rows are reported with their count |
 | `/perfscope gc` | GC statistics (per-collector details) |
 | `/perfscope report [format]` | Export performance report (html/txt/json) |
-| `/perfscope monitor` | Toggle ActionBar live monitor |
-| `/perfscope status` | Plugin self-health (collector alive / module states / history / alerts) |
+| `/perfscope monitor` | Toggle ActionBar live monitor (when collection has stalled it shows "no data for N" instead of stale figures) |
+| `/perfscope status` | Plugin self-health (collector alive / module states / history / alerts). The last collection error is shown as a redacted summary (exception type + first line, absolute paths replaced by `<path>`); the full text stays in the console log |
 | `/perfscope reload` | Reload config file |
 | `/perfscope help` | Show command help |
 
@@ -126,7 +126,13 @@ GC: 42 次 / 5.23 秒
 4. Edit `plugins/PerfScope/config.yml` for custom configuration
 5. Use `/perfscope` to view performance data
 
-> Data disclosure: This plugin bundles bStats anonymous usage statistics (enabled by default; no player or server-owner personal information is collected). In the current version the author has not yet registered a bStats plugin ID, so **no data is sent**; it activates automatically once the ID is registered. It can be disabled in `plugins/bStats/config.yml` or via `general.bstats-enabled: false` in this plugin's config.yml.
+> Data disclosure: This plugin bundles bStats anonymous usage statistics (**enabled by default**). The plugin ID is **35061** (<https://bstats.org/plugin/bukkit/PerfScope/35061>), so **data is actually being reported**. What gets sent comes in two layers with different granularity:
+>
+> **Layer A — sent automatically by the bStats library (not individually controllable by this plugin)**: server software type and version, plugin version, OS name and version, CPU core count, **current online player count (exact, not bucketed)**, online/offline mode, and a server UUID (randomly generated, not a server address).
+>
+> **Layer B — custom charts added by this plugin (bucketed)**: server software type, enabled module combination, UI language, magnitude buckets for entity count / loaded chunks / peak players / max heap, world count, installed plugin count, and webhook channel type.
+>
+> **Neither layer uploads**: player names, world names, coordinates, chat content, plugin lists, config file contents, alert text, or server addresses. It can be disabled in `plugins/bStats/config.yml` or via `general.bstats-enabled: false` in this plugin's config.yml.
 
 ## Configuration
 
@@ -189,6 +195,7 @@ alerts:
   debounce-cycles: 3        # Debounce: N consecutive over-threshold cycles before the first push (1 = push immediately)
   flap-window-seconds: 180  # Flap window: a "recovery → re-breach" inside this window is treated as the same incident (no duplicate notifications)
   repush-delta: 8           # Re-push delta: an active alert is not re-pushed unless its value changes by at least this much (applies to cpu:system only)
+  refire-min-interval-seconds: 60  # Re-fire interval: after a recovery, a re-breach counts as a "re-fire" only within this window (0 = disable re-fire detection; a re-breach is then treated as a normal new alert, still subject to cooldown-seconds)
   daily-summary:
     enabled: false          # Daily summary switch
     time: "08:00"           # Daily summary time (local HH:mm)
@@ -321,6 +328,16 @@ mvn clean package
 ```
 
 The JAR file will be generated in the `target/` directory.
+
+The repository ships unit tests (JUnit 5, `src/test/java`); `mvn clean package` runs them before packaging:
+
+```bash
+mvn test                        # tests only
+mvn test -Dtest=CsvLayoutTest   # a single test class
+mvn clean package -DskipTests   # build without tests
+```
+
+Test dependencies are `test`-scoped and never enter the final JAR.
 
 ## License
 
