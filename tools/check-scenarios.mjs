@@ -95,6 +95,35 @@ const templates = srcStrings
  * A false "reachable" only weakens the gate; a false "unreachable" would train people to
  * ignore the report -- so all ambiguity resolves toward reachable.
  */
+/**
+ * Placeholder-tolerant reachability.
+ *
+ * A scenario asserts what the user SEES: `为负值(-5)，已钳制为 0`. The source has the
+ * template `{0} 为负值({1})，已钳制为 0`. Neither `includes`, nor the prefix/suffix heuristics,
+ * nor the label+value split handles a placeholder in the MIDDLE of the string, so three real
+ * assertions were reported as unreachable when they are perfectly reachable:
+ *   - config  / cfg-cooldown-negative-clamps   "为负值(-5)，已钳制为 0"
+ *   - hotspot / hotspot05-dominant-pig         "主导 PIG"        (prefix ", dominant " + runtime type)
+ *   - trend   / trend07-day-parameter          "近 7 天"          (template "近 {0} 天（…）")
+ *
+ * Fix: when a source string contains `{n}` placeholders, turn it into a regex where each
+ * placeholder matches any non-empty run, then test the assertion against it. This is the same
+ * "template + runtime arguments" model the plugin actually uses (Messages#format).
+ */
+function matchesTemplate(text, template) {
+  if (!template || !/\{\d+\}/.test(template)) return false;
+  // Escape regex metachars, then let each {n} absorb any run of characters.
+  const rx = template
+    .split(/(\{\d+\})/)
+    .map(part => (/\{\d+\}/.test(part) ? '.+' : part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    .join('');
+  try {
+    return new RegExp('^' + rx + '$', 's').test(text);
+  } catch {
+    return false;
+  }
+}
+
 function reachable(text) {
   if (!text) return true;
   // Pure runtime data (a coordinate like "[0,0]", a number, a player/bot name from the
@@ -103,6 +132,9 @@ function reachable(text) {
   if (/^[\[\(]?-?\d+([,:\/ ]-?\d+)*[\]\)]?$/.test(text.trim())) return true;
 
   for (const s of srcStrings) if (s.includes(text)) return true;
+
+  // Placeholder templates: "{0} 为负值({1})，已钳制为 0" can spell "为负值(-5)，已钳制为 0".
+  for (const s of srcStrings) if (matchesTemplate(text, s)) return true;
 
   const n = text.length;
   const need = Math.ceil(n * 0.6);
