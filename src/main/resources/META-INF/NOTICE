@@ -1,0 +1,92 @@
+PerfScope
+Copyright (C) 2026 PerfScope Team
+
+This product is licensed under the GNU Affero General Public License,
+version 3 only. The full license text is in LICENSE in this directory
+(META-INF/LICENSE in the packaged jar) and at
+<https://www.gnu.org/licenses/agpl-3.0.html>.
+
+================================================================================
+THIRD-PARTY COMPONENTS
+================================================================================
+
+This product bundles the following third-party software. Each component
+remains under its own license; the notices below are provided in
+accordance with those licenses.
+
+--------------------------------------------------------------------------------
+bStats (bstats-bukkit 3.2.1, bstats-base 3.2.1)
+--------------------------------------------------------------------------------
+  Copyright (C) bStats contributors
+  License: MIT
+  Project: <https://bstats.org/>
+  Source:  <https://github.com/Bastian/bStats-Metrics>
+
+  bStats is bundled and relocated to the package
+  cn.perfscope.shaded.bstats so that it cannot collide with another plugin's
+  copy of the same library at runtime.
+
+  MIT License
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+--------------------------------------------------------------------------------
+Google Gson 2.10.1 — NOT BUNDLED
+--------------------------------------------------------------------------------
+  Copyright (C) Google Inc.
+  License: Apache License 2.0
+  Project: <https://github.com/google/gson>
+
+  Declared with <scope>provided</scope>: Gson is supplied by the Minecraft
+  server runtime and is NOT included in this jar (verified: 0 gson classes in
+  the packaged artifact). It is listed here for completeness only.
+
+  Licensed under the Apache License, Version 2.0 (the "License"); you may not
+  use this file except in compliance with the License. You may obtain a copy of
+  the License at <https://www.apache.org/licenses/LICENSE-2.0>.
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+  WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+  License for the specific language governing permissions and limitations under
+  the License.
+
+================================================================================
+NOT BUNDLED
+================================================================================
+
+The following are used at compile time only and are NOT included in the
+packaged jar; they are provided by the server runtime:
+
+  - Paper API / Bukkit API  — provided by the Minecraft server
+  - Adventure (net.kyori)   — provided by Paper / Purpur / Folia
+  - Google Gson             — provided by the Minecraft server
+
+================================================================================
+PRIVACY
+================================================================================
+
+PerfScope sends anonymous usage statistics through bStats (project ID 35061).
+The plugin does not upload player names, world names, coordinates, chat
+content, plugin lists, configuration file contents, alert text, or server
+addresses. Reporting can be disabled in plugins/bStats/config.yml or via
+general.bstats-enabled: false in this plugin's config.yml.
+
+See the README for the full two-layer disclosure (what the bStats library
+itself reports vs. what this plugin reports).

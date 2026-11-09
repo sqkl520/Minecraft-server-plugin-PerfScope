@@ -123,6 +123,12 @@ public final class CoreMessages {
         put(en, zh, "core.log.auto-report-failed",
             "[PerfScope] Failed to start the auto-report task: {0}",
             "[PerfScope] 自动报告任务启动失败: {0}");
+        // v1.3.0 -14：interval ≤0 会被 Bukkit 调度器 coerce（0→每 tick 写盘 IO 风暴；
+        // 负值→单次后静默死亡）/Folia 校正为每 tick，行为分叉，故强制下限 1 分钟并说明。
+        put(en, zh, "core.log.auto-report-interval-clamped",
+            "[PerfScope] report.auto_export_interval={0} is invalid (must be at least 1 minute); "
+                + "using 1 minute instead",
+            "[PerfScope] report.auto_export_interval={0} 非法（需 ≥1 分钟），已按 1 分钟处理");
         put(en, zh, "core.banner.auto-report",
             "  [+] Auto report enabled (interval: {0} min)",
             "  [+] 自动报告已启用 (间隔: {0} 分钟)");
@@ -132,9 +138,8 @@ public final class CoreMessages {
         put(en, zh, "core.bstats.enabled",
             "[PerfScope] bStats anonymous metrics enabled (pluginId={0})",
             "[PerfScope] bStats 匿名统计已启用 (pluginId={0})");
-        put(en, zh, "core.bstats.init-failed",
-            "[PerfScope] bStats initialization failed (skipped; the plugin itself is unaffected)",
-            "[PerfScope] bStats 匿名统计初始化失败（已跳过，不影响插件本体）");
+        // 只保留 -detail 变体：startBstats() 的 catch 分支永远带异常描述调用它。
+        // 无参的同名键从来没有任何调用点（f-s06-contract-04 的死键），删掉。
         put(en, zh, "core.bstats.init-failed-detail",
             "[PerfScope] bStats initialization failed (skipped; the plugin itself is unaffected): {0}",
             "[PerfScope] bStats 匿名统计初始化失败（已跳过，不影响插件本体）: {0}");
@@ -151,6 +156,22 @@ public final class CoreMessages {
         put(en, zh, "compat.mspt.tps-scope-note",
             ", MSPT unavailable (TPS is a global-region local value)",
             "，MSPT 不可用（TPS 为 global region 局部值）");
+        // v1.3.0 -14：MSPT 能力位降级的两条控制台日志。
+        // 此前是 ServerCompat.probeRuntimeAvailability 里的内联中文，用局部 Logger 引用（log.info）
+        // 而非 plugin.getLogger()——所以历次"控制台 CJK"扫描全部漏掉了它们。
+        // 调用时序安全：PerfScope.onEnable 在 Messages.load 之后才 armRuntimeProbe。
+        put(en, zh, "compat.mspt.degraded-to-avg",
+            "[PerfScope] getTickTimes() is measurably always empty; MSPT degraded to "
+                + "getAverageTickTime (average only, no min/max)",
+            "[PerfScope] getTickTimes() 实测恒为空，MSPT 降级为 getAverageTickTime"
+                + "（仅平均值，无 min/max）");
+        // {0} = 连续确认次数（ZERO_SAMPLE_CONFIRMATIONS）
+        put(en, zh, "compat.mspt.marked-unavailable",
+            "[PerfScope] getTickTimes() and getAverageTickTime() came back empty/zero for {0} "
+                + "consecutive probes; MSPT marked unavailable "
+                + "(this server does not populate tick timings - no fake precision)",
+            "[PerfScope] getTickTimes() 与 getAverageTickTime() 连续 {0} 次实测全零/空数组，"
+                + "MSPT 标记为不可用（该服务端 tick 计时未填充，不做假精确输出）");
 
         Messages.registerModule(en, zh);
     }

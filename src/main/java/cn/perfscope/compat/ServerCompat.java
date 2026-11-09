@@ -321,8 +321,7 @@ public final class ServerCompat {
             PAPER_MSPT_AVAILABLE = false;
             msptUnavailableReasonKey = null;
             if (wasPrimaryAvailable) {
-                log.info("[PerfScope] getTickTimes() 实测恒为空，MSPT 降级为 getAverageTickTime"
-                    + "（仅平均值，无 min/max）");
+                log.info(Messages.get("compat.mspt.degraded-to-avg"));
             }
             return;
         }
@@ -332,9 +331,7 @@ public final class ServerCompat {
         PAPER_AVG_TICK_AVAILABLE = false;
         msptUnavailableReasonKey = "compat.mspt.tick-times-empty";
         if (wasAvailable) {
-            log.info("[PerfScope] getTickTimes() 与 getAverageTickTime() 连续 "
-                + ZERO_SAMPLE_CONFIRMATIONS + " 次实测全零/空数组，MSPT 标记为不可用"
-                + "（该服务端 tick 计时未填充，不做假精确输出）");
+            log.info(Messages.get("compat.mspt.marked-unavailable", ZERO_SAMPLE_CONFIRMATIONS));
         }
     }
 
@@ -472,8 +469,19 @@ public final class ServerCompat {
      * 9A-2：TPS 口径标注（Paper/Spigot 返回空串，Folia 返回 {@code " (global region)"}）。
      * 展示层直接 append，避免每处自造文案与译法漂移。
      */
+    /**
+     * TPS 的作用域后缀（Folia 上 TPS 是 per-region 的，需要标注）。
+     *
+     * <p><b>为什么这里返回键渲染结果而不是字面量</b>：三个调用点（命令面板、HTML 报告、
+     * TXT 报告）都在 {@code Messages.load()} 之后执行，渲染时机是安全的。此前这里硬编码
+     * {@code " (global region)"}，导致 {@code compat.tps.scope-global} 这个键**只被 put、
+     * 从不被 get**（死键），而且英文/中文界面下这段永远是英文。</p>
+     *
+     * <p>注意：本类在静态初始化时**不能**调用本方法（消息层未就绪），所以保持实例方法的
+     * 调用时机责任在调用方。</p>
+     */
     public static String tpsScopeLabel() {
-        return isTpsGlobalScope() ? "" : " (global region)";
+        return isTpsGlobalScope() ? "" : Messages.get("compat.tps.scope-global");
     }
 
     // ==================== 公共方法 ====================

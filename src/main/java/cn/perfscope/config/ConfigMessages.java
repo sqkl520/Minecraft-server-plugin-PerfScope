@@ -232,6 +232,21 @@ public final class ConfigMessages {
             "Configuration check: {0} contains a non-finite value (NaN/Infinity); "
                 + "reverted to the defaults: w={1} c={2}",
             "配置校验：{0} 存在非有限数值(NaN/Infinity)，已回退默认值：w={1} c={2}");
+        // v1.3.0 -14：这两条此前是 ConfigManager 里的内联中英三元表达式（绕过消息层）。
+        // 键名沿用 config.check.* 族；数值细节（margin/阈值/回退值）由调用点算好后用占位符传入，
+        // 因为它们是数据而非文案，且两种语言的字段顺序不同（英文先值后说明）。
+        put(en, zh, "config.check.hysteresis-not-below",
+            "cpu.hysteresis_margin={0} | threshold(process/system)={1}/{2} | reverted={3} - "
+                + "not below the CPU threshold; the exit line would be non-positive and the alert "
+                + "would never clear",
+            "cpu.hysteresis_margin={0} | threshold(process/system)={1}/{2} | reverted={3} —— "
+                + "不小于 CPU 告警阈值，退出线会非正且告警永不解除");
+        put(en, zh, "config.check.history-interval-trend-unsafe",
+            "history.sample-interval-seconds={0} exceeds {1}s: too few samples per 30-minute "
+                + "diagnostic window, so trend rules (DIAG-MEM-LEAK / DIAG-TPS-PERSIST) will keep "
+                + "being skipped; 60 seconds is recommended",
+            "history.sample-interval-seconds={0} 超过 {1} 秒：30 分钟诊断窗口内样本不足，"
+                + "趋势规则（DIAG-MEM-LEAK / DIAG-TPS-PERSIST）会长期跳过；建议回到 60 秒");
 
         Messages.registerModule(en, zh);
     }

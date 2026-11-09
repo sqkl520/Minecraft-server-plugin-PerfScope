@@ -210,12 +210,8 @@ public class DailySummaryService {
         timerHandle = SchedulerAdapter.runGlobalTimer(plugin, this::checkCycle, 100L, 1200L);
         if (!timerHandle.isActive()) {
             // f-s01-err-02：与 AlertService.start 同构——noop = 任务没装上，不得再打印"已启用"
-            //（否则每日摘要静默永不送达）。文案内联：AlertMessages 不在本次写权限内。
-            boolean zh = Messages.LOCALE_ZH.equals(Messages.activeLocale());
-            plugin.getLogger().severe(Messages.get("alert.log.prefix") + (zh
-                ? "每日摘要未能启动（调度不可用，摘要不会发送；/perfscope reload 可重试）"
-                : "Daily summary did not start (scheduler unavailable; no summaries will be sent; "
-                    + "/perfscope reload to retry)"));
+            //（否则每日摘要静默永不送达）。v1.3.0 -14：文案改走键表。
+            plugin.getLogger().severe(logText("daily.log.start-failed-no-scheduler"));
             return;
         }
         plugin.getLogger().info(logText("daily.log.enabled",

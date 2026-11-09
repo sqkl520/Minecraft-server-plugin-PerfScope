@@ -19,6 +19,7 @@ package cn.perfscope.alert;
 
 import cn.perfscope.PerfScope;
 import cn.perfscope.config.ConfigManager;
+import cn.perfscope.util.Messages;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -73,6 +74,24 @@ public class WebhookNotifier {
     /** 9A-16：OneBot message 上限（各实现长度限制不一，保守取 1000） */
     private static final int MAX_ONEBOT_CHARS = 1000;
 
+    // ==================== SSRF 拒绝原因键（v1.3.0 -14） ====================
+    // 提成常量而不是在分支里写字符串字面量，是为了让"判定"与"文案表"的耦合点集中在一处：
+    // 改键名时只改这里，且 check-i18n 能把这些调用点当成"可解析的字面量"静态校验。
+    // 全部定义在 AlertMessages 的 alert.webhook.reject.* 键族。
+    private static final String KEY_REJECT_NO_SCHEME = "alert.webhook.reject.no-scheme";
+    private static final String KEY_REJECT_SCHEME_NOT_HTTP = "alert.webhook.reject.scheme-not-http";
+    private static final String KEY_REJECT_USERINFO = "alert.webhook.reject.userinfo";
+    private static final String KEY_REJECT_NO_HOST = "alert.webhook.reject.no-host";
+    private static final String KEY_REJECT_IP_UNPARSABLE = "alert.webhook.reject.ip-unparsable";
+    private static final String KEY_REJECT_HTTP_LOOPBACK_ONLY = "alert.webhook.reject.http-loopback-only";
+    private static final String KEY_REJECT_NON_NUMERIC_HOST = "alert.webhook.reject.non-numeric-host";
+    private static final String KEY_REJECT_HTTP_LOCALHOST_ONLY = "alert.webhook.reject.http-localhost-only";
+    private static final String KEY_REJECT_RESERVED_ZERO = "alert.webhook.reject.reserved-zero";
+    private static final String KEY_REJECT_RESERVED_ULA = "alert.webhook.reject.reserved-ula";
+    private static final String KEY_REJECT_RESERVED_ANY = "alert.webhook.reject.reserved-any";
+    private static final String KEY_REJECT_RESERVED_LINK_LOCAL = "alert.webhook.reject.reserved-link-local";
+    private static final String KEY_REJECT_RESERVED_SITE_LOCAL = "alert.webhook.reject.reserved-site-local";
+
     private final PerfScope plugin;
     private final ConfigManager configManager;
     private final Gson gson = new Gson();
@@ -114,7 +133,7 @@ public class WebhookNotifier {
         String u = cfg.alerts_webhookUrl == null ? "" : cfg.alerts_webhookUrl.trim();
         String t = cfg.alerts_webhookType == null ? "discord" : cfg.alerts_webhookType.trim();
         if (u.isEmpty()) {
-            plugin.getLogger().warning("[告警] webhook 已启用但 url 为空，推送保持关闭");
+            plugin.getLogger().warning(logText("alert.log.webhook-no-url"));
             ready = false;
             return;
         }
@@ -124,15 +143,15 @@ public class WebhookNotifier {
         try {
             uri = URI.create(u);
         } catch (IllegalArgumentException e) {
-            plugin.getLogger().warning("[告警] webhook url 解析失败（malformed URL），推送保持关闭");
+            plugin.getLogger().warning(logText("alert.log.webhook-bad-url"));
             ready = false;
             return;
         }
-        String reject = rejectReason(uri);
-        if (reject != null) {
+        String rejectKey = rejectReasonKey(uri);
+        if (rejectKey != null) {
             // 只记 host（常量 "?" 表示不可用），不含 path/query/fragment（可能内嵌令牌）
-            plugin.getLogger().warning("[告警] webhook url 被拒绝（" + reject + "，host="
-                + safeHost(uri) + "），推送保持关闭");
+            plugin.getLogger().warning(logText("alert.log.webhook-url-rejected",
+                Messages.get(rejectKey), safeHost(uri)));
             ready = false;
             return;
         }
@@ -140,7 +159,17 @@ public class WebhookNotifier {
         this.type = "onebot".equals(t) ? "onebot" : "discord";
         this.ready = true;
         // 只记 host + type，不记完整 URL（安全要求）
-        plugin.getLogger().info("[告警] webhook 已启用（type=" + this.type + ", host=" + safeHost(uri) + "）");
+        plugin.getLogger().info(logText("alert.log.webhook-enabled", this.type, safeHost(uri)));
+    }
+
+    /**
+     * 取一条 webhook 文案并拼上控制台统一前缀。
+     *
+     * <p>前缀（{@code [告警] } / {@code [Alert] }）只由 {@code alert.log.prefix} 提供，
+     * 调用点不手写方括号——方括号是下游 grep 与 harness 断言的锚点，必须只有一处定义。</p>
+     */
+    private static String logText(String key, Object... args) {
+        return Messages.get("alert.log.prefix") + Messages.get(key, args);
     }
 
     /** webhook 是否就绪（enabled 且 url 合法）。调用方在 false 时零开销跳过。 */
@@ -173,7 +202,7 @@ public class WebhookNotifier {
             }
             body = gson.toJson(obj);
         } catch (Exception e) {
-            logFailure("序列化失败 (" + e.getClass().getSimpleName() + ")");
+            logFailure(Messages.get("alert.log.webhook-det-serialize", e.getClass().getSimpleName()));
             return;
         }
         try {
@@ -194,56 +223,67 @@ public class WebhookNotifier {
                     if (err != null) {
                         // 9A-16（漏洞 1）：只记异常类型。err.getMessage() 可能内嵌完整 URL/token
                         // （如 IllegalArgumentException: Illegal character in path at index N: https://...）
-                        logFailure("异步请求失败 (" + err.getClass().getSimpleName() + ")");
+                        logFailure(Messages.get("alert.log.webhook-det-request",
+                            err.getClass().getSimpleName()));
                     } else if (resp.statusCode() >= 300) {
-                        logFailure("HTTP " + resp.statusCode());
+                        logFailure(Messages.get("alert.log.webhook-det-http", resp.statusCode()));
                     }
                 });
         } catch (Exception e) {
             // URI.create / HttpRequest.newBuilder 等同步异常（配置已在 reload 校验，理论上罕见）
             // 9A-16（漏洞 1）：不拼 e.getMessage()，只记类型
-            logFailure("请求构建失败 (" + e.getClass().getSimpleName() + ")");
+            logFailure(Messages.get("alert.log.webhook-det-build", e.getClass().getSimpleName()));
         }
     }
 
     // ==================== 内部工具 ====================
 
     /**
-     * 9A-16（漏洞 2）：SSRF 目的地校验。通过返回 {@code null}，拒绝返回固定原因文本
-     * （原因文本为常量，绝不含 URL / token）。
+     * 9A-16（漏洞 2）：SSRF 目的地校验。通过返回 {@code null}，拒绝返回<b>原因键</b>
+     * （{@code alert.webhook.reject.*}，由调用方用 {@link Messages#get} 渲染）。
+     *
+     * <p><b>为什么返回键名而不是渲染后的文案</b>：本方法及其下游 {@link #classifyAddress(byte[])}
+     * 是纯函数——只吃 {@link URI} / {@code byte[]}，没有 {@code PerfScope}、不碰 logger、不读配置。
+     * 让它们返回已渲染的文案，等于把 {@link Messages} 的"当前语言快照"读进一个与插件生命周期
+     * 无关的判定函数里：reload 切语言后返回值会跟着变，同一个 URI 的判定结果因此不再是纯函数，
+     * 单元测试也无法在不初始化消息层的前提下断言拒绝逻辑。返回键名则保持"判定"与"展示"分离：
+     * 判定稳定可测，渲染时机由调用方（日志点）决定，天然跟随当前语言。
+     * 代价是调用点多一次 {@code Messages.get}——只发生在 reload 这一个非热路径上。</p>
      *
      * <p>策略：{@code https} 允许任意主机名；{@code http} 仅允许 loopback
      * （127.0.0.1 / ::1 / localhost / *.localhost，保证本地 OneBot 可用）；
      * 任何形式的 IP 字面量还要额外过 {@link #classifyAddress(byte[])} 的保留网段黑名单。</p>
+     *
+     * @return 拒绝原因的消息键；通过校验返回 {@code null}
      */
-    private static String rejectReason(URI uri) {
+    private static String rejectReasonKey(URI uri) {
         String scheme = uri.getScheme();
         if (scheme == null) {
-            return "缺少 scheme";
+            return KEY_REJECT_NO_SCHEME;
         }
         boolean isHttps = "https".equalsIgnoreCase(scheme);
         boolean isHttp = "http".equalsIgnoreCase(scheme);
         if (!isHttps && !isHttp) {
-            return "scheme 非 http(s)";
+            return KEY_REJECT_SCHEME_NOT_HTTP;
         }
         // 9A-16 顺手加固：URL 里内嵌 user:pass@ 凭据既无用（webhook 不用 Basic Auth），
         // 又会被 HttpClient 当 Authorization 发出去，直接拒绝
         if (uri.getRawUserInfo() != null) {
-            return "URL 含 userinfo 凭据";
+            return KEY_REJECT_USERINFO;
         }
         String host = uri.getHost();
         if (host == null) {
             // 例如 "http:///api/webhooks/123/token"（缺主机名）——不得放行
-            return "URL 缺少主机名（malformed URL）";
+            return KEY_REJECT_NO_HOST;
         }
         String h = normalizeHost(host);
         if (h.isEmpty()) {
-            return "URL 缺少主机名（malformed URL）";
+            return KEY_REJECT_NO_HOST;
         }
         if (isIpLiteral(h)) {
             byte[] ip = parseIpLiteral(h);
             if (ip == null) {
-                return "IP 字面量无法解析";
+                return KEY_REJECT_IP_UNPARSABLE;
             }
             String bad = classifyAddress(ip);
             if (bad != null) {
@@ -251,7 +291,7 @@ public class WebhookNotifier {
             }
             if (isHttp && !isLoopback(ip)) {
                 // 明文 http 去向非回环主机：既可能 SSRF，也会明文传出 token
-                return "http 仅允许回环地址（127.0.0.1 / ::1）";
+                return KEY_REJECT_HTTP_LOOPBACK_ONLY;
             }
             return null;
         }
@@ -260,10 +300,10 @@ public class WebhookNotifier {
         // 短写/整型/十六进制形式解析成真实 IP（实测 getByName 零延迟返回），若按普通主机名放行
         // 就能绕过上面的网段黑名单，故一律拒绝，只接受标准四段点分十进制。
         if (looksLikeNonStandardNumericHost(h)) {
-            return "主机名为非标准数字形式（疑似绕过 IP 校验）";
+            return KEY_REJECT_NON_NUMERIC_HOST;
         }
         if (isHttp && !isLocalhostName(h)) {
-            return "http 仅允许 localhost / *.localhost（防 SSRF）";
+            return KEY_REJECT_HTTP_LOCALHOST_ONLY;
         }
         return null;
     }
@@ -327,30 +367,34 @@ public class WebhookNotifier {
         return out;
     }
 
-    /** 保留/敏感网段判定；命中返回原因（常量文本），否则返回 {@code null}。 */
+    /**
+     * 保留/敏感网段判定；命中返回原因键（{@code alert.webhook.reject.*}），否则返回 {@code null}。
+     *
+     * <p>返回键名而非文案的理由同 {@link #rejectReasonKey(URI)}：纯函数、可测、渲染交给调用方。</p>
+     */
     private static String classifyAddress(byte[] ip) {
         // 0.0.0.0/8（isAnyLocalAddress 只覆盖 0.0.0.0 本身）
         if (ip.length == 4 && ip[0] == 0) {
-            return "目标是 0.0.0.0/8";
+            return KEY_REJECT_RESERVED_ZERO;
         }
         // IPv6 ULA fc00::/7
         if (ip.length == 16 && (ip[0] & 0xFE) == 0xFC) {
-            return "目标是 IPv6 ULA（fc00::/7）";
+            return KEY_REJECT_RESERVED_ULA;
         }
         InetAddress addr;
         try {
             addr = InetAddress.getByAddress(ip);
         } catch (UnknownHostException e) {
-            return "IP 字面量无法解析";
+            return KEY_REJECT_IP_UNPARSABLE;
         }
         if (addr.isAnyLocalAddress()) {
-            return "目标是任意地址（0.0.0.0 / ::）";
+            return KEY_REJECT_RESERVED_ANY;
         }
         if (addr.isLinkLocalAddress()) {
-            return "目标是 link-local 地址（169.254.0.0/16、fe80::/10）——云元数据端点高危";
+            return KEY_REJECT_RESERVED_LINK_LOCAL;
         }
         if (addr.isSiteLocalAddress()) {
-            return "目标是内网地址（10/8、172.16/12、192.168/16）";
+            return KEY_REJECT_RESERVED_SITE_LOCAL;
         }
         return null;
     }
@@ -422,6 +466,9 @@ public class WebhookNotifier {
     /**
      * 失败日志：60 秒限频（同出口统一限频，防持续故障刷屏）；消息只含错误类别，
      * 不含完整 URL（安全要求）。
+     *
+     * @param detail 已渲染的原因片段（来自 {@code alert.log.webhook-det-*}），本方法只负责套上
+     *               限频说明与控制台前缀，不再拼任何字面量
      */
     private void logFailure(String detail) {
         long now = System.currentTimeMillis();
@@ -434,7 +481,7 @@ public class WebhookNotifier {
         if (!lastFailureLogAtMs.compareAndSet(last, now)) {
             return;
         }
-        plugin.getLogger().warning("[告警] webhook 推送失败（同类 60 秒内不重复记）: " + detail);
+        plugin.getLogger().warning(logText("alert.log.webhook-push-failed", detail));
     }
 
     /** 提取已解析 URI 的 host 供日志（绝不出完整 URL；缺失返回 "?"）。 */
@@ -451,8 +498,8 @@ public class WebhookNotifier {
     void debugLog(String message, Throwable t) {
         if (configManager.get() != null && configManager.get().general_debug) {
             // 9A-16（漏洞 1）：不传 Throwable——堆栈首行就是带完整 URL 的异常 message
-            plugin.getLogger().log(Level.FINE, "[告警] webhook: " + message
-                + (t == null ? "" : " (" + t.getClass().getSimpleName() + ")"));
+            plugin.getLogger().log(Level.FINE, logText("alert.log.webhook-debug", message
+                + (t == null ? "" : " (" + t.getClass().getSimpleName() + ")")));
         }
     }
 }

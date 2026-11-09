@@ -145,9 +145,23 @@
             </plugin>
         </plugins>
         <resources>
+            <!-- 许可证/声明文件不参与过滤：它们是逐字文本，一旦被 Maven 的 ${...} 占位符
+                 替换机制扫过，任何形如 ${...} 的片段都可能被吃掉或报错。单独声明 filtering=false。 -->
             <resource>
                 <directory>src/main/resources</directory>
                 <filtering>true</filtering>
+                <excludes>
+                    <exclude>META-INF/LICENSE</exclude>
+                    <exclude>META-INF/NOTICE</exclude>
+                </excludes>
+            </resource>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>false</filtering>
+                <includes>
+                    <include>META-INF/LICENSE</include>
+                    <include>META-INF/NOTICE</include>
+                </includes>
             </resource>
         </resources>
     </build>

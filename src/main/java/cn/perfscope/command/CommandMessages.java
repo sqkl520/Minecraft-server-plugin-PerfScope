@@ -313,6 +313,17 @@ public final class CommandMessages {
         put(en, zh, "cmd.status.interval",
             "{0} ticks (~{1}ms) | stale threshold: {2}ms",
             "{0} tick（约 {1}ms） | 过期阈值: {2}ms");
+        // v1.3.0 -04：主线程采集耗时分布。采集是分级降频的，单值会误导——
+        // 恰好在"撞车拍"看到 66ms 会让人以为"每秒都是 66ms"。
+        put(en, zh, "cmd.status.collect-cost-label", "Collection cost: ", "采集耗时: ");
+        put(en, zh, "cmd.status.collect-cost-pending",
+            "warming up (no samples yet)", "预热中（暂无样本）");
+        put(en, zh, "cmd.status.collect-cost",
+            "p50 {0}ms / p95 {1}ms / max {2}ms ({3} samples, main thread)",
+            "p50 {0}ms / p95 {1}ms / max {2}ms（{3} 个样本，主线程）");
+        put(en, zh, "cmd.status.collect-cost-warn",
+            "{0} cycles exceeded {1}ms (1 tick) - the collector is eating into tick budget",
+            "有 {0} 个周期超过 {1}ms（1 tick）—— 采集器正在占用 tick 预算");
         put(en, zh, "cmd.status.jvm-label", "JVM sampling: ", "JVM 采集: ");
         put(en, zh, "cmd.status.jvm-never",
             "Never succeeded (no memory/CPU/GC data)", "从未成功（内存/CPU/GC 无数据）");
@@ -420,6 +431,17 @@ public final class CommandMessages {
         put(en, zh, "cmd.advice.spark-hint",
             "Use the spark profiler to pinpoint it: /spark profiler start → /spark profiler stop",
             "可使用 spark profiler 精确定位: /spark profiler start → /spark profiler stop");
+
+        // ==================== 实时监测启动失败（v1.3.0 -14） ====================
+        // 两种失败要分开报：调度不可用（可重试） vs 插件正在停用（重试无意义）。
+        // 旧实现把两者都报成"启动失败，详见控制台"，而关服分支根本没往控制台写任何东西，
+        // 用户按提示去查什么也查不到。分键之后，提示与真实原因一一对应。
+        put(en, zh, "cmd.monitor.failed-shutdown",
+            "The plugin is shutting down; live monitoring is unavailable",
+            "插件正在停用，实时监测已不可用");
+        put(en, zh, "cmd.monitor.failed-no-scheduler",
+            "Live monitoring failed to start (scheduler unavailable; see the console)",
+            "实时监测启动失败（调度不可用，详见控制台）");
 
         // ==================== ActionBar ====================
         // 复合行按"前缀 + 单位"拆分：单位名（TPS/MSPT/玩家/…）来自 cmd.unit.*，

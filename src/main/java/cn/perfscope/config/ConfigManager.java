@@ -993,11 +993,9 @@ public class ConfigManager {
         double cpuMinThreshold = Math.min(cfg.cpu_processWarningThreshold, cfg.cpu_systemWarningThreshold);
         if (cfg.cpu_hysteresisMargin >= cpuMinThreshold) {
             double fallback = Math.min(CPU_HYSTERESIS_DEFAULT, cpuMinThreshold / 2.0d);
-            String detail = "=" + cfg.cpu_hysteresisMargin + " | threshold(process/system)="
-                + cfg.cpu_processWarningThreshold + "/" + cfg.cpu_systemWarningThreshold + " | reverted=" + fallback;
-            boolean zh = Messages.LOCALE_ZH.equals(Messages.activeLocale());
-            plugin.getLogger().warning("[PerfScope] cpu.hysteresis_margin" + detail
-                + (zh ? " —— 不小于 CPU 告警阈值，退出线会非正且告警永不解除" : " —— not below the CPU threshold; exit line non-positive, alert would never clear"));
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.hysteresis-not-below",
+                cfg.cpu_hysteresisMargin, cfg.cpu_processWarningThreshold,
+                cfg.cpu_systemWarningThreshold, fallback));
             cfg.cpu_hysteresisMargin = fallback;
         }
 
@@ -1053,14 +1051,9 @@ public class ConfigManager {
         // 因 MIN_SAMPLES 永久 skip。不改值（超过 180 是用户可理解的低内存取舍，强制回退属 breaking），
         // 只在配置侧把后果说出来，让"校验通过"不再等于"静默失效"。
         if (cfg.history_sampleIntervalSeconds > HISTORY_INTERVAL_TREND_SAFE_SEC) {
-            boolean zh = Messages.LOCALE_ZH.equals(Messages.activeLocale());
-            plugin.getLogger().warning("[PerfScope] history.sample-interval-seconds="
-                + cfg.history_sampleIntervalSeconds
-                + (zh ? " 超过 " + HISTORY_INTERVAL_TREND_SAFE_SEC + " 秒：30 分钟诊断窗口内样本不足，"
-                      + "趋势规则（DIAG-MEM-LEAK / DIAG-TPS-PERSIST）会长期跳过；建议回到 60 秒"
-                      : " exceeds " + HISTORY_INTERVAL_TREND_SAFE_SEC + "s: too few samples per 30-minute "
-                      + "diagnostic window, so trend rules (DIAG-MEM-LEAK / DIAG-TPS-PERSIST) will keep being "
-                      + "skipped; 60 seconds is recommended"));
+            plugin.getLogger().warning("[PerfScope] " + Messages.get(
+                "config.check.history-interval-trend-unsafe",
+                cfg.history_sampleIntervalSeconds, HISTORY_INTERVAL_TREND_SAFE_SEC));
         }
 
         // === history.retention-days：非法值（≤0）钳到 7 并 warning（Wave 8B，与全仓 clamp 口径一致） ===

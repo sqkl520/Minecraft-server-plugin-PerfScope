@@ -51,7 +51,13 @@ public final class Evaluation {
     /** 命中：返回结论。 */
     public static Evaluation of(Diagnosis diagnosis) {
         if (diagnosis == null) {
-            throw new IllegalArgumentException("hit 不可为 null；未命中请用 clean()");
+            // v1.3.0 -14：开发者断言，用英文。
+            // 理由：这条消息只在"规则实现写错"时出现，且 DiagnosticEngine 的 catch 会把它经
+            // e.getMessage() 拼进 diag.log.rule-failed-detail —— 也就是说它**能进控制台**。
+            // 断言面向的是插件开发者（与堆栈同层），不是服主，因此不进口令化键表：
+            // 让服主去 messages.yml 里改一句"规则实现有 bug"的文案没有意义，反而多一个可漂移的键。
+            throw new IllegalArgumentException(
+                "diagnosis must not be null; use clean() to report a clean result");
         }
         return new Evaluation(diagnosis, false, null);
     }

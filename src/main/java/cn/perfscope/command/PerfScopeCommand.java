@@ -1373,6 +1373,24 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         sender.sendMessage(goldLabel(Messages.get("cmd.status.interval-label"))
             .append(Component.text(Messages.get("cmd.status.interval", intervalTicks,
                 intervalTicks * 50L, collector.staleThresholdMs()), WHITE)));
+
+        // v1.3.0 -04：主线程采集耗时分布。只报单值会误导——采集是分级降频的，
+        // 恰好在撞车拍看到 66ms 会让人以为"每秒 66ms"。p50 反映常态，p95/max 反映撞车拍。
+        long[] dur = collector.collectDurationStats();
+        long warnMs = cn.perfscope.metrics.MetricsCollector.collectDurationWarnMs();
+        if (dur[3] <= 0L) {
+            sender.sendMessage(goldLabel(Messages.get("cmd.status.collect-cost-label"))
+                .append(Component.text(Messages.get("cmd.status.collect-cost-pending"), YELLOW)));
+        } else {
+            boolean overBudget = dur[4] > 0L;
+            sender.sendMessage(goldLabel(Messages.get("cmd.status.collect-cost-label"))
+                .append(Component.text(Messages.get("cmd.status.collect-cost",
+                    dur[0], dur[1], dur[2], dur[3]), overBudget ? RED : GREEN)));
+            if (overBudget) {
+                sender.sendMessage(Component.text(Messages.get("cmd.status.collect-cost-warn",
+                    dur[4], warnMs), RED));
+            }
+        }
         // 9A-20 顺手项：JVM 异步节拍是独立任务——主线程节拍正常 ≠ 内存/CPU/GC 是新的。
         // 异步任务被静默取消时主线程仍每秒产快照，只有这一行能看出来。
         long jvmAt = collector.jvmSnapshotTimestamp();
@@ -1654,14 +1672,10 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 // f-s02-conc-03：noop 与"关服中"要分开报——前者是调度不可用（可重试），
                 // 后者是插件正在停用（重试无意义）。旧实现把两种都报成"启动失败，详见控制台"，
                 // 而关服分支根本没往控制台写任何东西，用户按提示去查什么也查不到喵。
-                boolean shutdown = monitorShutdown;
-                boolean zh = Messages.LOCALE_ZH.equals(Messages.activeLocale());
-                player.sendMessage(Component.text(shutdown
-                    ? (zh ? "插件正在停用，实时监测已不可用"
-                          : "The plugin is shutting down; live monitoring is unavailable")
-                    : (zh ? "实时监测启动失败（调度不可用，详见控制台）"
-                          : "Live monitoring failed to start (scheduler unavailable; see the console)"),
-                    RED));
+                // v1.3.0 -14：文案改走键表（此前是内联中英三元表达式，绕过消息层）。
+                player.sendMessage(Component.text(Messages.get(monitorShutdown
+                    ? "cmd.monitor.failed-shutdown"
+                    : "cmd.monitor.failed-no-scheduler"), RED));
             }
         }
     }

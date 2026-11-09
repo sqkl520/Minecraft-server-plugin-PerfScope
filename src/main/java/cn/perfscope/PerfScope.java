@@ -428,8 +428,7 @@ public final class PerfScope extends JavaPlugin {
         // 负值→单次后静默死亡）/Folia 校正为每 tick，行为分叉，故强制下限 1 分钟
         int configuredMinutes = configManager.get().report_autoExportInterval;
         if (configuredMinutes <= 0) {
-            getLogger().warning("[PerfScope] report.auto_export_interval=" + configuredMinutes
-                + " 非法（需 ≥1 分钟），已按 1 分钟处理");
+            getLogger().warning(Messages.get("core.log.auto-report-interval-clamped", configuredMinutes));
         }
         long intervalMinutes = Math.max(1, configuredMinutes);
         long intervalTicks = intervalMinutes * 60L * 20L;

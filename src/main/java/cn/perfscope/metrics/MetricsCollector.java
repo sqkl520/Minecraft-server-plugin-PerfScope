@@ -180,6 +180,27 @@ public class MetricsCollector {
     /** 模块级日志限频间隔：5 分钟（与 HistoryFileStore 300s 同款）。 */
     private static final long MODULE_FAILURE_LOG_INTERVAL_MS = 300_000L;
 
+    // ==================== v1.3.0 -04：采集自监测 ====================
+
+    /**
+     * 主线程单次采集的告警阈值（毫秒）。
+     *
+     * <p>取 1 tick = 50ms：这是"插件在这一拍上占满了整个 tick 预算"的界。
+     * 超过它，服务器这一 tick 就没给游戏逻辑留时间——玩家的体感是卡一下。</p>
+     */
+    private static final long COLLECT_DURATION_WARN_MS = 50L;
+
+    /** 耗时样本窗口大小（保留最近 N 个周期，用于算 p50/p95/max 分布）。 */
+    private static final int COLLECT_DURATION_WINDOW = 300;
+
+    /** 最近 N 个采集周期的耗时（毫秒）；仅主线程 collectSync 写，读方见 {@link #collectDurationStats()}。 */
+    private final java.util.concurrent.ConcurrentLinkedDeque<Long> collectDurations =
+        new java.util.concurrent.ConcurrentLinkedDeque<>();
+
+    /** 窗口内超过 {@link #COLLECT_DURATION_WARN_MS} 的周期数（累计，不随窗口滑动）。 */
+    private final java.util.concurrent.atomic.AtomicLong overBudgetCycles =
+        new java.util.concurrent.atomic.AtomicLong();
+
     /** 模块健康状态（按模块名索引；主线程 collectSync 与异步 collectJvmAsync 共用 Map，但各自模块互不重叠，MODULE_SERVER 例外）。 */
     private final Map<String, ModuleHealth> moduleHealth = new ConcurrentHashMap<>();
 
@@ -412,6 +433,10 @@ public class MetricsCollector {
      * 只有走到方法末尾才算"本轮成功"——lastCollectAtMs 在 {@link #onCycleSuccess()} 里更新。
      */
     private void collectSyncOnce(long taskGen) {
+        // 主线程采集耗时（v1.3.0 -04）：本方法整体跑在 global region / 服务端主线程上，
+        // 耗时直接等于"插件这一拍占用了服务器多久"。此前 isStale() 只看"多久没采"、
+        // 不看"采一次花多久"，采集器自己拖慢主线程时它永远显示正常。
+        final long startNanos = System.nanoTime();
         tickCounter++;
         MetricsSnapshot snap = new MetricsSnapshot();
         ConfigManager.ConfigData cfg = configManager.get();
@@ -447,6 +472,18 @@ public class MetricsCollector {
         // 这里把缓存容器本身在刷新时复制（见 refreshXxxCache），此处再把快照侧集合固化为不可变副本，
         // 保证任何消费方误改都只影响自己那一份（MetricsSnapshot 类本身不改）。
         freezeCollections(snap);
+
+        // v1.3.0 -04：把本周期耗时写进快照。放在 freezeCollections 之后、入 history 之前——
+        // 这样历史样本也带着耗时，趋势面板与报告能回溯"什么时候开始变慢"。
+        long durationMs = (System.nanoTime() - startNanos) / 1_000_000L;
+        snap.collectDurationMs = durationMs;
+        collectDurations.addLast(durationMs);
+        while (collectDurations.size() > COLLECT_DURATION_WINDOW) {
+            collectDurations.pollFirst();
+        }
+        if (durationMs > COLLECT_DURATION_WARN_MS) {
+            overBudgetCycles.incrementAndGet();
+        }
 
         history.addLast(snap);
         while (history.size() > MAX_HISTORY) {
@@ -1860,6 +1897,44 @@ public class MetricsCollector {
         long intervalTicks = cfg == null ? 20L : Math.max(1L, cfg.general_updateInterval);
         long intervalMs = intervalTicks * 50L;   // 1 tick = 50ms
         return Math.max(3000L, intervalMs * 3L);
+    }
+
+    /**
+     * 采集耗时的分布统计（v1.3.0 -04）。
+     *
+     * <p>返回最近 {@link #COLLECT_DURATION_WINDOW} 个周期的 p50 / p95 / max / 样本数，
+     * 以及累计超 1 tick 的周期数。样式与 {@code /perfscope trend} 的百分位口径一致。</p>
+     *
+     * <p><b>为什么是分布而不是单值</b>：采集是分级降频的（实体/区块每 5 周期、方块实体每 7/10、
+     * 热点每 30），四个重模块的最小公倍数决定了会周期性"撞车"。只看某一周期的值，恰好在撞车拍
+     * 看到 66ms 就会误判为"每秒 66ms"。p50 反映常态、p95 与 max 反映撞车拍、超阈值计数反映
+     * 问题频率——三者缺一都会误导。</p>
+     *
+     * @return 长度 5 的数组：{p50, p95, max, samples, overBudget}；无样本时前四项为 -1/0
+     */
+    public long[] collectDurationStats() {
+        Long[] arr = collectDurations.toArray(new Long[0]);
+        long over = overBudgetCycles.get();
+        if (arr.length == 0) {
+            return new long[]{-1L, -1L, -1L, 0L, over};
+        }
+        long[] vals = new long[arr.length];
+        for (int i = 0; i < arr.length; i++) {
+            vals[i] = arr[i] == null ? 0L : arr[i];
+        }
+        java.util.Arrays.sort(vals);
+        return new long[]{
+            vals[(int) Math.floor((vals.length - 1) * 0.50)],
+            vals[(int) Math.floor((vals.length - 1) * 0.95)],
+            vals[vals.length - 1],
+            vals.length,
+            over,
+        };
+    }
+
+    /** 单次采集的告警阈值（毫秒）。供命令层渲染"超阈 N 次 / 阈值 X ms"。 */
+    public static long collectDurationWarnMs() {
+        return COLLECT_DURATION_WARN_MS;
     }
 
     /** 距今多久没有新数据（毫秒）：基准是最后一次成功采集；从未成功过则取 start()/reload 时刻。 */

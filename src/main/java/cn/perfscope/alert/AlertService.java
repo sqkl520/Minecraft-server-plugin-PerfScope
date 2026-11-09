@@ -443,12 +443,9 @@ public class AlertService {
         timerHandle = SchedulerAdapter.runGlobalTimer(plugin, this::checkCycle, interval, interval);
         if (!timerHandle.isActive()) {
             // f-s01-err-01：noop 句柄 = 任务没装上（原因已由 SchedulerAdapter 记 severe）。照旧打印
-            // "已启动"就是告警永久停摆而控制台显示正常。文案内联：AlertMessages 不在本次写权限内。
-            boolean zh = Messages.LOCALE_ZH.equals(Messages.activeLocale());
-            plugin.getLogger().severe(Messages.get("alert.log.prefix") + (zh
-                ? "告警服务未能启动（调度不可用，告警不会触发；/perfscope reload 可重试）"
-                : "Alert service did not start (scheduler unavailable; no alerts will fire; "
-                    + "/perfscope reload to retry)"));
+            // "已启动"就是告警永久停摆而控制台显示正常。
+            // v1.3.0 -14：文案改走键表（此前是内联中英三元表达式，绕过消息层）。
+            plugin.getLogger().severe(logText("alert.log.start-failed-no-scheduler"));
             return;
         }
         Options o = options;

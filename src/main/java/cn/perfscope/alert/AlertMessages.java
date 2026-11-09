@@ -177,6 +177,12 @@ public final class AlertMessages {
         put(en, zh, "alert.log.disabled",
             "Alert service is not enabled (alerts.enabled=false)",
             "告警服务未启用（alerts.enabled=false）");
+        // v1.3.0 -14：noop 句柄（调度没装上）时的失败日志。此前是调用点内联的中英三元表达式，
+        // 与"其余文案一律走键表"的口径不一致——同一份控制台输出因此有两套实现路径。
+        put(en, zh, "alert.log.start-failed-no-scheduler",
+            "Alert service did not start (scheduler unavailable; no alerts will fire; "
+                + "/perfscope reload to retry)",
+            "告警服务未能启动（调度不可用，告警不会触发；/perfscope reload 可重试）");
         put(en, zh, "alert.log.started",
             "Alert service started (interval: {0} ticks, cooldown: {1}s, debounce: {2} cycles, "
                 + "recovery debounce: {3} cycles, digest: {4})",
@@ -259,6 +265,82 @@ public final class AlertMessages {
         put(en, zh, "alert.log.console-failed", "console push failed: {0}", "控制台推送失败: {0}");
         put(en, zh, "alert.log.game-failed", "in-game push failed: {0}", "游戏内推送失败: {0}");
         put(en, zh, "alert.log.webhook-failed", "failed to queue the webhook message: {0}", "webhook 入队失败: {0}");
+
+        // ==================== Webhook 出口（v1.3.0 -14：控制台零中文） ====================
+        // 前缀一律由调用点拼 alert.log.prefix，本组键只承载内容——[告警] / [Alert] 不在这里重复。
+        //
+        // 一条硬约束：{0}/{1} 只放 host 或 type，**绝不放完整 URL**。webhook URL 通常内嵌
+        // Discord token / OneBot access_token，进日志即等于泄露（9A-16 漏洞 1）。
+        // 因此本组文案里所有 "url" 都只作名词出现，不回显值。
+        put(en, zh, "alert.log.webhook-no-url",
+            "webhook is enabled but the url is empty; push stays disabled",
+            "webhook 已启用但 url 为空，推送保持关闭");
+        put(en, zh, "alert.log.webhook-bad-url",
+            "failed to parse the webhook url (malformed URL); push stays disabled",
+            "webhook url 解析失败（malformed URL），推送保持关闭");
+        // {0} = 拒绝原因（由 alert.webhook.reject.* 渲染后传入），{1} = host
+        put(en, zh, "alert.log.webhook-url-rejected",
+            "webhook url rejected ({0}; host={1}); push stays disabled",
+            "webhook url 被拒绝（{0}，host={1}），推送保持关闭");
+        put(en, zh, "alert.log.webhook-enabled",
+            "webhook enabled (type={0}, host={1})",
+            "webhook 已启用（type={0}, host={1}）");
+        // 失败限频提示：说明"同类 60 秒内只出现一次"是限频而非故障消失，
+        // 否则运维会以为推送恢复了。{0} = 失败原因（下面 alert.log.webhook-det-* 之一）
+        put(en, zh, "alert.log.webhook-push-failed",
+            "webhook push failed (the same category is logged at most once per 60s): {0}",
+            "webhook 推送失败（同类 60 秒内不重复记）: {0}");
+        // 失败原因片段：被上面 {0} 消费，故只写"哪一步坏了"，不再重复 "webhook" 主语。
+        // {0} 一律是异常**类名**或 HTTP 状态码——绝不拼 e.getMessage()（JDK 会回显完整 URL）。
+        put(en, zh, "alert.log.webhook-det-serialize",
+            "serialization failed ({0})", "序列化失败 ({0})");
+        put(en, zh, "alert.log.webhook-det-request",
+            "async request failed ({0})", "异步请求失败 ({0})");
+        put(en, zh, "alert.log.webhook-det-http",
+            "HTTP {0}", "HTTP {0}");
+        put(en, zh, "alert.log.webhook-det-build",
+            "request build failed ({0})", "请求构建失败 ({0})");
+        // general.debug 门控的排查行：{0} = 已渲染的原因（同样不含 URL）。
+        put(en, zh, "alert.log.webhook-debug", "webhook: {0}", "webhook: {0}");
+
+        // ---------- SSRF 目的地校验的拒绝原因 ----------
+        // 键族与上面的日志键分开：它们是**原因**而不是完整句子，被 alert.log.webhook-url-rejected
+        // 的 {0} 消费，也会原样进入 debug 日志。分开的收益是原因可以被单独复用/断言，
+        // 且换语言时不需要改调用点的句子结构。
+        put(en, zh, "alert.webhook.reject.no-scheme",
+            "missing scheme", "缺少 scheme");
+        put(en, zh, "alert.webhook.reject.scheme-not-http",
+            "scheme is not http(s)", "scheme 非 http(s)");
+        put(en, zh, "alert.webhook.reject.userinfo",
+            "the URL carries userinfo credentials", "URL 含 userinfo 凭据");
+        put(en, zh, "alert.webhook.reject.no-host",
+            "the URL has no hostname (malformed URL)", "URL 缺少主机名（malformed URL）");
+        put(en, zh, "alert.webhook.reject.ip-unparsable",
+            "the IP literal cannot be parsed", "IP 字面量无法解析");
+        put(en, zh, "alert.webhook.reject.http-loopback-only",
+            "http is only allowed for loopback addresses (127.0.0.1 / ::1)",
+            "http 仅允许回环地址（127.0.0.1 / ::1）");
+        put(en, zh, "alert.webhook.reject.non-numeric-host",
+            "the hostname is a non-standard numeric form (possible IP-check bypass)",
+            "主机名为非标准数字形式（疑似绕过 IP 校验）");
+        put(en, zh, "alert.webhook.reject.http-localhost-only",
+            "http is only allowed for localhost / *.localhost (SSRF protection)",
+            "http 仅允许 localhost / *.localhost（防 SSRF）");
+        put(en, zh, "alert.webhook.reject.reserved-zero",
+            "the target is in 0.0.0.0/8", "目标是 0.0.0.0/8");
+        put(en, zh, "alert.webhook.reject.reserved-ula",
+            "the target is an IPv6 ULA address (fc00::/7)", "目标是 IPv6 ULA（fc00::/7）");
+        put(en, zh, "alert.webhook.reject.reserved-any",
+            "the target is the unspecified address (0.0.0.0 / ::)",
+            "目标是任意地址（0.0.0.0 / ::）");
+        // 两个保留网段的原因里刻意保留"云元数据端点高危"——它不是解释，是给运维的处置提示
+        put(en, zh, "alert.webhook.reject.reserved-link-local",
+            "the target is a link-local address (169.254.0.0/16, fe80::/10) - "
+                + "cloud metadata endpoints are a high risk here",
+            "目标是 link-local 地址（169.254.0.0/16、fe80::/10）——云元数据端点高危");
+        put(en, zh, "alert.webhook.reject.reserved-site-local",
+            "the target is a private-network address (10/8, 172.16/12, 192.168/16)",
+            "目标是内网地址（10/8、172.16/12、192.168/16）");
 
         // ==================== 状态文件（alerts.state，仅注释行；列格式不变） ====================
         put(en, zh, "alert.state.header",
@@ -343,6 +425,11 @@ public final class AlertMessages {
         put(en, zh, "daily.log.enabled",
             "Daily summary enabled (time: {0}, timezone: {1}{2})",
             "每日摘要已启用 (时刻: {0}, 时区: {1}{2})");
+        // v1.3.0 -14：noop 句柄时的失败日志（与 alert.log.start-failed-no-scheduler 同构）
+        put(en, zh, "daily.log.start-failed-no-scheduler",
+            "Daily summary did not start (scheduler unavailable; no summaries will be sent; "
+                + "/perfscope reload to retry)",
+            "每日摘要未能启动（调度不可用，摘要不会发送；/perfscope reload 可重试）");
         put(en, zh, "daily.zone.system", " (system timezone)", "（系统时区）");
         put(en, zh, "daily.zone.differs",
             " (the system timezone is {0}; the two differ)",

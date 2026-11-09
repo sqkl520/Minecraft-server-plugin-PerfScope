@@ -3,7 +3,7 @@ version: ${project.version}
 main: cn.perfscope.PerfScope
 api-version: "1.20"
 folia-supported: true
-description: High-performance server performance monitor for Paper-family servers (Paper/Purpur/Pufferfish/Folia)
+description: Server performance monitor for Paper-family servers (Paper / Purpur / Folia; Folia has limited metrics, Pufferfish untested)
 author: sqkl520
 website: https://github.com/sqkl520/Minecraft-server-plugin-PerfScope
 
