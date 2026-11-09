@@ -184,18 +184,20 @@ final class HotspotShardSweep {
     /**
      * 每隔多少个采集周期推进一片。
      *
-     * <p>取 {@code ceil(sampleEveryCycles / shards)}：一轮的总周期数 {@code shardCount × stepInterval}
-     * 因此<b>恒 ≥</b> {@code sampleEveryCycles}。这一点是关键的安全性质——改造后热点扫描的
-     * <b>总工作量只会持平或变少，绝不会变多</b>；分片换来的只是「把同一份活摊开」，不是「多干活」。
-     * （配置把分片数写得比周期数还大时，一轮会拉长到 {@code shardCount} 个周期，即刷得更慢、
-     * 总开销更低，不会失控。）</p>
+     * <p>取 {@code ceil(sampleEveryCycles / shardCount)}，其中 {@code shardCount} 必须是
+     * <b>本轮实际</b>分片数（{@link #shardCount()}），不是配置里的期望值——区块数少于配置分片数时
+     * 实际切片会更少，用配置值算步长会让一轮变短、单位时间的工作量反而上升。</p>
+     *
+     * <p>由此得到的安全性质：一轮的总周期数 {@code shardCount × stepInterval} <b>恒 ≥</b>
+     * {@code sampleEveryCycles}。即改造后热点扫描的单位时间工作量<b>只会持平或变少</b>，
+     * 分片换来的只是「把同一份活摊开」，不是「多干活」。</p>
      *
      * @param sampleEveryCycles 配置的整轮周期（≤ 0 视为 1）
-     * @param shards            配置的分片数（≤ 0 视为 1）
+     * @param shardCount        本轮实际分片数（≤ 0 视为 1）
      */
-    static int stepInterval(int sampleEveryCycles, int shards) {
+    static int stepInterval(int sampleEveryCycles, int shardCount) {
         int every = Math.max(1, sampleEveryCycles);
-        int n = Math.max(1, Math.min(shards, MAX_SHARDS));
+        int n = Math.max(1, Math.min(shardCount, MAX_SHARDS));
         return Math.max(1, (every + n - 1) / n);
     }
 

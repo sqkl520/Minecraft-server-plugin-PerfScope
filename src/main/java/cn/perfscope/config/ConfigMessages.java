@@ -199,6 +199,13 @@ public final class ConfigMessages {
         put(en, zh, "config.check.hotspots-chunk-threshold",
             "Configuration check: {0}={1} is invalid (must be at least 1); using {2} instead",
             "配置校验：{0}={1} 非法（需 ≥1），已按 {2} 处理");
+        // v1.4：分区扫描分片数越界。与相邻钳制键的句式对齐（{0}=键名 {1}=原值 {2}..{3}=区间 {4}=采用值），
+        // 但必须说清"越界"而不只是"非法"——大于 100 也是越界，不是非法值。
+        put(en, zh, "config.check.hotspots-shards",
+            "Configuration check: {0}={1} is out of range (must be {2}-{3}); using {4} instead "
+                + "(hotspot scan shards: 1 disables sharding, larger values cost less per cycle but refresh more slowly)",
+            "配置校验：{0}={1} 超出范围（需 {2}-{3}），已按 {4} 处理"
+                + "（热点扫描分片数：1 = 关闭分片；值越大每周期越省，但同一批区块刷新越慢）");
         put(en, zh, "config.check.language",
             "Configuration check: {0}={1} is not a supported language (supported: {2}); reverted to {3}",
             "配置校验：{0}={1} 不是受支持的语言（支持: {2}），已回退 {3}");

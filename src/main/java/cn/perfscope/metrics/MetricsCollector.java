@@ -152,6 +152,34 @@ public class MetricsCollector {
     private boolean hotspotsCacheUnavailable = false;
     private List<ChunkHotspot> cachedHotspots = new ArrayList<>();
 
+    // ==================== v1.4 热点分区增量扫描（仅主线程 collectSync 访问，无需同步） ====================
+    // 进行中的一轮扫描（null = 当前没有进行中的轮次，下一拍会重新快照区块集合）。
+    // 一轮 = 把「各世界已加载区块」摊成一个线性序列后按 scan-shards 切片，跨多个采集周期扫完。
+    private HotspotShardSweep hotspotSweep = null;
+
+    // 本轮区块序列的快照（世界下标 / chunkX / chunkZ 三个平行数组，长度 = 本轮区块总数）。
+    // 只存坐标不存 Chunk 句柄：Chunk 持有底层 LevelChunk 引用，攥着一轮（30 个周期）会阻止
+    // 期间被卸载的区块释放内存；坐标快照完全不干预加载状态，扫描时逐项 isChunkLoaded 校验。
+    private static final World[] NO_WORLDS = new World[0];
+    private static final int[] EMPTY_COORDS = new int[0];
+    private World[] sweepWorlds = NO_WORLDS;
+    private int[] sweepChunkX = EMPTY_COORDS;
+    private int[] sweepChunkZ = EMPTY_COORDS;
+    private int[] sweepChunkWorld = EMPTY_COORDS;
+
+    /** 已完成的完整轮次数（0 = 首轮尚未扫完，此时允许按分片发布部分结果，见 tickHotspots 注释）。 */
+    private long hotspotCompletedRounds = 0L;
+
+    /**
+     * 下一次推进分片扫描的 {@code tickCounter} 值。
+     *
+     * <p>用显式排程而不是 {@code tickCounter % step}：步长依赖本轮<b>实际</b>分片数，
+     * 而实际分片数受区块总数影响（区块数少于配置分片数时按区块数切），取模无法表达。
+     * 详见 {@link #collectHotspotsThrottled}。</p>
+     */
+    private long hotspotNextScanTick = 0L;
+
+
     // ==================== P0-1 JVM 异步缓存（volatile 跨线程发布） ====================
     // collectJvmAsync（异步线程）整体构造后发布，collectSync（主线程）读取填入快照；
     // 启动初期为 null 表示异步尚未产出，相关模块按 unavailable 处理，避免 0 值误导或 NPE
@@ -225,9 +253,8 @@ public class MetricsCollector {
     private final java.util.concurrent.ConcurrentLinkedDeque<Long> collectDurations =
         new java.util.concurrent.ConcurrentLinkedDeque<>();
 
-    /** 窗口内超过 {@link #COLLECT_DURATION_WARN_MS} 的周期数（累计，不随窗口滑动）。 */
-    private final java.util.concurrent.atomic.AtomicLong overBudgetCycles =
-        new java.util.concurrent.atomic.AtomicLong();
+    /** {@link #collectDurations} 的当前长度（O(1)，避免 ConcurrentLinkedDeque.size() 的 O(n) 遍历）。 */
+    private int collectDurationsCount = 0;
 
     /** 模块健康状态（按模块名索引；主线程 collectSync 与异步 collectJvmAsync 共用 Map，但各自模块互不重叠，MODULE_SERVER 例外）。 */
     private final Map<String, ModuleHealth> moduleHealth = new ConcurrentHashMap<>();
@@ -347,6 +374,10 @@ public class MetricsCollector {
         chunksCacheReady = false;
         teCacheReady = false;
         hotspotsCacheReady = false;
+        // v1.4：进行中的分片轮次随 reload 丢弃——这轮是用旧配置（旧分片数）切出来的，
+        // 跨配置代继续推进会得到"前半轮旧切法 + 后半轮新切法"的混合覆盖，不如从头开始。
+        dropoutHotspotSweep();
+        hotspotCompletedRounds = 0L;
         // 9B-3：平台跳过标记随缓存一起重置（配置可能在 reload 后变了，但"这是不是 Folia"不会变，
         // 所以 foliaSkipLogged 刻意不重置——见 logFoliaAggregationSkipOnce 注释）
         entitiesCachePlatformSkipped = false;
@@ -506,13 +537,15 @@ public class MetricsCollector {
         long durationMs = (System.nanoTime() - startNanos) / 1_000_000L;
         snap.collectDurationMs = durationMs;
         collectDurations.addLast(durationMs);
-        while (collectDurations.size() > COLLECT_DURATION_WINDOW) {
+        // O(1) 计数判断：ConcurrentLinkedDeque.size() 是 O(n) 遍历，1Hz 下每秒白跑 300 个节点。
+        // 与 history 环同一处教训，这次一并按计数器维护。
+        collectDurationsCount++;
+        while (collectDurationsCount > COLLECT_DURATION_WINDOW) {
             collectDurations.pollFirst();
+            collectDurationsCount--;
         }
-        if (durationMs > COLLECT_DURATION_WARN_MS) {
-            overBudgetCycles.incrementAndGet();
-        }
-
+        // 超阈次数不在这里累加——collectDurationStats() 从窗口内现算，
+        // 保证分子分母同源（见该方法的注释）。
         history.addLast(snap);
         historyCount++;
         // O(1) 计数判断；ConcurrentLinkedDeque.size() 是 O(n) 遍历，原实现每秒白跑 300 个节点。
@@ -1025,48 +1058,205 @@ public class MetricsCollector {
     // ==================== Wave 8C 热点区块（Top5 实体密度，含玩家） ====================
 
     /**
-     * 热点区块节流入口（Wave 8C）：每 {@code hotspots.sample-every-cycles} 个采集周期全遍历一次，
-     * 其余周期复用缓存（与实体/区块缓存同范式）。全遍历成本高（全部世界全部已加载区块），
-     * 节流是主线程保护的第一要务。
+     * 热点区块节流入口（Wave 8C / v1.4 分区增量）。
+     *
+     * <p><b>v1.4 改了什么</b>：旧实现每 {@code sample-every-cycles} 个周期做一次
+     * 「全部世界 × 全部已加载区块」的全遍历，实测 11,048 区块 / 13,466 实体时单次 <b>40.5 ms</b>、
+     * 50,000 实体时 <b>106 ms</b>（超 2 tick）。现在把同一份活切成 {@code hotspots.scan-shards}
+     * 片，按「一轮总周期 ≥ {@code sample-every-cycles}」的节奏推进，单拍成本降到约 1/N。</p>
+     *
+     * <p><b>节拍由 {@link #hotspotNextScanTick} 显式排定，不用 {@code tickCounter % step}</b>：
+     * 推进间隔必须按<b>本轮实际分片数</b>算（区块少的服上实际分片数会小于配置值，见
+     * {@link HotspotShardSweep}），而 {@code %} 取模只能用固定步长。用固定步长会出现
+     * 「区块数 4、配置分片 10」这种组合：实际只切 4 片却每 3 周期扫一片，一轮 12 周期扫完
+     * 4 个区块——单位时间的工作量反而比旧的「每 30 周期扫 4 个」高 2.5 倍。显式排程没有这个坑。</p>
      */
     private void collectHotspotsThrottled(MetricsSnapshot snap, ConfigManager.ConfigData cfg, long taskGen) {
-        long every = Math.max(1, cfg.hotspots_sampleEveryCycles);
-        if (!hotspotsCacheReady || tickCounter % every == 0) {
-            refreshHotspotsCache(cfg, taskGen);
+        // 首周期立即开扫：改前是"启动后等 30 秒才有热点数据"，若改后还要先空转一轮会更糟
+        if (!hotspotsCacheReady || tickCounter >= hotspotNextScanTick) {
+            tickHotspots(cfg, taskGen);
         }
         applyHotspotsCache(snap);
     }
 
-    /** 刷新热点缓存（9A-10 #1：入口 + 发布点各校验一次代际）。 */
-    private void refreshHotspotsCache(ConfigManager.ConfigData cfg, long taskGen) {
+    /**
+     * 推进热点扫描一拍：维护「当前轮」的状态，扫一片，必要时发布，并排定下一拍。
+     *
+     * <p><b>发布策略（这是分区方案唯一改变用户可见行为的地方）</b>：</p>
+     * <ul>
+     *   <li><b>首轮</b>（还没有任何完整结果）：每扫完一片就发布当前候选的 Top-N。原因是空态文案
+     *       「暂无热点数据」如果持续满一轮（默认 30 秒），用户会以为模块坏了。而且候选集是
+     *       <b>累积</b>的，部分结果的 Top-N 只会随扫描推进而"变得更好"，不会把已经找到的热点丢掉
+     *       ——所以首轮的部分发布是单调收敛的，不是随机跳变。</li>
+     *   <li><b>首轮之后</b>：只在整轮扫完时整体替换。中间周期复用上一轮的<b>完整</b>结果。
+     *       若每拍都发布部分结果，Top-5 会在轮次边界剧烈跳变（轮次开头只扫了 1/N 区块，
+     *       Top-5 会突然退化成"第一片里最好的 5 个"，然后随着扫描推进再换回来）——
+     *       用户看到的是一份来回抖的榜单，比"晚 30 秒更新"糟得多。</li>
+     * </ul>
+     */
+    private void tickHotspots(ConfigManager.ConfigData cfg, long taskGen) {
         if (!isCurrentGeneration(taskGen)) {
             return;
         }
-        boolean unavailable;
-        List<ChunkHotspot> hotspots = List.of();
-        boolean disabled = false;
-        boolean platformSkipped = false;   // 9B-3
-
         if (!cfg.hotspots_enabled) {
-            unavailable = true;
-            disabled = true;   // 9A-20 #3
-        } else if (foliaAggregationUnsafe(MetricsSnapshot.MODULE_HOTSPOTS)) {
+            dropoutHotspotSweep();
+            hotspotNextScanTick = tickCounter + Math.max(1, cfg.hotspots_sampleEveryCycles);
+            publishHotspots(true, true, false, List.of(), taskGen);
+            return;
+        }
+        if (foliaAggregationUnsafe(MetricsSnapshot.MODULE_HOTSPOTS)) {
             // 9B-3：热点扫描是"全部世界 × 全部已加载区块 × chunk.getEntities()"的最重活，
             // 在 Folia 上既不可信（区块实体按 region 归属）又最容易踩跨 region IllegalStateException
-            // （每 30 周期一次全遍历，踩中概率最高）→ 整块跳过。
+            // → 整块跳过。v1.4 的分片只在 Paper 路径内生效，此分支保持不变。
             logFoliaAggregationSkipOnce();
-            unavailable = true;
-            disabled = true;
-            platformSkipped = true;
-        } else {
-            MetricsSnapshot tmp = new MetricsSnapshot();
-            safeCollect(MetricsSnapshot.MODULE_HOTSPOTS, tmp, () -> collectHotspots(tmp));
-            unavailable = tmp.unavailable.contains(MetricsSnapshot.MODULE_HOTSPOTS);
-            if (!unavailable) {
-                hotspots = List.copyOf(tmp.topEntityChunks);   // 9A-10 #3
-            }
+            dropoutHotspotSweep();
+            hotspotNextScanTick = tickCounter + Math.max(1, cfg.hotspots_sampleEveryCycles);
+            publishHotspots(true, true, true, List.of(), taskGen);
+            return;
         }
 
+        if (hotspotSweep == null) {
+            beginHotspotSweep(cfg);
+        }
+        // 排下一拍：用本轮**实际**分片数算间隔，保证「分片数 × 间隔 ≥ sample-every-cycles」，
+        // 即改造后单位时间扫过的区块数恒不超过改造前（见方法注释里的 4 区块反例）。
+        int step = HotspotShardSweep.stepInterval(
+            cfg.hotspots_sampleEveryCycles, hotspotSweep.shardCount());
+        hotspotNextScanTick = tickCounter + step;
+
+        MetricsSnapshot tmp = new MetricsSnapshot();
+        // 用单元素数组把结果带出 lambda（局部变量在 lambda 内必须 effectively final）
+        List<ChunkHotspot>[] scanned = new List[1];
+        safeCollect(MetricsSnapshot.MODULE_HOTSPOTS, tmp, () -> scanned[0] = scanHotspotShard());
+        if (tmp.unavailable.contains(MetricsSnapshot.MODULE_HOTSPOTS)) {
+            // 本片失败：整轮作废（否则候选集里会留下一份"扫了一半且不知道还缺什么"的数据，
+            // 下一轮发布出残缺的 Top-5），下个周期从头重开。本周期如实标不可用。
+            dropoutHotspotSweep();
+            publishHotspots(true, false, false, cachedHotspots, taskGen);
+            return;
+        }
+
+        List<ChunkHotspot> complete = hotspotSweep.accept(scanned[0]);
+        if (complete != null) {
+            hotspotSweep = null;   // 本轮结束：下一拍自动开新的一轮（滚动扫描）
+            hotspotCompletedRounds++;
+            publishHotspots(false, false, false, complete, taskGen);
+        } else if (hotspotCompletedRounds == 0) {
+            publishHotspots(false, false, false, hotspotSweep.partialTopN(), taskGen);
+        }
+        // 其余情况（首轮已完成、本轮未完成）：不动缓存 → applyHotspotsCache 复用上一轮完整结果
+    }
+
+    /** 丢弃进行中的一轮（禁用 / 平台跳过 / 本片异常时调用），下一拍重新开始。 */
+    private void dropoutHotspotSweep() {
+        hotspotSweep = null;
+        sweepWorlds = NO_WORLDS;
+        sweepChunkX = EMPTY_COORDS;
+        sweepChunkZ = EMPTY_COORDS;
+        sweepChunkWorld = EMPTY_COORDS;
+    }
+
+    /**
+     * 开始新的一轮：把「各世界的已加载区块」快照成一个线性序列。
+     *
+     * <p><b>为什么快照坐标而不是快照 {@code Chunk} 对象</b>：{@code Chunk} 句柄持有底层
+     * {@code LevelChunk} 引用，跨 30 个周期都攥着就等于把这一轮开始时加载过的区块全部钉住内存，
+     * 期间被卸载的区块也释放不掉。快照成三个 {@code int[]}（世界下标 / chunkX / chunkZ，
+     * 11k 区块共约 132 KB）则完全不阻止卸载，扫描时逐项 {@code isChunkLoaded} 校验即可。</p>
+     *
+     * <p>一轮之内可见的区块集合是固定的：期间新加载的区块不会中途挤进来，下一轮才会纳入。
+     * 这是刻意的一致性问题——边扫边加入会让"总区块数"在轮次中途变化，分片区间就不再对齐。</p>
+     */
+    private void beginHotspotSweep(ConfigManager.ConfigData cfg) {
+        World[] worlds = Bukkit.getWorlds().toArray(new World[0]);
+        Chunk[][] perWorld = new Chunk[worlds.length][];
+        int total = 0;
+        for (int i = 0; i < worlds.length; i++) {
+            perWorld[i] = worlds[i].getLoadedChunks();
+            total += perWorld[i].length;
+        }
+        sweepWorlds = worlds;
+        sweepChunkX = new int[total];
+        sweepChunkZ = new int[total];
+        sweepChunkWorld = new int[total];
+        int k = 0;
+        for (int w = 0; w < worlds.length; w++) {
+            for (Chunk chunk : perWorld[w]) {
+                sweepChunkX[k] = chunk.getX();
+                sweepChunkZ[k] = chunk.getZ();
+                sweepChunkWorld[k] = w;
+                k++;
+            }
+        }
+        hotspotSweep = new HotspotShardSweep(total, cfg.hotspots_scanShards);
+    }
+
+    /**
+     * 扫描当前分片，返回本片发现的非空区块。
+     *
+     * <p>统计口径与改造前<b>逐字一致</b>（V1.2 §5）：{@code entityCount = chunk.getEntities().length}
+     * （含玩家），{@code dominantType} 取类型众数、平票取字典序最小者，空区块不进候选。
+     * 唯一的实现变化是 {@code byType} 这个 HashMap 在分片内<b>复用</b>（每区块 clear 一次），
+     * 不再为每个区块新建一个——旧实现的 3.6 MB 分配里有相当一部分来自这里。</p>
+     */
+    private List<ChunkHotspot> scanHotspotShard() {
+        int from = hotspotSweep.rangeStart();
+        int to = hotspotSweep.rangeEnd();
+        List<ChunkHotspot> out = new ArrayList<>(Math.max(0, to - from) / 2 + 1);
+        Map<String, Integer> byType = new HashMap<>();
+        for (int i = from; i < to; i++) {
+            World world = sweepWorlds[sweepChunkWorld[i]];
+            int cx = sweepChunkX[i];
+            int cz = sweepChunkZ[i];
+            // 分片之间区块可能被卸载（一轮横跨多个采集周期）：跳过即可，不是错误。
+            // 用 isChunkLoaded(x,z) 而不是 getChunkAt(x,z) 兜底——后者会把区块重新加载进来，
+            // 一个"扫描"动作绝不该改世界的加载状态。
+            if (!world.isChunkLoaded(cx, cz)) {
+                continue;
+            }
+            Chunk chunk = world.getChunkAt(cx, cz);
+            Entity[] entities = chunk.getEntities(); // 单次取得，长度即计数（含玩家）
+            if (entities.length == 0) {
+                continue; // 空区块不进候选
+            }
+            // 主导类型：单遍统计（实体数通常很小，HashMap 开销可忽略）
+            byType.clear();
+            int nullSkipped = 0;
+            for (Entity entity : entities) {
+                // 9B-4：chunk.getEntities() 在实体被并发移除时可能返回含 null 元素的数组
+                // （Paper 的 ChunkEntitySlices 非完全快照）。直接 getName() 会 NPE，
+                // 一次 NPE 会让本次热点采集整块失败（safeCollect 标 unavailable）。
+                if (entity == null) {
+                    nullSkipped++;
+                    continue;
+                }
+                byType.merge(entity.getType().name(), 1, Integer::sum);
+            }
+            ConfigManager.ConfigData hsCfg = configManager.get();
+            if (nullSkipped > 0 && hsCfg != null && hsCfg.general_debug) {
+                // 计数口径说明：实体数仍是数组长度（含已被移除的槽位），此处只保证不崩
+                plugin.getLogger().fine(Messages.get("run.collector.hotspot-null-slots",
+                    nullSkipped, world.getName()));
+            }
+            String dominant = "UNKNOWN";
+            int dominantCount = 0;
+            for (Map.Entry<String, Integer> typeEntry : byType.entrySet()) {
+                // 众数；平票取字典序最小（compareTo < 0 才替换，保证确定性）
+                if (typeEntry.getValue() > dominantCount
+                    || (typeEntry.getValue() == dominantCount && typeEntry.getKey().compareTo(dominant) < 0)) {
+                    dominant = typeEntry.getKey();
+                    dominantCount = typeEntry.getValue();
+                }
+            }
+            out.add(new ChunkHotspot(world.getName(), cx, cz,
+                entities.length, dominant, dominantCount));
+        }
+        return out;
+    }
+
+    /** 发布热点缓存（同一次调用只写一份状态，避免"标记已更新但值没换"的半更新）。 */
+    private void publishHotspots(boolean unavailable, boolean disabled, boolean platformSkipped,
+                                 List<ChunkHotspot> hotspots, long taskGen) {
         if (!isCurrentGeneration(taskGen)) {
             return;
         }
@@ -1091,66 +1281,6 @@ public class MetricsCollector {
         snap.topEntityChunks = new ArrayList<>(cachedHotspots);   // 9A-10 #3：每次快照独立副本
     }
 
-    /**
-     * 全量热点扫描（Wave 8C，运行在采样周期的主线程）：遍历全部世界全部已加载区块，
-     * 统计每区块实体数（{@code chunk.getEntities()}，含玩家——V1.2 §5 口径）并取全服 Top5；
-     * 同时统计各区块主导实体类型（众数，平票取字典序最小者保证输出稳定）。
-     *
-     * <p>性能：单次全遍历的区块数与实体数成正比；由调用方按 sample-every-cycles 节流
-     * （默认 30 周期 ≈ 30 秒），异常由 safeCollect 兜底（模块级 unavailable）。</p>
-     */
-    private void collectHotspots(MetricsSnapshot snap) {
-        List<ChunkHotspot> all = new ArrayList<>();
-        for (World world : Bukkit.getWorlds()) {
-            String worldName = world.getName();
-            for (Chunk chunk : world.getLoadedChunks()) {
-                Entity[] entities = chunk.getEntities(); // 单次取得，长度即计数（含玩家）
-                if (entities.length == 0) {
-                    continue; // 空区块不进候选
-                }
-                // 主导类型：单遍统计（实体数通常很小，HashMap 开销可忽略）
-                Map<String, Integer> byType = new HashMap<>();
-                int nullSkipped = 0;
-                for (Entity entity : entities) {
-                    // 9B-4：chunk.getEntities() 在实体被并发移除时可能返回含 null 元素的数组
-                    // （Paper 的 ChunkEntitySlices 非完全快照）。直接 getName() 会 NPE，
-                    // 一次 NPE 会让本次热点采集整块失败（safeCollect 标 unavailable）。
-                    if (entity == null) {
-                        nullSkipped++;
-                        continue;
-                    }
-                    byType.merge(entity.getType().name(), 1, Integer::sum);
-                }
-                ConfigManager.ConfigData hsCfg = configManager.get();
-                if (nullSkipped > 0 && hsCfg != null && hsCfg.general_debug) {
-                    // 计数口径说明：实体数仍是数组长度（含已被移除的槽位），此处只保证不崩
-                    plugin.getLogger().fine(Messages.get("run.collector.hotspot-null-slots",
-                        nullSkipped, worldName));
-                }
-                String dominant = "UNKNOWN";
-                int dominantCount = 0;
-                for (Map.Entry<String, Integer> typeEntry : byType.entrySet()) {
-                    // 众数；平票取字典序最小（compareTo < 0 才替换，保证确定性）
-                    if (typeEntry.getValue() > dominantCount
-                        || (typeEntry.getValue() == dominantCount && typeEntry.getKey().compareTo(dominant) < 0)) {
-                        dominant = typeEntry.getKey();
-                        dominantCount = typeEntry.getValue();
-                    }
-                }
-                all.add(new ChunkHotspot(worldName, chunk.getX(), chunk.getZ(),
-                    entities.length, dominant, dominantCount));
-            }
-        }
-        // 全服 Top5（降序）；平票按世界名+坐标排序保证输出稳定
-        all.sort(Comparator.comparingInt(ChunkHotspot::entityCount).reversed()
-            .thenComparing(ChunkHotspot::world)
-            .thenComparingInt(ChunkHotspot::chunkX)
-            .thenComparingInt(ChunkHotspot::chunkZ));
-        if (all.size() > 5) {
-            all = new ArrayList<>(all.subList(0, 5));
-        }
-        snap.topEntityChunks = all;
-    }
 
     // ==================== P0-1 JVM 异步缓存读取 ====================
 
@@ -1945,15 +2075,24 @@ public class MetricsCollector {
      */
     public long[] collectDurationStats() {
         Long[] arr = collectDurations.toArray(new Long[0]);
-        long over = overBudgetCycles.get();
         if (arr.length == 0) {
-            return new long[]{-1L, -1L, -1L, 0L, over};
+            return new long[]{-1L, -1L, -1L, 0L, 0L};
         }
         long[] vals = new long[arr.length];
+        int over = 0;
         for (int i = 0; i < arr.length; i++) {
             vals[i] = arr[i] == null ? 0L : arr[i];
+            if (vals[i] > COLLECT_DURATION_WARN_MS) {
+                over++;
+            }
         }
         java.util.Arrays.sort(vals);
+        // 超阈计数**从窗口内现算**，不用累计计数器。
+        //
+        // 此前用的是 overBudgetCycles（只增不减的累计值），但 dur[3] 是窗口样本数（上限 300）。
+        // 两者分母不同：跑 1 小时后累计 50 次超阈 ÷ 300 窗口样本 = 16.7%，而实际可能是
+        // 早期的几次、当前早已不再发生。用户看到的是"越跑越糟"的假象。
+        // 现算保证分子分母同源，比例永远反映最近 COLLECT_DURATION_WINDOW 个周期。
         return new long[]{
             vals[(int) Math.floor((vals.length - 1) * 0.50)],
             vals[(int) Math.floor((vals.length - 1) * 0.95)],
