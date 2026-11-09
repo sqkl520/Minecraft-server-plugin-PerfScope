@@ -69,9 +69,24 @@ public class MetricsCollector {
 
     // P0-1 分级降频倍数：重模块每 N 个采集周期才真正遍历一次世界，其余周期复用上次缓存值，
     // 以降低主线程遍历实体/区块/方块实体的开销（常量，不进 config）
+    // 分级降频周期（v1.3.0 -03，降级版）。
+    //
+    // 为什么只动 TE_SAMPLE_EVERY：四个重模块的周期原本是 5/5/10/30，最小公倍数 30，
+    // 意味着每 30 个采集周期四者同时触发一次（"撞车拍"）。实测空载测试服上撞车拍的
+    // max 达 127ms（1.3-2.5 tick）。
+    //
+    // 改成 5/5/7/30 后最小公倍数是 210 个周期（默认 interval 下约 3.5 分钟），
+    // 撞车频率降到原来的 1/7，而方块实体的刷新频率从每 10 周期提到每 7 周期（+43%）——
+    // 这是单项最轻的模块，代价可以接受。
+    //
+    // 不做的事（红队 B / 红队 05 独立验证）：不引入相位偏移，不改 CHUNK 5→6。
+    // 打散方案的前提是"每个模块单干都小于 1 tick"，而 50k 实体档下 hotspots 单模块
+    // 就要 106ms、entities 51.7ms —— 在那种规模下打散只是把一个大卡顿拆成几个小卡顿，
+    // 超预算周期数反而从 600 涨到 683（+13.8%）。真正的解法是热点扫描分区（v1.4），
+    // 不是调周期。详见 docs/06-tasks/research/redteam-05-v130.md §4.2。
     private static final long ENTITY_SAMPLE_EVERY = 5;   // 实体：每 5 个采集周期遍历一次
     private static final long CHUNK_SAMPLE_EVERY = 5;    // 区块：每 5 个采集周期遍历一次
-    private static final long TE_SAMPLE_EVERY = 10;      // 方块实体：每 10 个采集周期遍历一次
+    private static final long TE_SAMPLE_EVERY = 7;       // 方块实体：每 7 个周期（与 5/30 互质，拉长撞车周期）
 
     // 历史数据
     private final Deque<MetricsSnapshot> history = new ConcurrentLinkedDeque<>();

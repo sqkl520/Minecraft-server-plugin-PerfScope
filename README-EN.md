@@ -295,12 +295,44 @@ A performance plugin that cannot explain its own overhead is self-contradictory.
 **Known main-thread cost points** (listed honestly, not quantified):
 
 - Every 5 cycles (5 s by default) one `world.getLoadedChunks()` per world, which allocates a chunk array. The *only* main-thread hit in the table above lands exactly there (`CraftWorld.getLoadedChunks ← collectChunks`). The allocation cost at 2000–5000 chunks is **not measured**;
-- Every 30 cycles (30 s by default) a **full sweep of every loaded chunk** (hotspot location): `getEntities()` plus a per-chunk `HashMap` for the dominant type. This is the heaviest main-thread section in the plugin and is **not measured**;
+- Every 30 cycles (30 s by default) a **full sweep of every loaded chunk** (hotspot location): `getEntities()` plus a per-chunk `HashMap` for the dominant type. This is the heaviest main-thread section in the plugin. **Now measured**, see below;
 - Once per collection cycle, a `history.size()` cap check (`ConcurrentLinkedDeque.size()` is an O(n) traversal; the ring holds 300 entries, so ~300 node visits per second);
 - Every 60 s, one non-blocking history enqueue plus the in-memory ring-buffer write on the main thread.
 - **Alert-state persistence**: this used to be synchronous main-thread I/O (`AlertService.persistState()` writing a temp file with `Files.write` and then an atomic `Files.move`). In the 2026-10-25 busy-load sample, **5 of 22** main-thread hits landed on that path (`checkCycle ← persistState ← Files.write`), second only to the chunk/entity sweeps. **That path now hands the write to a single-writer daemon thread** (the state snapshot is still taken on the main thread; only open/write/move moved to the `perfscope-alert-state-writer` daemon thread). The 5-of-22 figure comes from the build *before* that change; the new build has not been re-measured.
 
 **Not yet measured**: high-load P99 (5000 entities / 2000 chunks), GC count and pause impact, heap retention, startup cost, A/B comparison.
+
+### Collection-cost self-monitoring (v1.3.0+, checkable in-game)
+
+`/perfscope status` now reports the **main-thread collection cost distribution** directly, so you no longer need an external profiler to see it:
+
+```
+Collection cost: p50 0ms / p95 54ms / max 127ms (66 samples, main thread)
+5 cycles exceeded 50ms (1 tick) - the collector is eating into tick budget
+```
+
+**How to read the three numbers** (this matters):
+
+- **`p50`** is the normal case. On an idle test server it is **0ms** — most collection cycles do almost nothing (the cycles that reuse caches).
+- **`p95` / `max`** are the "collision ticks". Collection is throttled in tiers: entities and chunks every 5 cycles, tile entities every 7, hotspots every 30. The least common multiple of those periods decides when several of them fire together. The measured idle-server `max` is **127ms (~2.5 ticks)**, landing on the cycle where all four coincide.
+- **The over-budget count** is the frequency. 5 of 66 samples exceeded 50ms, i.e. about **7.6% of cycles** go past one tick.
+
+**Reading only one of them misleads**: catching `max` on a collision tick makes it look like "127ms every second"; reading only `p50` makes it look like "no overhead at all". The three together are the only interpretable picture.
+
+**Known scale boundaries** (honest, not a guarantee):
+
+| Scale | Measured collision tick | Note |
+|---|---|---|
+| ~300 chunks / idle | max **127ms** | measured on this machine's test server |
+| ~11,000 chunks / 13,000 entities | ~**66.6ms** (p95 75.5ms) | earlier baseline, four modules colliding |
+| ~50,000 entities | ~**106-119ms** | hotspot sweep alone dominates |
+
+v1.3.0 moved the tile-entity period from 10 to **7**, taking the least common multiple of the four periods from **30 cycles** to **210 cycles** (~3.5 minutes by default), cutting the collision frequency to 1/7.
+
+**What was deliberately not done**: no phase offsets, no chunk-period change. Scattering only helps if *each module on its own* stays under one tick — at 50k entities the hotspot sweep alone takes 106ms, so at that scale scattering merely splits one big stall into several smaller ones. The real fix is **hotspot scan partitioning** (v1.4 scope).
+
+Reproduce: `tools/perfscope-jfr-overhead.ps1` (counts per sample block, requests both `jdk.ExecutionSample` and `jdk.NativeMethodSample`, isolates Server thread with a Wilson interval, prints the tested jar's version and SHA-256).
+The full executable minimal measurement set (three load tiers, A/B baseline, artifact format) is in `docs/07-guides/PERF-BASELINE-PLAN.md`.
 
 Reproduce: `tools/perfscope-jfr-overhead.ps1` (counts per sample block, requests both `jdk.ExecutionSample` and `jdk.NativeMethodSample`, reports Server thread separately with a Wilson interval, and prints the tested jar's version and SHA-256).
 The full, executable minimal measurement set (three load tiers, A/B baseline, artifact format) is in `docs/07-guides/PERF-BASELINE-PLAN.md`.
