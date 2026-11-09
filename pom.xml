@@ -22,6 +22,20 @@
     <properties>
         <java.version>17</java.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <!--
+          可复现构建（v1.3.0 门禁前置）：固定 jar 内所有条目的时间戳。
+
+          不加这一项时，两次 `mvn clean package`（源码零改动）产出的 jar sha256 不同 ——
+          zip 条目会带上各自的当前时间。实测：43abdb54… vs a80088b3…，`diff -r` 证明内容
+          完全一致，差异只在 zip 元数据。
+
+          后果：「归档 JAR 与源码一致」这条验收永远达不成，而它正是 1.2.1 事故
+          （发布包落后 6 个提交、缺整个 i18n）的唯一防线。
+
+          具体时间由 CI 传 `-Dproject.build.outputTimestamp=<ISO8601>`（见 .github/workflows/build.yml），
+          本地不加参数时用下面这个固定值 —— 目的是「确定性」而不是「真实构建时间」。
+        -->
+        <project.build.outputTimestamp>2026-01-01T00:00:00Z</project.build.outputTimestamp>
     </properties>
 
     <repositories>
@@ -54,6 +68,20 @@
             <artifactId>bstats-bukkit</artifactId>
             <version>3.2.1</version>
         </dependency>
+        <!--
+          src/test 的回归测试网（2026-11-04）：此前仓库零单测，五波次审计的所有验证
+          都靠仓库外临时探针，改一行代码后无法重跑。JUnit 5.10.1 + surefire 3.2.5
+          是本环境离线仓库里已齐备的一组（CI 会走 Maven Central，版本无特殊要求）。
+
+          这些 jar 全部是 test scope，不进 shade 产物：maven-shade-plugin 的
+          artifactSet 只纳入 org.bstats 两个 artifact，且测试依赖不参与 runtime。
+        -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.10.1</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -68,6 +96,14 @@
                          防止在 JDK21 上误链接 java.version(17) 以上的 API -->
                     <release>${java.version}</release>
                 </configuration>
+            </plugin>
+            <!-- 2026-11-04：补上显式 surefire 版本。CI 的 build.yml 检测到 src/test 后
+                 会跑 `mvn test`；不钉版本时 Maven 用默认的 2.12.4，它不认识 JUnit 5，
+                 会把测试文件全部静默跳过（红队 B4 同款「看起来绿其实没跑」形状）。 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.2.5</version>
             </plugin>
             <!-- maven-shade-plugin（回归仅服务 bStats 匿名统计，最小化配置）：
                  落点用独立前缀 cn.perfscope.shaded.bstats —— 绝不使用 cn.perfscope.lib.*，

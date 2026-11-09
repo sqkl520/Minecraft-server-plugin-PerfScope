@@ -1,87 +1,356 @@
+# PerfScope CI -- the cloud half of the release gate.
+#
+# Design constraint that shapes everything below: the testharness needs a real Paper server,
+# RCON, a mineflayer bot agent and two fixed ports. None of that exists on a GitHub runner,
+# and pretending otherwise produces a green check that proves nothing (the exact failure mode
+# research/07-release-quality.md §3.2 calls out). So this workflow is split by what it can
+# actually prove:
+#
+#   CLOUD (here)                                   LOCAL (tools/local-gate.ps1 -L2 -WithServer)
+#   ------------------------------------------     --------------------------------------------
+#   compiles on JDK 17 and JDK 21                  testharness scenarios (189 assertions)
+#   jar fingerprint (shade/relocate incidents)     soak / ActionBar / bot / LuckPerms paths
+#   i18n key + placeholder parity                   cross-restart persistence
+#   scenario assertion validity (static)            compatibility matrix (Purpur/Folia/1.20.4)
+#   config backward compatibility (static)          archive-vs-source comparison (needs versions/)
+#   unit tests (once src/test exists)               real-server manual acceptance
+#   artifact upload / GitHub Release on tag
+#
+# What each job is for:
+#   build        -- one jar, two JDKs. The pom targets release 17; building on 21 as well catches
+#                   "works on my machine" toolchain assumptions and the `release` flag drifting.
+#   static-gate  -- the three node checkers. They need no Maven, so they run in parallel and fail
+#                   in ~5 seconds. i18n and scenario validity are exactly the classes of bug that
+#                   used to reach users (672 keys vs 14; assertions that can never match).
+#   fingerprint  -- the four jar assertions that already existed (v1.0.0 shade incident). Kept
+#                   as-is: they are high quality and target real incidents.
+#   release      -- tag-only. Re-builds, re-verifies, then creates the Release with the jar.
+#                   Deliberately does NOT push anything to Spigot/Hangar/Modrinth: those stay
+#                   manual (they need per-platform credentials and a human description).
+#
+# Signing/attribution: no AI attribution lines anywhere (project rule #8).
+
 name: build
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Keep in sync with pom.xml <java.version>. The matrix below proves both bounds.
+  JAVA_RELEASE: '17'
+
 jobs:
+  # ------------------------------------------------------------------------------------
+  # J1: compile + package on the minimum and the current LTS.
+  # ------------------------------------------------------------------------------------
   build:
-    name: Build + artifact gate
+    name: build (JDK ${{ matrix.java }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        java: ['17', '21']
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # git describe / commit distance are part of provenance
+
+      - name: Set up JDK ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+
+      - name: mvn clean package
+        run: mvn -B -ntp clean package -DskipTests
+
+      # Tests are a separate job so a red test does not hide a green build (and vice versa).
+      # Until src/test exists this is a no-op; it becomes real the moment the first test lands.
+      - name: Check whether unit tests exist
+        id: tests
+        run: |
+          # bash runs with `globstar` OFF by default, so 'src/test/java/**/*.java' does NOT
+          # recurse -- the pattern expands to nothing and mvn test was never reached, even
+          # after tests were written. Red team B4 caught this; `shopt -s globstar` is the fix.
+          # Verified locally: `bash -c 'shopt globstar'` -> "globstar off".
+          shopt -s globstar nullglob
+          found=(src/test/java/**/*.java)
+          if [ ${#found[@]} -gt 0 ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::found ${#found[@]} unit test file(s)"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo '::notice::src/test is empty -- unit tests skipped (see docs/06-tasks/research/v130-06-gates.md)'
+          fi
+
+      - name: mvn test
+        if: steps.tests.outputs.present == 'true'
+        run: mvn -B -ntp test
+
+      - name: Record build facts (provenance)
+        run: |
+          set -euo pipefail
+          JAR=$(ls target/PerfScope-*.jar | grep -v original | head -n 1)
+          echo "jar=$JAR" >> "$GITHUB_ENV"
+          echo "sha256=$(sha256sum "$JAR" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+          echo "### build provenance" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| field | value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| jar | \`$(basename "$JAR")\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| bytes | $(stat -c%s "$JAR") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| sha256 | \`$(sha256sum "$JAR" | cut -d' ' -f1)\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| commit | \`${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| ref | \`${{ github.ref_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| JDK | ${{ matrix.java }} |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: perfscope-jar-jdk${{ matrix.java }}
+          path: target/PerfScope-*.jar
+          if-no-files-found: error
+          retention-days: 30
+
+  # ------------------------------------------------------------------------------------
+  # J2: static gates -- no Maven, no server, no artifacts needed. Fast and independent.
+  # ------------------------------------------------------------------------------------
+  static-gate:
+    name: static gate (i18n / scenarios / config)
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17 (temurin, Maven cache)
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Gate scripts now live IN this repository (tools/), so `actions/checkout` suffices.
+      # They used to sit in the parent directory of the git repo, which a GitHub runner can
+      # never see -- the gate would have errored out on every run. Red team D/B caught this;
+      # the scripts were copied into the repo (tools/*.mjs, tools/lib/, tools/local-gate.ps1).
+      - name: Verify gate scripts are present
+        id: tools
+        run: |
+          set -euo pipefail
+          for f in check-i18n.mjs check-config-compat.mjs check-scenarios.mjs lib/java-strings.mjs; do
+            if [ ! -f "tools/$f" ]; then
+              echo "::error::tools/$f missing -- gate scripts must be committed to the repo for CI to run them"
+              exit 1
+            fi
+          done
+          echo "dir=$(pwd)/tools" >> "$GITHUB_OUTPUT"
+
+      - name: i18n key + placeholder parity
+        run: node "${{ steps.tools.outputs.dir }}/check-i18n.mjs" --repo "$GITHUB_WORKSPACE" --strict
+
+      - name: Config backward compatibility
+        run: node "${{ steps.tools.outputs.dir }}/check-config-compat.mjs" --repo "$GITHUB_WORKSPACE"
+
+      - name: Scenario assertion validity
+        id: scenarios
+        run: |
+          set -euo pipefail
+          # The scenario files live in the test harness, which is NOT in this repo (it needs a
+          # real Minecraft server to run and is kept out of version control). Assertion validity
+          # is a *static* check though -- it only needs the JSON -- so whenever a harness is
+          # checked out beside this repo we run it, and when it is not we say so LOUDLY.
+          #
+          # Honest split (v130-06-gates.md): CI covers ~55% of the gate surface. The other 45%
+          # (real assertions, soak, ActionBar bot, compat matrix, archive comparison) is
+          # structurally local-only. A green CI badge does NOT mean "tests passed".
+          HARNESS="$GITHUB_WORKSPACE/../testharness"
+          if [ ! -d "$HARNESS/tests/scenarios" ]; then
+            echo '::warning::testharness not checked out beside this repo -- STATIC ASSERTION CHECK DID NOT RUN.'
+            echo '::warning::This is not a pass. Run it locally: node tools/check-scenarios.mjs --harness <testharness>'
+            echo 'skipped=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          node "${{ steps.tools.outputs.dir }}/check-scenarios.mjs" --repo "$GITHUB_WORKSPACE" --harness "$HARNESS"
+
+  # ------------------------------------------------------------------------------------
+  # J3: jar fingerprint -- the v1.0.0 shade/relocate incident gate (pre-existing, unchanged).
+  # ------------------------------------------------------------------------------------
+  fingerprint:
+    name: jar fingerprint
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download jar
+        uses: actions/download-artifact@v4
+        with:
+          name: perfscope-jar-jdk17
+          path: dist
+
+      - name: Locate jar
+        run: |
+          set -euo pipefail
+          JAR=$(ls dist/PerfScope-*.jar | grep -v original | head -n 1)
+          echo "JAR=$JAR" >> "$GITHUB_ENV"
+          echo "checking $JAR"
+
+      - name: Assert no relocated entries (v1.0.0 incident fingerprint)
+        run: |
+          set -euo pipefail
+          if unzip -l "$JAR" | grep -q 'cn/perfscope/lib/'; then
+            echo "::error::$JAR contains cn/perfscope/lib/ entries -- shade/relocate regression (v1.0.0 incident fingerprint)"
+            unzip -l "$JAR" | grep 'cn/perfscope/lib/' | head -n 5
+            exit 1
+          fi
+          echo 'OK: 0 entries with prefix cn/perfscope/lib/'
+
+      - name: Assert Adventure is not bundled (Paper provides it)
+        run: |
+          set -euo pipefail
+          if unzip -l "$JAR" | grep -q 'net/kyori/'; then
+            echo "::error::$JAR contains net/kyori/ entries -- Adventure must come from the Paper runtime (provided scope), never be bundled"
+            unzip -l "$JAR" | grep 'net/kyori/' | head -n 5
+            exit 1
+          fi
+          echo 'OK: 0 entries with prefix net/kyori/'
+
+      - name: Assert bStats is packaged and relocated
+        run: |
+          set -euo pipefail
+          SHADED=$(unzip -l "$JAR" | grep -c 'cn/perfscope/shaded/bstats/' || true)
+          RAW=$(unzip -l "$JAR" | grep -c 'org/bstats/' || true)
+          echo "shaded bStats entries: $SHADED; raw org/bstats/ entries: $RAW"
+          if [ "$SHADED" -lt 1 ]; then
+            echo "::error::$JAR has no cn/perfscope/shaded/bstats/ entries -- bStats dependency or shade step missing"
+            exit 1
+          fi
+          if [ "$RAW" -gt 0 ]; then
+            echo "::error::$JAR has raw org/bstats/ entries -- relocation did not run"
+            unzip -l "$JAR" | grep 'org/bstats/' | head -n 5
+            exit 1
+          fi
+          echo 'OK: bStats packaged and relocated'
+
+      - name: Assert packaged plugin.yml version is resolved
+        run: |
+          set -euo pipefail
+          VERSION_LINE=$(unzip -p "$JAR" plugin.yml | grep -m 1 -E '^version:')
+          echo "packaged plugin.yml -> $VERSION_LINE"
+          if printf '%s' "$VERSION_LINE" | grep -q '\${'; then
+            echo '::error::plugin.yml version is still a Maven placeholder -- resource filtering did not run'
+            exit 1
+          fi
+
+      - name: Assert packaged config.yml carries general.language
+        run: |
+          set -euo pipefail
+          if ! unzip -p "$JAR" config.yml | grep -qE '^[[:space:]]+language:'; then
+            echo '::error::packaged config.yml has no general.language -- README teaches users to set it'
+            exit 1
+          fi
+          echo 'OK: general.language present in the packaged config.yml'
+
+  # ------------------------------------------------------------------------------------
+  # J4: tag only -- build once more, verify, create the GitHub Release with the jar.
+  # ------------------------------------------------------------------------------------
+  release:
+    name: publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, static-gate, fingerprint]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write           # required to create a Release
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
           cache: maven
 
-      - name: Build
+      - name: Rebuild from the tag (clean tree, no stale target/)
         run: mvn -B -ntp clean package -DskipTests
 
-      - name: Assert jar has no relocated entries (v1.0.0 regression gate)
+      - name: Verify the tag matches the pom version
         run: |
           set -euo pipefail
-          JAR=$(ls target/PerfScope-*.jar | head -n 1)
-          echo "Checking $JAR"
-          if unzip -l "$JAR" | grep -q 'cn/perfscope/lib/'; then
-            echo "::error::$JAR contains cn/perfscope/lib/ entries -- shade/relocate regression (v1.0.0 incident fingerprint)"
-            unzip -l "$JAR" | grep 'cn/perfscope/lib/' | head -n 5
+          TAG="${GITHUB_REF_NAME#v}"
+          POM=$(mvn -B -ntp -q help:evaluate -Dexpression=project.version -DforceStdout)
+          echo "tag=$TAG pom=$POM"
+          if [ "$TAG" != "$POM" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match pom version $POM"
             exit 1
           fi
-          echo "OK: 0 entries with prefix cn/perfscope/lib/"
-
-      - name: Assert Adventure is not bundled (Paper provides it)
-        run: |
-          set -euo pipefail
-          JAR=$(ls target/PerfScope-*.jar | head -n 1)
-          if unzip -l "$JAR" | grep -q 'net/kyori/'; then
-            echo "::error::$JAR contains net/kyori/ entries -- Adventure must come from the Paper runtime (provided scope), never be bundled"
-            unzip -l "$JAR" | grep 'net/kyori/' | head -n 5
-            exit 1
-          fi
-          echo "OK: 0 entries with prefix net/kyori/"
-
-      - name: Assert bStats is packaged and relocated
-        run: |
-          set -euo pipefail
-          JAR=$(ls target/PerfScope-*.jar | head -n 1)
-          SHADED=$(unzip -l "$JAR" | grep -c 'cn/perfscope/shaded/bstats/' || true)
-          RAW=$(unzip -l "$JAR" | grep -c 'org/bstats/' || true)
-          echo "shaded bStats entries: $SHADED; raw org/bstats/ entries: $RAW"
-          if [ "$SHADED" -lt 1 ]; then
-            echo "::error::$JAR has no cn/perfscope/shaded/bstats/ entries -- bStats dependency or shade step missing from the build"
-            exit 1
-          fi
-          if [ "$RAW" -gt 0 ]; then
-            echo "::error::$JAR has raw org/bstats/ entries -- relocation did not run; raw classes would clash with other plugins' bStats copies"
-            unzip -l "$JAR" | grep 'org/bstats/' | head -n 5
-            exit 1
-          fi
-          echo "OK: bStats packaged (cn/perfscope/shaded/bstats/) and relocated (0 raw org/bstats/)"
-
-      - name: Assert packaged plugin.yml version is resolved
-        run: |
-          set -euo pipefail
-          JAR=$(ls target/PerfScope-*.jar | head -n 1)
-          VERSION_LINE=$(unzip -p "$JAR" plugin.yml | grep -m 1 -E '^version:')
-          echo "packaged plugin.yml -> $VERSION_LINE"
-          if printf '%s' "$VERSION_LINE" | grep -q '\${'; then
-            echo "::error::plugin.yml version is still a Maven placeholder -- resource filtering did not run"
+          # plugin.yml must agree too -- it is filtered from the pom, so a mismatch means the
+          # resource filter did not run or the jar was assembled by hand.
+          JAR=$(ls target/PerfScope-*.jar | grep -v original | head -n 1)
+          YML=$(unzip -p "$JAR" plugin.yml | grep -m 1 -E '^version:' | sed 's/^version:[[:space:]]*//')
+          if [ "$YML" != "$TAG" ]; then
+            echo "::error::jar plugin.yml version $YML != tag $TAG"
             exit 1
           fi
 
-      - name: Upload jar artifact
-        uses: actions/upload-artifact@v4
+      - name: Extract the CHANGELOG section for this version
+        id: notes
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          # Take the block that starts at the first heading mentioning this version and ends at
+          # the next heading of the same or higher level. Falls back to a pointer when absent.
+          awk -v v="$TAG" '
+            /^## / {
+              if (started) exit
+              if (index($0, v) > 0) { started = 1 }
+            }
+            started { print }
+          ' CHANGELOG.md > release-notes.md || true
+          if [ ! -s release-notes.md ]; then
+            {
+              echo "Release $GITHUB_REF_NAME"
+              echo
+              echo "See [CHANGELOG.md](CHANGELOG.md) for the full history."
+            } > release-notes.md
+            echo '::warning::no CHANGELOG section found for this version; using a placeholder'
+          fi
+          cat release-notes.md
+
+      - name: Create GitHub Release with the jar
+        uses: softprops/action-gh-release@v2
         with:
-          name: perfscope-jar
-          path: target/PerfScope-*.jar
-          if-no-files-found: error
+          name: ${{ github.ref_name }}
+          body_path: release-notes.md
+          files: target/PerfScope-*.jar
+          fail_on_unmatched_files: true
+          draft: true           # a human publishes; the gate proves the bytes, not the wording
+          generate_release_notes: false
+
+      - name: Remind about the local gates this job cannot run
+        run: |
+          {
+            echo '### local gates still required before un-drafting'
+            echo ''
+            echo 'CI cannot run a Paper server. Before publishing this draft, run on the dev machine:'
+            echo ''
+            echo '```powershell'
+            echo 'powershell -NoProfile -ExecutionPolicy Bypass -File tools\local-gate.ps1 -L2 -WithServer -Artifact ${GITHUB_REF_NAME#v}'
+            echo '```'
+            echo ''
+            echo 'It adds: unit tests, six testharness scenarios, and the archive-vs-source comparison'
+            echo '(sha256 / config keys / commit distance). See docs/06-tasks/research/v130-06-gates.md.'
+          } >> "$GITHUB_STEP_SUMMARY"
