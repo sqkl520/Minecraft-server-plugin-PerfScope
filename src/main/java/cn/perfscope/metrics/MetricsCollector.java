@@ -92,6 +92,19 @@ public class MetricsCollector {
     private final Deque<MetricsSnapshot> history = new ConcurrentLinkedDeque<>();
     private static final int MAX_HISTORY = 300;
 
+    /**
+     * 历史环的当前元素数（与 {@link #history} 同步维护）。
+     *
+     * <p><b>为什么需要这个计数器</b>：{@link ConcurrentLinkedDeque#size()} 是 O(n) 遍历，
+     * 不是常数时间。原实现在每个采集周期都调一次 `while (history.size() > MAX_HISTORY)`，
+     * 默认 1Hz + 环长 300，等于每秒遍历 300 个节点——纯粹的浪费，而且随环长线性增长。
+     * 用计数器后是 O(1)，且溢出的判断在绝大多数周期上是"不成立"的快速路径。</p>
+     *
+     * <p>只在主线程 {@code collectSync} 里增减，无需原子性；但仍用 int 而非 long：
+     * 环长上限是 300，int 绰绰有余。</p>
+     */
+    private int historyCount = 0;
+
     // Paper MSPT 反射缓存（MC-1 修复：目标为 CraftServer.getTickTimes()，返回 long[]（nanos），
     // 由 collectMSPT_Paper 自算 avg/min/max；旧 NMS TickTimes 对象链与其 time/minTime/maxTime 字段已随修复整体删除）
     private Method getTickTimesMethod;
@@ -501,8 +514,11 @@ public class MetricsCollector {
         }
 
         history.addLast(snap);
-        while (history.size() > MAX_HISTORY) {
+        historyCount++;
+        // O(1) 计数判断；ConcurrentLinkedDeque.size() 是 O(n) 遍历，原实现每秒白跑 300 个节点。
+        while (historyCount > MAX_HISTORY) {
             history.pollFirst();
+            historyCount--;
         }
 
         // Wave 7A：历史环形缓冲挂点（契约指定：history.addLast 之后）。内部自带
@@ -1847,7 +1863,7 @@ public class MetricsCollector {
     }
 
     public int getHistorySize() {
-        return history.size();
+        return historyCount;
     }
 
     // ==================== 9A-20 #1：采集存活/新鲜度 ====================
