@@ -115,6 +115,9 @@
 - `plugin.yml` 版本号由 Maven filtering 从 `pom.xml` 注入，无需手工同步喵。
 - bStats 匿名统计项目 ID 已注册（35061），**数据已实际上报**；上报内容为聚合分布，
   不含配置阈值、玩家名、世界名或聊天内容。可在 `general.bstats-enabled: false` 关闭喵。
+- **Windows 上进程 CPU 不再可用**（见上方 Changed）。判定与实测理由集中在
+  `ServerCompat.isProcessCpuReliable()`；Linux / macOS 不受影响喵。
+- 本次性能结论与完整证据链见 `docs/06-tasks/research/v140-01-cpu-async-blocking.md`喵。
 
 > **开发计划文档索引**（均在上层工作区）：`docs/06-tasks/ROADMAP.md`（愿景 + 49 条条目 + 35 条验收标准）、
 > `V1.1_DEV_TASKS.md`（15 个 P0 逐项拆解）、`V1.2_DIAGNOSTIC_RULES.md`（37 条诊断规则）、

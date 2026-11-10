@@ -308,7 +308,7 @@ general:
 
 **已知的主线程开销点**（如实列出，未做量化）：
 
-- 每 5 个周期（默认 5 秒）一次 `world.getLoadedChunks()`，为每个世界分配一次区块数组；上表里主线程**唯一**的命中样本正好落在它上面（`CraftWorld.getLoadedChunks ← collectChunks`）。2000–5000 区块下这个数组的分配成本**尚未测量**；
+- 每 5 个周期（默认 5 秒）一次 `world.getLoadedChunks()`，为每个世界分配一次区块数组；上表里主线程**唯一**的命中样本正好落在它上面（`CraftWorld.getLoadedChunks ← collectChunks`）。**2026-11-10 已在高负载档测量**：4,835 区块下该方法占插件主线程采样的 34.8%（插件整体占主线程 0.481%），折合上限约 **0.042 ms/tick**——低于测量误差两个数量级，故**决定不做优化**。原因见下节；
 - 每 30 周期（默认 30 秒）一次**全服区块全遍历**（热点定位）：对每个非空区块取 `getEntities()` 并建一张 `HashMap` 统计主导类型。这是本插件在主线程上最重的一段。**已测量**，见下节；
 - 每采集周期一次 `history.size()` 判上限（`ConcurrentLinkedDeque.size()` 是 O(n) 遍历，默认环长 300，即每秒约 300 次节点遍历）；
 - 每 60 秒一次历史采样入队（非阻塞）＋主线程侧的环形缓冲写入。
@@ -364,6 +364,21 @@ Collection cost: p50 0ms / p95 54ms / max 127ms (66 samples, main thread)
 
 **没有做的事**（有意为之）：没有引入相位偏移、没有改区块周期。打散方案的前提是
 "每个模块单干都小于 1 tick"——分区把单拍成本降下来之后，这个前提才真正成立。
+
+**评估过但决定不做的一次优化**（2026-11-10）：曾计划把 `collectChunks` 里的
+`world.getLoadedChunks()` 换成更便宜的 API。JFR 行级归因显示它确实是插件内主线程第一重
+（占插件主线程采样 34.8%，95.4% 的采样落在这一行）。放弃的三个理由：
+
+1. **收益低于测量误差**——插件整体只占主线程 0.481%，替换它的上限是 **0.042 ms/tick**；
+   而 65/38,905 这个比例的 Wilson 95% 区间就有 ±25%，无法验证。
+2. **两个替代 API 都不可用**——`getChunkCount()` 在 Paper 1.20.4 上数的是 `>= BLOCK_TICKING`
+   的区块，而 `getLoadedChunks()` 数的是 `>= FULL`，**语义不同会让区块数系统性偏小**；
+   `getForceLoadedChunks()` 内部对每个强制区块调用带 `load=true` 的 `getChunkAt`，
+   **会触发区块加载**——一个诊断插件不该改动世界的加载状态。
+3. **A/B 拔掉全部采集器，tick 反而从 57.5ms 变慢到 65.9ms**——现有仪器分辨不出"全关"，
+   那么"关掉其中 35%"在原理上就无法验证。
+
+完整证据链见 `docs/06-tasks/research/v140-01-cpu-async-blocking.md`。
 
 复现：`tools/perfscope-jfr-overhead.ps1`（按样本块计数、同时请求 `jdk.ExecutionSample` 与 `jdk.NativeMethodSample`、单列 Server thread 并给出 Wilson 区间、打印被测 jar 的版本与 SHA-256；**排除 `cn.perfscope.shaded.*`** —— 那是 shade 进来的 bStats 的网络栈，算成插件自身开销会虚高，全关采集器时残留 6.46%）。
 完整、可执行的最小实测集（三档负载、A/B 基线、产物格式）见 `docs/07-guides/PERF-BASELINE-PLAN.md`。

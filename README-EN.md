@@ -297,7 +297,7 @@ A performance plugin that cannot explain its own overhead is self-contradictory.
 
 **Known main-thread cost points** (listed honestly, not quantified):
 
-- Every 5 cycles (5 s by default) one `world.getLoadedChunks()` per world, which allocates a chunk array. The *only* main-thread hit in the table above lands exactly there (`CraftWorld.getLoadedChunks ← collectChunks`). The allocation cost at 2000–5000 chunks is **not measured**;
+- Every 5 cycles (5 s by default) one `world.getLoadedChunks()` per world, which allocates a chunk array. The *only* main-thread hit in the table above lands exactly there (`CraftWorld.getLoadedChunks ← collectChunks`). **Measured on 2026-11-10** at high load: at 4,835 chunks this method accounts for 34.8% of plugin main-thread samples (the plugin overall is 0.481% of main-thread samples), capping the achievable saving at about **0.042 ms/tick** — two orders of magnitude below the measurement noise, so it was deliberately **left alone** (reasons in the section below);
 - Every 30 cycles (30 s by default) a **full sweep of every loaded chunk** (hotspot location): `getEntities()` plus a per-chunk `HashMap` for the dominant type. This is the heaviest main-thread section in the plugin. **Now measured**, see below;
 - Once per collection cycle, a `history.size()` cap check (`ConcurrentLinkedDeque.size()` is an O(n) traversal; the ring holds 300 entries, so ~300 node visits per second);
 - Every 60 s, one non-blocking history enqueue plus the in-memory ring-buffer write on the main thread.
@@ -355,6 +355,24 @@ environment. So "22ms" means "**PerfScope's own collection cost at 8000 entities
 **What was deliberately not done**: no phase offsets, no chunk-period change. Scattering only
 helps if *each module on its own* stays under one tick — partitioning is what makes that
 precondition actually hold.
+
+**One optimisation evaluated and rejected** (2026-11-10): replacing `world.getLoadedChunks()` in
+`collectChunks` with a cheaper API. Line-level JFR attribution did confirm it is the plugin's
+single heaviest main-thread item (34.8% of plugin main-thread samples; 95.4% of those land on that
+one line). It was dropped for three reasons:
+
+1. **The gain is below the measurement noise** — the whole plugin is only 0.481% of main-thread
+   samples, so the ceiling is **0.042 ms/tick**; and the Wilson 95% interval on 65/38,905 is ±25%,
+   so the change could not be verified even if it worked.
+2. **Neither replacement API is usable** — on Paper 1.20.4 `getChunkCount()` counts chunks at
+   `>= BLOCK_TICKING` while `getLoadedChunks()` counts `>= FULL`, so **the chunk count would be
+   systematically under-reported**; and `getForceLoadedChunks()` calls `getChunkAt` with
+   `load=true` per forced chunk, which **triggers chunk loading** — a diagnostic plugin must not
+   change the world's load state.
+3. **An A/B with every collector disabled made the tick *slower*, 57.5ms → 65.9ms** — the
+   instrument cannot resolve "all off", so removing 35% of it cannot be verified in principle.
+
+The full evidence chain is in `docs/06-tasks/research/v140-01-cpu-async-blocking.md`.
 
 Reproduce: `tools/perfscope-jfr-overhead.ps1` (counts per sample block, requests both `jdk.ExecutionSample` and `jdk.NativeMethodSample`, isolates Server thread with a Wilson interval, prints the tested jar's version and SHA-256; **excludes `cn.perfscope.shaded.*`** — that is the shaded bStats network stack, and counting it as plugin overhead inflates the number: with every collector disabled the residue was still 6.46%).
 The full executable minimal measurement set (three load tiers, A/B baseline, artifact format) is in `docs/07-guides/PERF-BASELINE-PLAN.md`.
