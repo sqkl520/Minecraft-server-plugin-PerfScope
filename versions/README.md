@@ -7,7 +7,9 @@
 
 | 版本 | 文件 | 说明 |
 |---|---|---|
-| **1.2.1** | `PerfScope-1.2.1.jar` | **推荐使用**。「说真话」：不新增功能，修正 v1.2.0 中说错/说假/静默失败之处（MSPT 极值捏造、Folia 假精确、诊断三态、告警生命周期、webhook 泄露、配置静默回退、历史异步写、性能自证纠错）。新增 `/status`、`/alerts`。
+| **1.3.0** | `PerfScope-1.3.0.jar` | **推荐使用**。「可诊断性」：热点区块扫描改为分区增量（单拍成本降到约 1/N，11k 区块实测 p95 54→29ms、超 tick 周期 7.6%→0%）；采集耗时自监测；控制台日志与消息层完整中英双语（724 键）；LICENSE/NOTICE 进 jar；非 Paper 系平台启动即拒绝；bStats 匿名统计正式生效（35061）。**Windows 上进程 CPU 因实测单次阻塞 171ms 而改为显示「未知」**。
+GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.3.0> |
+| 1.2.1 | `PerfScope-1.2.1.jar` | 「说真话」：不新增功能，修正 v1.2.0 中说错/说假/静默失败之处（MSPT 极值捏造、Folia 假精确、诊断三态、告警生命周期、webhook 泄露、配置静默回退、历史异步写、性能自证纠错）。新增 `/status`、`/alerts`。
 GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.2.1> |
 | 1.2.0 | `PerfScope-1.2.0.jar` | 智能诊断 + 热点定位 + 跨重启历史 + 消息层（Wave 8）。
 GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.2.0> |
