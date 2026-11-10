@@ -322,25 +322,39 @@ Collection cost: p50 0ms / p95 54ms / max 127ms (66 samples, main thread)
 
 **Known scale boundaries** (honest, not a guarantee):
 
-| Scale | Collision tick | Evidence grade | Note |
+| Scale | Collection p50 / p95 / max | Evidence grade | Note |
 |---|---|---|---|
-| ~300 chunks / idle | max **127ms** | **A — reproducible by you** | self-reported by `/perfscope status` on the test server |
-| ~11,000 chunks / 13,000 entities | ~**66.6ms** (p95 75.5ms) | **B — one-off benchmark** | measured once by a dedicated script; not part of continuous regression |
-| ~50,000 entities | ~**106-119ms** | **C — extrapolated** | never measured on a server actually running 50k entities |
+| 147 chunks / 5 entities | 0 / **1** / **4ms** | **A** | idle baseline; reproducible via `/perfscope status` |
+| 2,723 chunks / 1,913 entities | 0 / **8** / **13ms** | **A** | `forceload` + bulk summon via data pack |
+| 4,835 chunks / 8,222 entities | 1 / **17** / **22ms** | **A** | same method; two independent runs agreed (22ms / 22ms) |
+| ~11,000 chunks (before partitioning) | ~66.6ms | **B** | historical baseline, **no longer applicable** to current code |
+| ~50,000 entities | — | **C** | never measured; expected well below the old figure after partitioning |
 
-**What the grades mean** (this table exists so you know how much to trust each row):
+**The most important thing about this table**: collection cost grows **far more slowly with scale**
+than early estimates suggested. An early benchmark measured 66.6ms at 11k chunks and the
+"50k entities would be 100ms+" figure was extrapolated from it — but after v1.4's hotspot
+partitioning, the 8,222-entity tier tops out at **22ms**. Partitioning spreads the heaviest sweep
+across several collection cycles, so the old model of "scale up → per-cycle cost rises linearly"
+no longer holds.
 
-- **A** — there is a one-command reproduction (`/perfscope status`); anyone running the plugin can get the same number and compare.
-- **B** — measured once with a dedicated script under a specific load. The method is documented, but it is not a regression test and another machine may differ substantially.
-- **C** — extrapolated linearly from per-module cost, never run at the target scale. **Real large-server numbers may deviate significantly.**
+**What the grades mean**:
 
-v1.3.0 moved the tile-entity period from 10 to **7**, taking the least common multiple of the four periods from **30 cycles** to **210 cycles** (~3.5 minutes by default), cutting the collision frequency to 1/7. Measured here (~300 chunks): cycles exceeding one tick went from 7.6% to **0%**.
+- **A** — there is a reproducible script (`testharness/scripts/perf-load-bench.ps1`, parameterised
+  three tiers + module A/B); anyone can reproduce the same order of magnitude.
+- **B** — measured once with a dedicated method, but **on an older build**; not applicable to current code.
+- **C** — never run at the target scale. **Do not make decisions on it.**
 
-v1.4 added **hotspot scan partitioning** (`hotspots.scan-shards`, default 10): one full sweep is spread across several collection cycles, cutting the per-cycle cost to roughly 1/N. **The benefit scales with the number of loaded chunks** — it is significant on a large server and essentially invisible on a 300-chunk one.
+**The boundary of these numbers (you must know this)**: the load is `forceload`-ed chunks plus
+bulk-summoned armour stands on **empty terrain** — no real players, no redstone, no chunk
+generation pressure. A real large server's main-thread pressure is **far higher** than this test
+environment. So "22ms" means "**PerfScope's own collection cost at 8000 entities**", not
+"a large server only stutters 22ms in total".
 
-**What was deliberately not done**: no phase offsets, no chunk-period change. Scattering only helps if *each module on its own* stays under one tick — at 50k entities the hotspot sweep alone takes 106ms, so at that scale scattering merely splits one big stall into several smaller ones. Partitioning is what actually lowers that per-cycle cost.
+**What was deliberately not done**: no phase offsets, no chunk-period change. Scattering only
+helps if *each module on its own* stays under one tick — partitioning is what makes that
+precondition actually hold.
 
-Reproduce: `tools/perfscope-jfr-overhead.ps1` (counts per sample block, requests both `jdk.ExecutionSample` and `jdk.NativeMethodSample`, isolates Server thread with a Wilson interval, prints the tested jar's version and SHA-256).
+Reproduce: `tools/perfscope-jfr-overhead.ps1` (counts per sample block, requests both `jdk.ExecutionSample` and `jdk.NativeMethodSample`, isolates Server thread with a Wilson interval, prints the tested jar's version and SHA-256; **excludes `cn.perfscope.shaded.*`** — that is the shaded bStats network stack, and counting it as plugin overhead inflates the number: with every collector disabled the residue was still 6.46%).
 The full executable minimal measurement set (three load tiers, A/B baseline, artifact format) is in `docs/07-guides/PERF-BASELINE-PLAN.md`.
 
 Reproduce: `tools/perfscope-jfr-overhead.ps1` (counts per sample block, requests both `jdk.ExecutionSample` and `jdk.NativeMethodSample`, reports Server thread separately with a Wilson interval, and prints the tested jar's version and SHA-256).
