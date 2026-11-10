@@ -529,6 +529,33 @@ public final class ServerCompat {
     }
 
     /**
+     * 进程 CPU 读数是否可信可用 —— Windows 上不可用。
+     *
+     * <p><b>为什么 Windows 上放弃 {@code getProcessCpuLoad()}</b>：JDK 的 Windows 实现
+     * 每次都枚举全部进程名，本机实测单次阻塞 <b>p50 171ms / p90 257ms / max 332ms</b>
+     * （90 秒内 69 次调用累计阻塞 12.7 秒，约占该异步 worker 的 14.1%）。而同一份
+     * MXBean 的 {@code getCpuLoad()}（系统级）只要 0.006ms —— 两者差 4 个数量级，
+     * 差距来自"枚举进程"而不是计算。</p>
+     *
+     * <p>该调用跑在 Bukkit 的<b>共享</b>异步池上（{@code runTaskTimerAsynchronously}），
+     * 所以它的阻塞会挤占同池内其他插件的异步任务，属于跨插件外部性，不只是本插件成本。</p>
+     *
+     * <p><b>代价是明确的</b>：Windows 上进程 CPU 一律报 -1（"未知"），
+     * 进程 CPU 告警不会触发，用户只能看到系统级 CPU。这是刻意的诚实降级——
+     * 报"未知"好过报一个虽然正确但要阻塞 171ms 才能取到的数字。
+     * Linux / macOS 读 {@code /proc} 或等价接口，是微秒级，不受影响。</p>
+     */
+    public static boolean isProcessCpuReliable() {
+        return !isWindows();
+    }
+
+    /** 当前运行平台是否为 Windows（{@code os.name} 前缀判断，不依赖任何 Bukkit API）。 */
+    public static boolean isWindows() {
+        String os = System.getProperty("os.name");
+        return os != null && os.toLowerCase(Locale.ROOT).startsWith("windows");
+    }
+
+    /**
      * 服务端类型枚举
      */
     public enum ServerType {

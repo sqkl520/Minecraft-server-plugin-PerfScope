@@ -1825,12 +1825,21 @@ public class MetricsCollector {
             // Windows 实现每次都枚举全部进程名。若在主线程调用，单次就吃 1.8 个 tick。
             // 本方法固定在 collectJvmAsync 的**异步线程**执行（见 start() 的 runAsyncTimer），
             // 故不影响 tick；但需知道它会让 JVM 采集节拍抖动（见下方 getCpuLoad 的窗口说明）。
-            double p = sunOsMXBean.getProcessCpuLoad() * 100;
+            //
+            // ⚠️ Windows 上直接跳过（2026-11-10 实测）：单次阻塞 p50 171ms / p90 257ms / max 332ms，
+            // 90 秒内 69 次调用累计阻塞 12.7 秒 ≈ 该异步 worker 的 14.1%。而且它跑在 Bukkit
+            // **共享**异步池上，阻塞会挤占同池其他插件的任务。宁可让进程 CPU 报"未知"，
+            // 也不接受为读一个数阻塞这么久。判定与理由集中在 ServerCompat.isProcessCpuReliable()。
+            // 注意哨兵：不可用时 p 直接取 -1 且**不再乘 100**（乘了会变成 -100，
+            // 后面的 `p < 0 ? -1 : ...` 仍能兜住，但中间值语义会变得难读）。
+            double p = ServerCompat.isProcessCpuReliable() ? sunOsMXBean.getProcessCpuLoad() * 100 : -1;
             // 窗口语义（OpenJDK 源码确认）：Windows 实现有 MIN_UPDATE_INTERVAL = 500ms 的硬门限，
             // 快于 500ms 的调用只返回缓存；且读数是"两次真实采集之间的增量占比"，
             // 即**窗口长度 ≈ 调用间隔**。所以 JVM 异步线程若因上文 90ms 调用而迟到，
             // 下一帧覆盖的窗口就变长——这是 CPU 采样方差大的一个物理来源，
             // 也是迟滞（hysteresis）必须在采集层做的原因之一。
+            // 注：Windows 上已跳过 getProcessCpuLoad，"迟到"的来源随之消失；
+            // getCpuLoad 本身命中缓存时近乎零成本，不会造成同类偏移。
             double s = sunOsMXBean.getSystemCpuLoad() * 100;
             snap.processCpuLoad = p < 0 ? -1 : round4(p);
             snap.systemCpuLoad = s < 0 ? -1 : round4(s);

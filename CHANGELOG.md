@@ -93,6 +93,16 @@
     **不会**看到每片刷新的抖动榜单喵。
   - `hotspots.scan-shards: 1` 可退回旧的一次性全遍历（对照或排查用）；越界 1–100 会钳制并告警喵。
 
+- **Windows 上不再采集进程 CPU**。`getProcessCpuLoad()` 的 Windows 实现每次调用都要枚举
+  全部进程名，本机实测单次阻塞 **p50 171 ms / p90 257 ms / max 332 ms**（90 秒内 69 次调用
+  累计阻塞 12.7 秒，约占该异步 worker 的 14.1%）。而它跑在 Bukkit 的**共享**异步池上
+  （`runTaskTimerAsynchronously`），阻塞会挤占同池内其他插件的异步任务喵。
+  - **现在的行为**：Windows 上进程 CPU 一律显示「未知」，`cpu.process_warning_threshold`
+    不会触发；系统 CPU（`getCpuLoad()`，实测 p50 0.006 ms）照常采集与告警喵。
+  - **不受影响**：Linux / macOS 读 `/proc` 或等价接口，是微秒级，进程 CPU 正常采集喵。
+  - **为什么宁可报未知**：报一个诚实标为「未知」的数，好过为了取它让一个共享 worker
+    每次阻塞 171 ms。判定集中在 `ServerCompat.isProcessCpuReliable()` 喵。
+
 - **接管与静默路径的冷却语义**：告警被接管或进入静默后，现在会静默**一整个冷却周期**
   （默认 300 秒），而不是 1 秒内重推喵。
 - **`/perfscope status` 的采集异常改为脱敏摘要**：只显示异常类型与首句，绝对路径替换为 `<path>`。

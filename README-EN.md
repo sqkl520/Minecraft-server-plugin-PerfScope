@@ -261,12 +261,14 @@ general:
 | Entities | total/per-world/by-type Top15 | Entity pressure analysis |
 | Chunks | loaded/force-loaded/per-world | Chunk load |
 | Memory | heap used/max/usage%/allocated/non-heap | JVM memory status |
-| CPU | process CPU/system CPU/processors | Processor load |
+| CPU | process CPU/system CPU/processors | Processor load (**process CPU reads "unknown" on Windows**, see below) |
 | GC | count/time/per-collector | Garbage collection stats |
 | Tile Entity | total/per-world | Block entity load |
 | Server | uptime/threads/plugins/worlds/JVM | Server basic info |
 
 > Note: **Redstone activity** and **network throughput** monitoring were discontinued in v1.1 (redstone was a stub implementation; network was hardcoded fake data); these metrics and features are no longer provided. The `/perfscope redstone` subcommand is kept as an entry point but only returns a discontinued notice.
+
+> Note (process CPU on Windows): the Windows implementation of `getProcessCpuLoad()` enumerates every process name on each call, measured at **p50 171 ms / p90 257 ms / max 332 ms** of blocking, and it runs on Bukkit's **shared** async pool where it competes with other plugins' async tasks. PerfScope therefore **does not collect process CPU on Windows** — that metric shows "unknown" and `cpu.process_warning_threshold` never fires; system CPU and every other metric work as normal. On Linux / macOS the value comes from `/proc` or an equivalent interface at microsecond cost, so process CPU is collected normally there.
 
 ## Performance & Overhead (Self-Tested, Not a Guarantee)
 
