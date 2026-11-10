@@ -275,6 +275,29 @@ hotspots:
   # /perfscope diagnose 的热点规则用它判定；默认 200 即单区块 200 个实体会被点出坐标。
   chunk-warning-threshold: 200
 
+# Prometheus 指标端点 (v1.4)
+# 让指标脱离游戏内命令，进入你已有的监控栈（Prometheus 抓取 → Grafana 看板）。
+# 零第三方依赖：用 JDK 自带的 com.sun.net.httpserver 实现，不增加 jar 体积。
+#
+# ⚠️ 安全：端点会暴露在线玩家数、世界名、插件数量。默认只听 127.0.0.1 且不鉴权——
+# 本机抓取安全，但绑到 0.0.0.0 就等于对局域网/公网开放。改绑定时插件会打 WARNING。
+# 面板服（MCSManager / Pterodactyl）常无法开放入站端口，那种环境用 push 模式更合适。
+prometheus:
+  # 总开关。默认关闭：绝大多数服主没有 Prometheus，开了只会多一个监听端口。
+  enabled: false
+  # 监听地址。127.0.0.1 = 只听本机（安全）；容器/多机抓取需改 0.0.0.0 并建议同时设置 auth-token。
+  bind: "127.0.0.1"
+  # 监听端口。9940 是本项目约定，避开 9090(Prometheus) 与 9100(node_exporter)。
+  port: 9940
+  # 抓取路径。必须以 / 开头（缺失会自动补上并告警）。
+  path: "/metrics"
+  # 跨服身份标签 server_id。留空 = 自动派生（首个世界名，回退为端口）。
+  # 多服聚合时务必给每个服设一个不同的值，否则 Grafana 会把两条序列画成一条。
+  server-id: ""
+  # Bearer 鉴权令牌。留空 = 不鉴权。非空时抓取方需带 Authorization: Bearer <token>。
+  # 属凭据：插件日志只会记录端点地址，绝不回显本值。
+  auth-token: ""
+
 # 各世界单独设置 (可覆盖全局设置)
 # 语义（与采集层判定一致）：此处配置了的世界，其实体数按该世界独立阈值逐世界判定；
 # 未在此处配置的世界，不逐世界判定，统一由上方 entities 段的全服合计阈值覆盖。

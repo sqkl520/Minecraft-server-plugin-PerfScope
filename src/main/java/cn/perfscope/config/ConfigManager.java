@@ -277,6 +277,15 @@ public class ConfigManager {
         // 默认要求单区块 1000+ 实体，导致 DIAG-ENT-HOTSPOT 永不触发）
         fresh.hotspots_chunkWarningThreshold = readInt("hotspots.chunk-warning-threshold", 200);
 
+        // === Prometheus 指标端点（v1.4） ===
+        // 默认全关 + 只听回环：开了就等于多一个监听端口，而玩家数/世界名/插件数量都在里面。
+        fresh.prometheus_enabled = readBool("prometheus.enabled", false);
+        fresh.prometheus_bind = readString("prometheus.bind", PROMETHEUS_BIND_DEFAULT);
+        fresh.prometheus_port = readInt("prometheus.port", PROMETHEUS_PORT_DEFAULT);
+        fresh.prometheus_path = readString("prometheus.path", PROMETHEUS_PATH_DEFAULT);
+        fresh.prometheus_serverId = readString("prometheus.server-id", "");
+        fresh.prometheus_authToken = readString("prometheus.auth-token", "");
+
         // === 各世界设置 ===
         fresh.worldSettings = new HashMap<>();
         ConfigurationSection worldsSection = readWorldsSection();
@@ -1092,6 +1101,28 @@ public class ConfigManager {
                 "hotspots.scan-shards", raw, 1, HOTSPOTS_SCAN_SHARDS_MAX, cfg.hotspots_scanShards));
         }
 
+        // === prometheus.port：越界钳制（v1.4 指标端点） ===
+        // 端口非法时端点会绑定失败。这里先钳到合法范围，让失败原因只剩"端口被占用"
+        // 这一类真实问题，而不是把配置写错也伪装成绑定失败。
+        if (cfg.prometheus_port < PROMETHEUS_PORT_MIN || cfg.prometheus_port > PROMETHEUS_PORT_MAX) {
+            int raw = cfg.prometheus_port;
+            cfg.prometheus_port = PROMETHEUS_PORT_DEFAULT;
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.prometheus-port",
+                "prometheus.port", raw, PROMETHEUS_PORT_MIN, PROMETHEUS_PORT_MAX, cfg.prometheus_port));
+        }
+
+        // === prometheus.path：必须以 / 开头（HttpServer.createContext 的要求） ===
+        // 缺前导斜杠时 createContext 会抛 IllegalArgumentException，在 reload 时表现为
+        // "端点起不来"而不是"路径写错了"。这里补上前缀，并在日志里说明改了什么。
+        if (cfg.prometheus_path == null || cfg.prometheus_path.isBlank()) {
+            cfg.prometheus_path = PROMETHEUS_PATH_DEFAULT;
+        } else if (!cfg.prometheus_path.startsWith("/")) {
+            String raw = cfg.prometheus_path;
+            cfg.prometheus_path = "/" + raw.trim();
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.prometheus-path",
+                "prometheus.path", raw, cfg.prometheus_path));
+        }
+
         // === general.language：界面语言归一化（i18n） ===
         // 语言项没有"越界"概念——写错就是一个不存在的语言，因此只做"识别 / 不认识"二分支。
         // 能识别就把归一化后的规范值写回（en_US -> en、zh_TW -> zh），下游 Messages 不必再归一；
@@ -1223,6 +1254,14 @@ public class ConfigManager {
 
     /** v1.4：热点分区扫描分片数的默认值（与 {@code hotspots.sample-every-cycles: 30} 整除，约 1/10 单片成本）。 */
     private static final int HOTSPOTS_SCAN_SHARDS_DEFAULT = 10;
+
+    /** Prometheus 端点的默认监听地址：只听回环，避免默认就把指标暴露到局域网。 */
+    private static final String PROMETHEUS_BIND_DEFAULT = "127.0.0.1";
+    /** 默认端口（避开常用服务：9090 Prometheus、9100 node_exporter、9940 为本项目约定）。 */
+    private static final int PROMETHEUS_PORT_DEFAULT = 9940;
+    private static final String PROMETHEUS_PATH_DEFAULT = "/metrics";
+    private static final int PROMETHEUS_PORT_MIN = 1;
+    private static final int PROMETHEUS_PORT_MAX = 65535;
     /** v1.4：分片数上限——再大每片只剩个位数区块，固定开销反超收益。 */
     private static final int HOTSPOTS_SCAN_SHARDS_MAX = 100;
 
@@ -1538,6 +1577,46 @@ public class ConfigManager {
          * 使 DIAG-ENT-HOTSPOT 在默认配置下永不触发。</p>
          */
         public int hotspots_chunkWarningThreshold;
+
+        // ==================== Prometheus 指标端点（v1.4） ====================
+
+        /**
+         * 是否启用 Prometheus 抓取端点（{@code prometheus.enabled}，默认 false）。
+         *
+         * <p>默认关：绝大多数服主没有 Prometheus，开了只会多一个监听端口，
+         * 而端口一旦绑到非回环地址就等于把玩家数/世界名/插件数量暴露出去。</p>
+         */
+        public boolean prometheus_enabled;
+
+        /**
+         * 监听地址（{@code prometheus.bind}，默认 {@code 127.0.0.1}）。
+         *
+         * <p>默认只听回环。容器化或多机抓取时必须改 {@code 0.0.0.0}，
+         * 此时启动会打一条 WARNING，并且 {@code /perfscope status} 会显示端点与鉴权状态。</p>
+         */
+        public String prometheus_bind;
+
+        /** 监听端口（{@code prometheus.port}，默认 9940）。 */
+        public int prometheus_port;
+
+        /** 抓取路径（{@code prometheus.path}，默认 {@code /metrics}）。 */
+        public String prometheus_path;
+
+        /**
+         * 跨服聚合身份（{@code prometheus.server-id}，空 = 自动派生）。
+         *
+         * <p>多服聚合时两个服撞同一个 id 会让 Grafana 把两条序列画成一条。
+         * 空值时按「首个世界名 → 监听端口」派生，刻意不用 hostname——
+         * 容器里所有实例的 hostname 常常一样。</p>
+         */
+        public String prometheus_serverId;
+
+        /**
+         * Bearer 鉴权令牌（{@code prometheus.auth-token}，空 = 不鉴权）。
+         *
+         * <p>属凭据：日志纪律沿用 {@code WebhookNotifier}——只记端点地址，绝不回显 token。</p>
+         */
+        public String prometheus_authToken;
 
         // 各世界设置
         public Map<String, WorldSettings> worldSettings;

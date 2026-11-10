@@ -304,6 +304,15 @@ public class AlertService {
     private boolean recentSeeded = false;
 
     /**
+     * v1.4：生命周期事件的进程内累计计数（Prometheus counter 源）。
+     *
+     * <p>不能用 {@link #recentEvents} 代替——那是 500 条环形镜像，满了会丢最旧的，
+     * 拿它算计数会得出"发生次数恒 ≤ 500"的错误结论。基数有界（9 个写死的事件类型）。</p>
+     */
+    private final Map<String, java.util.concurrent.atomic.LongAdder> alertEventCounters =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
      * 9B-6：插件启用时刻（构造时记录；reload 不重置——抑制窗口只针对"启动初期"，
      * 运行中途 reload 不该把 TPS 告警静音 60 秒）。
      */
@@ -2206,6 +2215,12 @@ public class AlertService {
     private void recordEvent(String type, ActiveAlert rec) {
         AlertEvent ev = new AlertEvent(System.currentTimeMillis(), type, rec.key,
             rec.alert.level(), rec.value == null ? "" : rec.value, rec.alert.display());
+        // v1.4：Prometheus 导出需要累计计数。放在这里而不是另起监听——
+        // recordEvent 是全部 9 种生命周期事件的唯一汇聚点，从这里计数不会漏。
+        if (type != null) {
+            alertEventCounters.computeIfAbsent(type, k -> new java.util.concurrent.atomic.LongAdder())
+                .increment();
+        }
         synchronized (this) {
             recentEvents.addLast(ev);
             while (recentEvents.size() > MAX_RECENT_EVENTS) {
@@ -2213,6 +2228,27 @@ public class AlertService {
             }
         }
         appendEventLine(ev);
+    }
+
+    /**
+     * 各生命周期事件的累计发生次数（v1.4 Prometheus 导出用）。
+     *
+     * <p><b>为什么不复用 {@link #recentEvents}</b>：那是 500 条环形镜像，容量满了会丢最旧的，
+     * 拿它算计数会得出"发生次数恒 ≤ 500"的错误结论。<b>为什么不解析 {@code alerts.jsonl}</b>：
+     * 那是磁盘 IO，且依赖文件可写。这里用 {@code LongAdder} 进程内累计，重启归零——
+     * Prometheus 的 counter 语义允许重置，{@code rate()} 会自动处理。</p>
+     *
+     * <p>基数有界：事件类型是代码里写死的 9 个字面量，不会被用户输入放大。</p>
+     *
+     * @return 事件类型 → 累计次数（不可变副本；无事件时返回空 map）
+     */
+    public java.util.Map<String, Long> alertEventCounters() {
+        if (alertEventCounters.isEmpty()) {
+            return java.util.Map.of();
+        }
+        java.util.Map<String, Long> out = new java.util.LinkedHashMap<>();
+        alertEventCounters.forEach((k, v) -> out.put(k, v.sum()));
+        return java.util.Map.copyOf(out);
     }
 
     private void appendEventLine(AlertEvent ev) {

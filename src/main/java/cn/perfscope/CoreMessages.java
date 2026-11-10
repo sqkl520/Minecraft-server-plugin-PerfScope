@@ -144,6 +144,24 @@ public final class CoreMessages {
             "[PerfScope] bStats initialization failed (skipped; the plugin itself is unaffected): {0}",
             "[PerfScope] bStats 匿名统计初始化失败（已跳过，不影响插件本体）: {0}");
 
+        // ---- Prometheus 指标端点（v1.4）----
+        put(en, zh, "core.prometheus.started",
+            "[PerfScope] Prometheus endpoint listening on {0} ({1})",
+            "[PerfScope] Prometheus 指标端点已启动: {0} ({1})");
+        // 绑到非回环地址 = 对局域网/公网开放。不阻止（容器抓取必须这样），但必须让人看见。
+        put(en, zh, "core.prometheus.exposed",
+            "[PerfScope] Prometheus endpoint is bound to a non-loopback address: {0} ({1}). "
+                + "Player counts, world names and plugin counts are readable by anyone who can reach that port.",
+            "[PerfScope] Prometheus 端点绑定在非回环地址: {0} ({1})。"
+                + "任何能访问该端口的人都能读取在线玩家数、世界名与插件数量。");
+        // 端口被占 / jdk.httpserver 被裁剪 / 权限不足——都走这一条。可选出口失败不影响插件本体。
+        put(en, zh, "core.prometheus.start-failed",
+            "[PerfScope] Prometheus endpoint not started (skipped; the plugin itself is unaffected): {0}",
+            "[PerfScope] Prometheus 端点未启动（已跳过，不影响插件本体）: {0}");
+        put(en, zh, "core.prometheus.render-failed",
+            "[PerfScope] Metrics render failed on the HTTP thread (throttled, at most 1/s): {0}",
+            "[PerfScope] 指标渲染在 HTTP 线程失败（已限频，最多每秒 1 条）: {0}");
+
         // ---- 兼容层能力探测原因（会出现在 /ps、报告、启动日志里）----
         put(en, zh, "compat.mspt.folia-no-global-tick",
             "Folia has no global tick time (getTickTimes is always empty)",

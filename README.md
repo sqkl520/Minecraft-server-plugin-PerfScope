@@ -278,6 +278,40 @@ general:
 
 > 注（Windows 上的进程 CPU）：`getProcessCpuLoad()` 的 Windows 实现每次调用都要枚举全部进程名，实测单次阻塞 **p50 171 ms / p90 257 ms / max 332 ms**，而它跑在 Bukkit 的**共享**异步池上，会挤占其他插件的异步任务。因此**在 Windows 上本插件不采集进程 CPU**，该指标显示「未知」，`cpu.process_warning_threshold` 不会触发；系统 CPU 与其余全部指标照常工作。Linux / macOS 读 `/proc` 或等价接口，是微秒级，进程 CPU 正常采集喵。
 
+### 接入 Prometheus / Grafana
+
+`prometheus.enabled: true` 后，插件在 `127.0.0.1:9940/metrics` 暴露 Prometheus 文本格式
+（0.0.4）的指标，零第三方依赖。在 `prometheus.yml` 里加一段即可：
+
+```yaml
+scrape_configs:
+  - job_name: minecraft
+    static_configs:
+      - targets: ["127.0.0.1:9940"]
+```
+
+除了 TPS/MSPT/内存/实体/区块这些基础指标，端点还导出本插件独有的**可信度信号**——
+这也是它相对通用 MC exporter 的差别所在：
+
+| 指标 | 用途 |
+|---|---|
+| `perfscope_snapshot_age_seconds` | 区分"服务器死了"和"指标冻住了"。这条在别的 exporter 上通常没有 |
+| `perfscope_collector_degraded` | 采集是否已过期（0/1） |
+| `perfscope_module_available{module}` | 11 个采集模块各自是否可用——曲线断了先看这里 |
+| `perfscope_alerts_active` / `perfscope_alerts_suspended` | 告警状态机的当前状态 |
+| `perfscope_tps{period}` / `perfscope_tick_duration_seconds{stat}` | 注意单位：tick 时长是**秒**，Grafana 里乘 1000 显示为 MSPT |
+
+几条设计约定，看数据前值得知道喵：
+
+- **未采集的指标整行不输出**，不会出现 `-1`。缺行让 Grafana 显示 gap，比画一条贴底的假线诚实。
+  例如 Windows 上 `perfscope_cpu_process_ratio` 就是缺的。
+- **不输出 `instance` / `job` 标签**——Prometheus 抓取时会自动附加同名的 target 标签，
+  再输出会被改名成 `exported_instance`，导致 Grafana 里两个实例互相打架。要跨服区分请用 `server-id`。
+- **Folia 上** `perfscope_build_info` 带 `tps_scope="global_region"`，因为那里的 TPS 只是
+  global region 的局部值，不是全服。
+- 端点默认只听回环。改成 `0.0.0.0` 时启动会打 WARNING：玩家数、世界名、插件数量都在里面，
+  公网可达前请先设 `auth-token`喵。
+
 ## 性能与开销（自测，非保证）
 
 性能插件若说不清自身开销就是自相矛盾。本插件的设计取向是**重活远离主线程**：

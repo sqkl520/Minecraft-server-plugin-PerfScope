@@ -65,6 +65,8 @@ public final class PerfScope extends JavaPlugin {
     private SchedulerAdapter.TaskHandle autoReportTask;
     private AlertService alertService;
     private WebhookNotifier webhookNotifier;
+    /** v1.4：Prometheus 抓取端点（默认不启用；null 表示尚未装配）。 */
+    private cn.perfscope.export.PrometheusEndpoint prometheusEndpoint;
     private DailySummaryService dailySummaryService;
 
     // ==================== 9A-20 #4：采集任务 supervisor ====================
@@ -229,9 +231,17 @@ public final class PerfScope extends JavaPlugin {
         // bStats 匿名统计（Wave 6D）：占位 ID 不发送任何数据；整段兜底，遥测失败绝不影响插件本体
         startBstats();
 
+        // v1.4：Prometheus 抓取端点（默认关）。失败只记 warning，绝不让可选出口挡住启动。
+        startPrometheus();
+
         getLogger().info("========================================");
         getLogger().info(Messages.get("startup-done"));
         getLogger().info("========================================");
+    }
+
+    /** v1.4：供命令层 /status 展示端点状态（未启用时返回 null）。 */
+    public cn.perfscope.export.PrometheusEndpoint getPrometheusEndpoint() {
+        return prometheusEndpoint;
     }
 
     @Override
@@ -249,6 +259,8 @@ public final class PerfScope extends JavaPlugin {
         // 否则停止采集到停止看门狗之间那段窗口里，它会观察到"采集已过期"并在关服日志里报假警。
         stopHealthWatch();         // 观察者：先摘掉
         stopCollectionTasks();     // ① 产生者：采集
+        // v1.4：先停生产者再关输出——端点关掉后抓取方立刻连接失败，而不是读到一份冻住的旧快照
+        stopPrometheus();          // ① 输出：Prometheus 端点
         stopAutoReport();          // ① 产生者：自动报告（不再向报告执行器提交新任务）
         // Wave 7D：先停日报（消费告警与历史），再停告警（消费快照）
         stopDailySummary();        // ② 消费者
@@ -502,6 +514,37 @@ public final class PerfScope extends JavaPlugin {
      * 代码从字节码中消去——保留引用才能用 javap 验证 shade 已把 org.bstats 重写为
      * cn.perfscope.shaded.bstats（发布门禁的 relocate 实证）。</p>
      */
+    /**
+     * v1.4：启动 Prometheus 抓取端点。
+     *
+     * <p>与 {@link #startBstats()} 同款容错口径——可选出口失败绝不影响插件本体：
+     * 端口被占、{@code jdk.httpserver} 被裁剪、绑定权限不足，都只记一条 warning，
+     * 插件照常工作喵。</p>
+     */
+    private void startPrometheus() {
+        if (prometheusEndpoint == null) {
+            prometheusEndpoint = new cn.perfscope.export.PrometheusEndpoint(this);
+        }
+        try {
+            prometheusEndpoint.start();
+        } catch (Exception | LinkageError e) {
+            // 端点内部已兜底并记日志；这里再兜一层，防构造期就炸（例如 LinkageError 在类加载阶段）
+            getLogger().warning(Messages.get("core.prometheus.start-failed",
+                e.getClass().getSimpleName()));
+        }
+    }
+
+    /** v1.4：停止 Prometheus 端点并释放端口。 */
+    private void stopPrometheus() {
+        if (prometheusEndpoint != null) {
+            try {
+                prometheusEndpoint.stop();
+            } catch (Exception ignored) {
+                // 关闭路径不再制造新的失败
+            }
+        }
+    }
+
     private void startBstats() {
         if (!configManager.get().general_bstatsEnabled) {
             getLogger().info(Messages.get("core.bstats.disabled-by-config"));
@@ -580,6 +623,9 @@ public final class PerfScope extends JavaPlugin {
         if (webhookNotifier != null) {
             webhookNotifier.reload();
         }
+        // v1.4：Prometheus 端点配置随 reload 刷新。start() 内部先 stop()，
+        // 所以改端口/路径/鉴权都能生效；未启用时 start() 直接返回 false 并不监听。
+        startPrometheus();
         startDailySummary();
         if (configManager.get().report_autoExport) {
             startAutoReport();

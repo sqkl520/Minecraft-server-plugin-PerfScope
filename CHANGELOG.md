@@ -74,8 +74,30 @@
   与界面语言不一致。现在全部改走消息键表（新增 36 个键），`language: en` 下控制台
   零中文；`language: zh` 的输出与改造前逐字一致喵。
 
+### Added — 新功能
+
+- **Prometheus 指标端点**（`prometheus.*`，默认关闭）。用 JDK 自带的
+  `com.sun.net.httpserver` 实现，**零第三方依赖**、不增加 jar 体积，让指标脱离游戏内命令
+  进入你已有的监控栈（Prometheus 抓取 → Grafana 看板）喵。
+  - 默认 `127.0.0.1:9940/metrics`：只听回环。改成 `0.0.0.0` 时启动会打 WARNING，
+    因为端点会暴露在线玩家数、世界名与插件数量喵。
+  - 可选 `auth-token`：非空时要求 `Authorization: Bearer <token>`，错误令牌返回 401
+    且响应体不含任何版本信息喵。
+  - 除 TPS/MSPT/内存/实体/区块等基础指标外，还导出**本插件独有的诊断信号**：
+    `perfscope_module_available`（哪个采集模块坏了）、`perfscope_alerts_active`、
+    `perfscope_alerts_suspended`、`perfscope_collector_degraded`、
+    `perfscope_snapshot_age_seconds`（区分"服务器死了"和"指标冻住了"）喵。
+  - 未采集的指标**整行不输出**，不输出 `-1`——缺行让 Grafana 显示 gap，
+    比画一条贴底的假线诚实喵。
+  - Folia 上 `perfscope_build_info` 带 `tps_scope="global_region"` 标签，
+    明示那里的 TPS 只是 global region 的局部值喵。
+  - 端口被占、`jdk.httpserver` 被裁剪、绑定权限不足——一律只记一条 warning 并跳过，
+    **绝不影响插件本体启动**喵。
+
 ### Added — 新配置键
 
+- `prometheus.enabled` / `bind` / `port` / `path` / `server-id` / `auth-token`（默认全关、
+  `127.0.0.1:9940/metrics`、无鉴权）喵。
 - `alerts.refire-min-interval-seconds`（默认 60）：复燃识别窗口，`0` = 关闭复燃识别喵。
 - `hotspots.scan-shards`（默认 10）：热点分区增量扫描的分片数，`1` = 关闭分片（旧的一次性全遍历）喵。
 - `general.language`、`cpu.hysteresis_margin`、`alerts.flap-window-seconds`、`alerts.repush-delta`

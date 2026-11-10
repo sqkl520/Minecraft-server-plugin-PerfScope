@@ -270,6 +270,42 @@ general:
 
 > Note (process CPU on Windows): the Windows implementation of `getProcessCpuLoad()` enumerates every process name on each call, measured at **p50 171 ms / p90 257 ms / max 332 ms** of blocking, and it runs on Bukkit's **shared** async pool where it competes with other plugins' async tasks. PerfScope therefore **does not collect process CPU on Windows** — that metric shows "unknown" and `cpu.process_warning_threshold` never fires; system CPU and every other metric work as normal. On Linux / macOS the value comes from `/proc` or an equivalent interface at microsecond cost, so process CPU is collected normally there.
 
+### Wiring up Prometheus / Grafana
+
+With `prometheus.enabled: true` the plugin exposes Prometheus text format (0.0.4) metrics on
+`127.0.0.1:9940/metrics`, with no third-party dependencies. Add a scrape job:
+
+```yaml
+scrape_configs:
+  - job_name: minecraft
+    static_configs:
+      - targets: ["127.0.0.1:9940"]
+```
+
+Beyond TPS/MSPT/memory/entities/chunks, the endpoint exports the plugin's own **trustworthiness
+signals** — which is what distinguishes it from a generic MC exporter:
+
+| Metric | Purpose |
+|---|---|
+| `perfscope_snapshot_age_seconds` | Tells "the server died" apart from "the metrics froze". Most exporters have no equivalent |
+| `perfscope_collector_degraded` | Whether collection has gone stale (0/1) |
+| `perfscope_module_available{module}` | Per-module availability for the 11 collectors — look here first when a curve breaks |
+| `perfscope_alerts_active` / `perfscope_alerts_suspended` | Current state of the alert state machine |
+| `perfscope_tps{period}` / `perfscope_tick_duration_seconds{stat}` | Note the unit: tick duration is in **seconds**; multiply by 1000 in Grafana to show MSPT |
+
+A few conventions worth knowing before reading the data:
+
+- **Uncollected metrics are omitted entirely**, never rendered as `-1`. A missing row shows as a gap
+  in Grafana, which is more honest than a line pinned to the floor. On Windows,
+  `perfscope_cpu_process_ratio` is simply absent.
+- **No `instance` / `job` labels are emitted** — Prometheus attaches its own target labels under
+  those names at scrape time, so emitting them would get yours renamed to `exported_instance` and
+  leave two competing instances in Grafana. Use `server-id` to tell servers apart.
+- **On Folia**, `perfscope_build_info` carries `tps_scope="global_region"`, because TPS there is
+  only the global region's local value, not the whole server's.
+- The endpoint listens on loopback only by default. Binding it to `0.0.0.0` logs a WARNING: player
+  counts, world names and plugin counts are all in there, so set `auth-token` before exposing it.
+
 ## Performance & Overhead (Self-Tested, Not a Guarantee)
 
 A performance plugin that cannot explain its own overhead is self-contradictory. The design principle here is **keep heavy work off the main thread**:

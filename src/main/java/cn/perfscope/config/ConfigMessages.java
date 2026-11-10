@@ -209,6 +209,19 @@ public final class ConfigMessages {
         put(en, zh, "config.check.language",
             "Configuration check: {0}={1} is not a supported language (supported: {2}); reverted to {3}",
             "配置校验：{0}={1} 不是受支持的语言（支持: {2}），已回退 {3}");
+        // v1.4：Prometheus 端点配置校验。端口越界会让端点绑定失败，路径缺前导斜杠会让
+        // HttpServer.createContext 抛异常——两者在 reload 时都只表现为"端点起不来"，
+        // 所以这里把它们在加载期就地修正并说明。
+        put(en, zh, "config.check.prometheus-port",
+            "Configuration check: {0}={1} is out of range (must be {2}-{3}); using {4} instead "
+                + "(the Prometheus endpoint will fail to bind on an invalid port)",
+            "配置校验：{0}={1} 超出范围（需 {2}-{3}），已按 {4} 处理"
+                + "（端口非法会导致 Prometheus 端点绑定失败）");
+        put(en, zh, "config.check.prometheus-path",
+            "Configuration check: {0}={1} must start with '/'; using {2} instead "
+                + "(HttpServer requires a leading slash)",
+            "配置校验：{0}={1} 必须以 '/' 开头，已按 {2} 处理"
+                + "（HttpServer 要求前导斜杠）");
         put(en, zh, "config.check.percent-non-finite",
             "Configuration check: {0} is not a finite number (NaN/Infinity); "
                 + "reverted to the default: {1} -> {2}",
