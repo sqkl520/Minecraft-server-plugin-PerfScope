@@ -178,9 +178,24 @@ public final class ConfigMessages {
             "Configuration check: {0}=\"{1}\" is invalid (expected HH:mm); reverted to the default {2}",
             "配置校验：{0}=\"{1}\" 非法（需 HH:mm），已回退默认 {2}");
         put(en, zh, "config.check.webhook-type",
-            "Configuration check: {0}=\"{1}\" is unknown (supported: discord | onebot); "
-                + "treating it as {2}",
-            "配置校验：{0}=\"{1}\" 未知（支持 discord | onebot），已按 {2} 处理");
+            "Configuration check: {0}=\"{1}\" is unknown (supported: {2}); treating it as {3}",
+            "配置校验：{0}=\"{1}\" 未知（支持 {2}），已按 {3} 处理");
+        // v1.4：飞书/钉钉开了"签名校验/加签"却没填密钥。平台的报错只写"签名不匹配"，
+        // 不会提示是密钥缺失，所以必须在加载期就说清楚。
+        put(en, zh, "config.check.webhook-secret-missing",
+            "Configuration check: type={1} normally requires {0}, but it is empty. "
+                + "Push will only work if the robot's signature check is DISABLED; "
+                + "if it is enabled every push will be rejected (feishu code 19021 / dingtalk errcode 310000) "
+                + "with an HTTP 200 that looks like success in any log that does not read the body",
+            "配置校验：type={1} 通常需要 {0}，但它是空的。"
+                + "只有当机器人后台**没有**开启签名校验时才能发送成功；"
+                + "若已开启，每次推送都会被拒绝（飞书 code 19021 / 钉钉 errcode 310000），"
+                + "且 HTTP 状态是 200——不读响应体的实现会把它当成功");
+        put(en, zh, "config.check.webhook-secret-unused",
+            "Configuration check: {0} is set but type={1} does not use a signing secret; "
+                + "the value is ignored. Clear it to avoid thinking requests are signed",
+            "配置校验：{0} 已填写但 type={1} 不使用加签密钥，该值会被忽略。"
+                + "建议清空，以免误以为请求已签名");
         put(en, zh, "config.check.history-interval",
             "Configuration check: {0}={1} is invalid (must be at least 1); using {2} seconds instead",
             "配置校验：{0}={1} 非法（需 ≥1），已按 {2} 秒处理");

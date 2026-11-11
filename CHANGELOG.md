@@ -76,6 +76,39 @@
 
 ### Added — 新功能
 
+- **支持企业微信 / 飞书 / 钉钉群机器人**（`alerts.webhook.type` 新增 `wecom` / `feishu` / `dingtalk`）。
+  飞书与钉钉支持可选的 `alerts.webhook.secret` 加签喵。
+  - 三种平台各自的请求格式与判据：企业微信 `msgtype`+`text.content`（2048 **字节**）、
+    飞书 `msg_type`+`content.text`（签名为反直觉的"key=待签名串、数据为空"构造，时间戳用**秒**）、
+    钉钉 `msgtype`+`text.content`（签名拼在 URL query，时间戳用**毫秒**）喵。
+  - 老配置零改动可用：`type: discord` / `type: onebot` 行为不变，缺 `secret` 键走默认空串喵。
+
+### Fixed — 会让用户看到错误结论的问题
+
+- **webhook 投递失败却显示成功**（本次最重要的修复）。企业微信 / 飞书 / 钉钉在**业务失败时也返回
+  HTTP 200**，错误码在响应体里；而旧实现用 `BodyHandlers.discarding()` 丢掉响应体、只看
+  `statusCode >= 300`，于是这三家的每一次失败都被当成成功喵。
+  - **这个 bug 在 OneBot 上早已存在**：OneBot v11 的 `/send_private_msg` 恒定返回 HTTP 200，
+    成败写在 `retcode` 里。也就是说配错 OneBot token 的用户从 v1.2 起就没收到过任何告警，
+    也没有任何日志提示喵。
+  - 现在按平台读取业务码：`errcode == 0`（企业微信/钉钉）、`code == 0`（飞书）、
+    `retcode == 0` 或 `status == ok/async`（OneBot）喵。
+  - **解析不出内容一律判失败**，不再"看不懂就当成功"——反向代理返回 HTTP 200 的 HTML 登录页
+    会让投递永久显示正常，这正是要避免的喵。
+- **OneBot 侧缺少 CQ 码注入防护**。Discord 早就加了 `allowed_mentions.parse = []` 防空 `@everyone`，
+  但 OneBot 分支没有对应措施：实现会把字符串 `message` 当 CQ 码解析，告警正文里的世界名/MOTD
+  若含 `[CQ:at,qq=all]` 就会 **@ 全体成员**。现已加 `auto_escape: true`喵。
+- **续读响应体会放大内存**。改用读取响应体后补了 4 KB 上限——旧实现的 `discarding()` 顺带保证了
+  不会因远端返回巨大响应而 OOM，改成读取后这个保护必须显式补回喵。
+
+### Notes — 本次未做（有意）
+
+- 未加客户端限流。三个平台的官方上限（企业微信/钉钉 20 条/分，钉钉超限**封 10 分钟**）
+  确实存在，但限流会与现有告警计数口径互相影响（`webhookQueuedToday` 目前统计的是"配置了通道的告警数"
+  而非"真的发出去了"，一条 digest 会按告警条数重复计数）。两者必须一起改，留待下一个版本喵。
+- 未加 `/perfscope webhook test` 自检命令。它需要把投递结果回传到命令层，
+  与上一条同属"可观测性"一组改动喵。
+
 - **Prometheus 指标端点**（`prometheus.*`，默认关闭）。用 JDK 自带的
   `com.sun.net.httpserver` 实现，**零第三方依赖**、不增加 jar 体积，让指标脱离游戏内命令
   进入你已有的监控栈（Prometheus 抓取 → Grafana 看板）喵。

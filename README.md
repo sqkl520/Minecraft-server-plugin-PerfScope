@@ -26,7 +26,8 @@
 - **自动报告生成** —— 可配置间隔，异步生成不阻塞主线程，旧报告自动按保留天数清理
 - **按世界独立告警** —— 各世界可覆盖实体告警阈值
 - **阈值告警主动推送**（v1.1 新增，v1.2 收敛） —— 告警触发时推送控制台 + 在线持有 `perfscope.alert` 权限的玩家；默认需连续 3 个采集周期超标才首次推送（防抖，可配）；同一告警默认 300 秒冷却防刷屏；级别升级（警告→严重）只推一条"（级别升级）"消息、不受冷却限制；故障恢复时发送恢复通知；可在 `config.yml` 的 `alerts` 段配置
-- **Webhook 推送**（v1.2 新增） —— 告警 / 恢复 / 每日摘要可推送到 Discord webhook 或 QQ OneBot，服主不在线也能收到；全异步发送，失败只记日志不阻塞
+- **Webhook 推送**（v1.2 新增，v1.4 扩展） —— 告警 / 恢复 / 每日摘要可推送到 Discord、
+  QQ OneBot、**企业微信 / 飞书 / 钉钉**群机器人；全异步发送，失败只记日志不阻塞喵。
 - **每日摘要**（v1.2 新增） —— 每天固定时刻推送 3 行概况：最低 TPS（含时刻）/ 峰值实体与内存 / 告警统计；若配置时刻服务端恰好停机，启动后会自动补发当天一次
 - **历史摘要**（v1.2 新增） —— `/perfscope history` 查看近 24 小时概况：覆盖时长、最低 TPS 与发生时刻、峰值实体、峰值内存，回答"什么时候开始变差的"
 - **热点区块定位**（v1.2 新增） —— `/perfscope hotspot` 列出全服实体密度 Top3 区块与坐标（含主导类型占比），把"实体多"下钻到"去哪个坐标看看"；坐标可点击复制
@@ -210,8 +211,9 @@ alerts:
     time: "08:00"           # 每日摘要时刻 (本地时区 HH:mm)
   webhook:
     enabled: false          # webhook 推送开关 (告警/恢复/日摘要)
-    type: discord           # discord | onebot (QQ)
-    url: ""                 # discord: https://discord.com/api/webhooks/... ；onebot: http://127.0.0.1:3000/send_private_msg?...
+    type: discord           # discord | onebot | wecom | feishu | dingtalk
+    url: ""                 # 完整 webhook 地址（含令牌），原样粘贴
+    secret: ""              # 仅 feishu/dingtalk 用；其余类型留空。纯数字密钥要加引号
 
 history:
   enabled: true

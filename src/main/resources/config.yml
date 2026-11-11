@@ -241,11 +241,31 @@ alerts:
     timezone: ""
 
   # webhook 推送 (告警 / 恢复 / 日摘要统一出口；异步发送，失败仅记日志，不重试不阻塞)
-  # ⚠️ 送达结果在插件侧不可观测：每日摘要只报"已排队 N 条"，不谎称"成功"
   webhook:
     enabled: false
-    type: discord             # discord | onebot (QQ)
-    url: ""                   # discord: https://discord.com/api/webhooks/... ；onebot: http://127.0.0.1:3000/send_private_msg?user_id=...
+    # 通道类型，五选一（大小写不敏感）：
+    #   discord   Discord       地址：频道设置 → 整合 → Webhook → 新建 → 复制 URL
+    #   onebot    QQ OneBot     地址：自己搭的 QQ 机器人，必须走本机回环
+    #                            （http://127.0.0.1:3000/send_private_msg?user_id=...）
+    #   wecom     企业微信群机器人 地址：群 → 添加群机器人 → 复制 Webhook
+    #                            （https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...）
+    #   feishu    飞书自定义机器人 地址：群设置 → 群机器人 → 添加 → 复制 Webhook
+    #                            （https://open.feishu.cn/open-apis/bot/v2/hook/...）
+    #   dingtalk  钉钉自定义机器人 地址：群设置 → 智能群助手 → 添加机器人 → Webhook
+    #                            （https://oapi.dingtalk.com/robot/send?access_token=...）
+    # 写错会被纠正为 discord 并在控制台告警。
+    type: discord
+    url: ""                   # 完整 webhook 地址（含令牌），原样粘贴即可
+    # 加签密钥：只有 feishu / dingtalk 需要，其余类型请留空（填了会被忽略并告警）。
+    #   feishu   — 机器人「安全设置 → 签名校验」里复制
+    #   dingtalk — 机器人「安全设置 → 加签」里复制（通常以 SEC 开头）
+    #
+    # ⚠️ 两点务必注意：
+    #   1. 两端不要留空格或换行。空白是签名数据的一部分，多一个空格就会验签失败，
+    #      而平台只会回「签名不匹配」，不会告诉你是空白问题。
+    #   2. 纯数字的密钥必须加引号（secret: "123456"），否则 YAML 会把它解析成数字而丢弃。
+    # 属凭据：插件日志与命令回执永不回显本值。
+    secret: ""
 
 # 历史采样（v1.2：24h 环形缓冲 + 按天 CSV 文件持久化；重启不清零）
 history:

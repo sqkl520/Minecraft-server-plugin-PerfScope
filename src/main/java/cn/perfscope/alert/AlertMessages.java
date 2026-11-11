@@ -283,8 +283,8 @@ public final class AlertMessages {
             "webhook url rejected ({0}; host={1}); push stays disabled",
             "webhook url 被拒绝（{0}，host={1}），推送保持关闭");
         put(en, zh, "alert.log.webhook-enabled",
-            "webhook enabled (type={0}, host={1})",
-            "webhook 已启用（type={0}, host={1}）");
+            "webhook enabled (type={0}, host={1}, {2})",
+            "webhook 已启用（type={0}, host={1}, {2}）");
         // 失败限频提示：说明"同类 60 秒内只出现一次"是限频而非故障消失，
         // 否则运维会以为推送恢复了。{0} = 失败原因（下面 alert.log.webhook-det-* 之一）
         put(en, zh, "alert.log.webhook-push-failed",
@@ -298,6 +298,20 @@ public final class AlertMessages {
             "async request failed ({0})", "异步请求失败 ({0})");
         put(en, zh, "alert.log.webhook-det-http",
             "HTTP {0}", "HTTP {0}");
+        // v1.4：企业微信/飞书/钉钉在业务失败时也返回 HTTP 200，真正的错误在响应体的业务码里。
+        // 这条与上一条分开，因为处置动作完全不同：HTTP 错看网络与地址，业务码看平台侧配置。
+        // {0}=业务码 {1}=平台返回的原文（已脱敏、限长）
+        put(en, zh, "alert.log.webhook-det-biz",
+            "platform rejected the message: code={0} ({1}). This is an HTTP 200 with an error code in the body; "
+                + "check the webhook URL, the signing secret, and the robot's status in the group",
+            "平台拒绝了这条消息：code={0}（{1}）。这是 HTTP 200 但响应体里带错误码；"
+                + "请检查 webhook 地址、加签密钥、以及机器人在群里的状态");
+        // 200 + 非 JSON（反向代理登录页、门户页、空体）——不能当成功，也不该报成业务错误
+        put(en, zh, "alert.log.webhook-det-bad-body",
+            "response was not a recognisable JSON body ({0}); treating as failure. "
+                + "A reverse proxy or captive portal in front of the webhook usually causes this",
+            "响应不是可识别的 JSON（{0}），按失败处理。"
+                + "通常是 webhook 前面有反向代理或门户认证页在拦截");
         put(en, zh, "alert.log.webhook-det-build",
             "request build failed ({0})", "请求构建失败 ({0})");
         // general.debug 门控的排查行：{0} = 已渲染的原因（同样不含 URL）。

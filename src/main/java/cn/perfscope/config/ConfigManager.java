@@ -260,6 +260,9 @@ public class ConfigManager {
         fresh.alerts_webhookEnabled = readBool("alerts.webhook.enabled", false);
         fresh.alerts_webhookType = readString("alerts.webhook.type", "discord");
         fresh.alerts_webhookUrl = readString("alerts.webhook.url", "");
+        // v1.4：加签密钥（仅飞书/钉钉）。缺键 → 空串（老配置零改动可用）。
+        // 刻意不 trim——见 ConfigData 字段注释与 WebhookNotifier.reload()。
+        fresh.alerts_webhookSecret = readString("alerts.webhook.secret", "");
 
         // === 历史采样（Wave 7A：24h 环形缓冲；重启清零，文件持久化规划于 Wave 8B） ===
         fresh.history_enabled = readBool("history.enabled", true);
@@ -1045,10 +1048,29 @@ public class ConfigManager {
         }
 
         // === alerts.webhook.type：未知值按 discord 处理并 warning（Wave 7D，不静默） ===
-        if (!"discord".equals(cfg.alerts_webhookType) && !"onebot".equals(cfg.alerts_webhookType)) {
+        // v1.4：白名单从 2 值扩到 5 值。新增的三家国内平台在业务失败时也返回 HTTP 200，
+        // 所以"类型写错"不会再退化成静默黑洞——只要读了响应体就一定能发现（见 WebhookResponse）。
+        String normalizedType = cfg.alerts_webhookType == null ? ""
+            : cfg.alerts_webhookType.trim().toLowerCase(java.util.Locale.ROOT);
+        if (!SUPPORTED_WEBHOOK_TYPES.contains(normalizedType)) {
             plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.webhook-type",
-                "alerts.webhook.type", cfg.alerts_webhookType, "discord"));
-            cfg.alerts_webhookType = "discord";
+                "alerts.webhook.type", cfg.alerts_webhookType,
+                String.join(" | ", SUPPORTED_WEBHOOK_TYPES), "discord"));
+            normalizedType = "discord";
+        }
+        cfg.alerts_webhookType = normalizedType;
+
+        // === alerts.webhook.secret：只在飞书/钉钉上有意义，其余类型填了是配置噪音 ===
+        // 两种情况都 warning，因为它们的后果不同：
+        //  • 该签没签（secret 空）→ 只有平台开了签名校验时才会失败，服主会以为是别的问题；
+        //  • 不该填却填了（discord/onebot/wecom）→ 完全无作用，但会让人误以为在签名。
+        boolean typeUsesSecret = "feishu".equals(normalizedType) || "dingtalk".equals(normalizedType);
+        if (typeUsesSecret && !(cfg.alerts_webhookSecret != null && !cfg.alerts_webhookSecret.isBlank())) {
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.webhook-secret-missing",
+                "alerts.webhook.secret", normalizedType));
+        } else if (!typeUsesSecret && (cfg.alerts_webhookSecret != null && !cfg.alerts_webhookSecret.isBlank())) {
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.webhook-secret-unused",
+                "alerts.webhook.secret", normalizedType));
         }
 
         // === history.sample-interval-seconds：非法值（≤0）钳到 60 并 warning（Wave 7A，与全仓 clamp 口径一致） ===
@@ -1254,6 +1276,15 @@ public class ConfigManager {
 
     /** v1.4：热点分区扫描分片数的默认值（与 {@code hotspots.sample-every-cycles: 30} 整除，约 1/10 单片成本）。 */
     private static final int HOTSPOTS_SCAN_SHARDS_DEFAULT = 10;
+
+    /**
+     * webhook 支持的通道类型（v1.4）。
+     *
+     * <p>新增的三家在企业微信/飞书/钉钉——它们的共同点是<b>业务失败也返回 HTTP 200</b>，
+     * 错误码在响应体里。判定逻辑见 {@code WebhookResponse}。</p>
+     */
+    private static final java.util.List<String> SUPPORTED_WEBHOOK_TYPES =
+        java.util.List.of("discord", "onebot", "wecom", "feishu", "dingtalk");
 
     /** Prometheus 端点的默认监听地址：只听回环，避免默认就把指标暴露到局域网。 */
     private static final String PROMETHEUS_BIND_DEFAULT = "127.0.0.1";
@@ -1540,6 +1571,18 @@ public class ConfigManager {
         public String alerts_webhookType;
         /** webhook 地址（alerts.webhook.url，缺键默认空串；空/非 http(s) 前缀 → 不发送、一次 warning，绝不记录完整 URL）。 */
         public String alerts_webhookUrl;
+        /**
+         * 加签密钥（alerts.webhook.secret，v1.4，缺键默认空串）。
+         *
+         * <p>只有飞书（签名校验）与钉钉（加签）使用；discord / onebot / wecom 填了会被忽略并 warning。</p>
+         *
+         * <p><b>刻意不 trim</b>：空白是签名载荷的一部分。secret 两端多一个空格会让
+         * HMAC 结果完全不同，而平台的报错（飞书 19021 / 钉钉 310000）只说是"签名不匹配"，
+         * 不会提示是空白问题——这是最难排查的一类配置错误。</p>
+         *
+         * <p>属凭据，与 {@code prometheus.auth-token} 同级别：日志/异常/命令回执永不回显。</p>
+         */
+        public String alerts_webhookSecret;
 
         // 历史采样（Wave 7A：24h 环形缓冲）
         /** 历史采样总开关（history.enabled，缺键默认 true；false 时 record 直接返回、读取路径返回空）。 */

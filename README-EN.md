@@ -26,7 +26,7 @@ A comprehensive performance monitoring plugin for Minecraft servers, focused on 
 - **Auto Report Generation** —— Configurable interval, async generation without blocking main thread, auto cleanup by retention days
 - **Per-World Independent Alerts** —— Override entity alert thresholds per world
 - **Threshold Alert Push** (new in v1.1, converged in v1.2) —— When an alert fires, pushes to the console + online players holding the `perfscope.alert` permission; by default an alert must stay over-threshold for 3 consecutive collection cycles before the first push (debounce, configurable); the same alert has a default 300-second cooldown to prevent spam; level upgrades (warning→critical) send a single "（级别升级）" message bypassing the cooldown; a recovery notice is sent when the issue clears; configurable in the `alerts` section of `config.yml`
-- **Webhook Push** (new in v1.2) —— Alerts / recoveries / daily summaries can be pushed to a Discord webhook or QQ OneBot, so the owner is reachable even when offline; sent fully asynchronously, failures are logged without blocking
+- **Webhook Push** (new in v1.2, extended in v1.4) —— Alerts / recoveries / daily summaries can be pushed to Discord, QQ OneBot, or a **WeCom / Feishu / DingTalk** group robot, so the owner is reachable even when offline; sent fully asynchronously, failures are logged without blocking
 - **Daily Summary** (new in v1.2) —— A 3-line digest at a fixed time each day: lowest TPS (with time) / peak entities & heap / alert statistics; if the server happens to be down at the configured time, one catch-up summary is sent after startup
 - **History Summary** (new in v1.2) —— `/perfscope history` shows the last ~24 hours: coverage, lowest TPS with its timestamp, peak entities, peak heap — answering "when did it start getting worse"
 - **Hotspot Localization** (new in v1.2) —— `/perfscope hotspot` lists the top-3 entity-density chunks server-wide with coordinates (and dominant type share), drilling from "many entities" down to "go look at this spot"; coordinates are click-to-copy
@@ -202,8 +202,9 @@ alerts:
     time: "08:00"           # Daily summary time (local HH:mm)
   webhook:
     enabled: false          # Webhook push switch (alerts/recoveries/daily summary)
-    type: discord           # discord | onebot (QQ)
-    url: ""                 # discord: https://discord.com/api/webhooks/... ; onebot: http://127.0.0.1:3000/send_private_msg?...
+    type: discord           # discord | onebot | wecom | feishu | dingtalk
+    url: ""                 # Full webhook URL (token included), paste as-is
+    secret: ""              # feishu/dingtalk only; leave empty otherwise. Quote all-digit secrets
 
 history:
   enabled: true
