@@ -149,6 +149,112 @@ public class WebhookNotifier {
      */
     private volatile String secret = "";
 
+    // ==================== v1.4：限流与投递可观测性 ====================
+
+    /**
+     * 上次放行发送的时刻（epoch ms）。初值 {@link Long#MIN_VALUE} = "从未发送过"，
+     * 保证启动后的第一条不会被限流吞掉（见 {@link #admitByRateLimit}）。
+     *
+     * <p>初值刻意<b>不是</b> {@code 0}：0 在"现在 - 0 &gt; 间隔"的判断里恰好也能放行，
+     * 但用 MIN_VALUE 能让"从未发送"这个状态在代码里显式可读。</p>
+     */
+    private final java.util.concurrent.atomic.AtomicLong lastSendAtMs =
+        new java.util.concurrent.atomic.AtomicLong(Long.MIN_VALUE);
+
+    /** 被限流丢弃的消息数（会话累计）。这是服主发现自己告警被节流的<b>唯一</b>信号，必须可见。 */
+    private final java.util.concurrent.atomic.AtomicLong droppedByRateLimit =
+        new java.util.concurrent.atomic.AtomicLong(0L);
+
+    /** 最近一次投递结果（null = 尚未发送过任何一条，或所有尝试都在就绪检查前被拒）。 */
+    private volatile WebhookResponse.Result lastResult;
+    /** 最近一次投递结果产生的时刻（epoch ms；0 = 从未）。 */
+    private volatile long lastResultAtMs;
+
+    /** 被限流丢弃的消息数。 */
+    public long droppedByRateLimit() {
+        return droppedByRateLimit.get();
+    }
+
+    /** 最近一次投递结果（可能为 null）。 */
+    public WebhookResponse.Result lastResult() {
+        return lastResult;
+    }
+
+    /**
+     * 供 {@code /perfscope webhook status} 展示的一句话摘要：类型 + 是否加签。
+     *
+     * <p><b>绝不返回密钥本身</b>——这是本类贯穿始终的纪律（webhook URL 与 secret 都是凭据）。
+     * 只回答"有没有配"，不回答"配的是什么"。</p>
+     */
+    public String authOrSecretHint() {
+        if (!WebhookSigner.requiresSecret(type)) {
+            return "no-signing";
+        }
+        return hasText(secret) ? "signed" : "unsigned";
+    }
+
+    /** 最近一次投递结果的时刻（epoch ms；0 = 从未）。 */
+    public long lastResultAtMs() {
+        return lastResultAtMs;
+    }
+
+    /** 记录结果快照，供 {@code /perfscope status} 展示。 */
+    private void rememberResult(WebhookResponse.Result result) {
+        this.lastResult = result;
+        this.lastResultAtMs = System.currentTimeMillis();
+    }
+
+    /**
+     * 同步发送一条探测消息并等待结果（仅供 {@code /perfscope webhook test}）。
+     *
+     * <p><b>绝不能从主线程调用</b>——它会阻塞等待网络。调用方必须先跳到异步线程，
+     * 拿到结果后再回主线程渲染。</p>
+     *
+     * <p>与 {@link #send} 的区别：不经过限流（用户正盯着等答复，丢弃会让"测试"变成"没反应"），
+     * 但会记录到 lastResult。</p>
+     *
+     * @param timeout 等待上限
+     * @return 投递结果；未就绪时返回 null
+     */
+    public WebhookResponse.Result probe(java.time.Duration timeout) {
+        if (!ready) {
+            return null;
+        }
+        final String typeSnapshot = type;
+        try {
+            JsonObject payload = "feishu".equals(typeSnapshot)
+                ? signedFeishuPayload(PROBE_TEXT, secret, System.currentTimeMillis())
+                : buildPayload(typeSnapshot, PROBE_TEXT);
+            String body = gson.toJson(payload);
+            URI target = URI.create(buildTargetUrl(typeSnapshot, url, secret));
+            HttpRequest request = HttpRequest.newBuilder(target)
+                .timeout(REQUEST_TIMEOUT)
+                .header("Content-Type", "application/json")
+                .header("User-Agent", "PerfScope/" + pluginVersion())
+                .POST(HttpRequest.BodyPublishers.ofString(body, java.nio.charset.StandardCharsets.UTF_8))
+                .build();
+            java.net.http.HttpResponse<byte[]> resp =
+                httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
+            WebhookResponse.Result result =
+                WebhookResponse.parse(typeSnapshot, resp.statusCode(), readBodyCapped(resp.body()));
+            rememberResult(result);
+            return result;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return new WebhookResponse.Result(
+                WebhookResponse.Outcome.BAD_BODY, -1, Long.MIN_VALUE, "interrupted");
+        } catch (Exception e) {
+            // 9A-16（漏洞 1）：只取类型名，绝不拼 message（可能含完整 URL/token）
+            return new WebhookResponse.Result(
+                WebhookResponse.Outcome.BAD_BODY, -1, Long.MIN_VALUE,
+                e.getClass().getSimpleName());
+        }
+    }
+
+    /** 探测消息正文：带明显标记，让群里的人知道这是测试不是真告警。 */
+    private static final String PROBE_TEXT =
+        "[PerfScope] test message - safe to ignore";
+
     public WebhookNotifier(PerfScope plugin) {
         this.plugin = plugin;
         this.configManager = plugin.getConfigManager();
@@ -244,8 +350,31 @@ public class WebhookNotifier {
      * 消息对 discord 走 {@code content}、onebot 走 {@code message}。
      */
     public void send(String text) {
+        sendWithResult(text, null);
+    }
+
+    /**
+     * 异步发送并在完成后回报结果。
+     *
+     * <p>与 {@link #send(String)} 分开命名而不是重载：两者返回类型不同（void vs boolean），
+     * Java 不允许仅靠返回类型区分重载，而 {@code send(text)} 的既有调用点遍布告警与日摘要路径，
+     * 改成返回 boolean 会影响它们。新名字让"要结果"这个意图在调用点显式可见。</p>
+     *
+     * @param onResult 完成回调（在 HttpClient 的线程上执行）；null = 不关心结果。
+     *                 回调<b>只</b>在真的发出去了之后才会被调用；被限流丢弃时不回调。
+     * @return true = 已交给 HTTP 客户端（不保证送达）；false = 未就绪、消息为空、或被限流丢弃
+     */
+    public boolean sendWithResult(String text,
+                                  java.util.function.Consumer<WebhookResponse.Result> onResult) {
         if (!ready || text == null || text.isEmpty()) {
-            return;
+            return false;
+        }
+        // v1.4：限流。企业微信与钉钉都是 20 条/分钟，钉钉超限还会**封 10 分钟**——
+        // 那意味着一次告警风暴会让服主在最需要告警的时候静默 10 分钟。
+        // 这里做的是"事前节流"而不是重试：重试只会让封禁更长。
+        if (!admitByRateLimit(System.currentTimeMillis())) {
+            droppedByRateLimit.incrementAndGet();
+            return false;
         }
         // v1.4：把当次的 type 抓成局部量再进 lambda。绝不在异步回调里读 this.type——
         // reload() 会改写那个 volatile 字段，若在飞书请求在途时切成 wecom，
@@ -262,7 +391,7 @@ public class WebhookNotifier {
             body = gson.toJson(payload);
         } catch (Exception e) {
             logFailure(Messages.get("alert.log.webhook-det-serialize", e.getClass().getSimpleName()));
-            return;
+            return false;
         }
         URI target;
         try {
@@ -270,7 +399,7 @@ public class WebhookNotifier {
         } catch (Exception e) {
             // 9A-16（漏洞 1）：不拼 e.getMessage()，只记类型
             logFailure(Messages.get("alert.log.webhook-det-build", e.getClass().getSimpleName()));
-            return;
+            return false;
         }
         try {
             HttpRequest request = HttpRequest.newBuilder(target)
@@ -300,12 +429,74 @@ public class WebhookNotifier {
                     WebhookResponse.Result result =
                         WebhookResponse.parse(typeSnapshot, resp.statusCode(), readBodyCapped(resp.body()));
                     reportResult(result);
+                    rememberResult(result);
+                    if (onResult != null) {
+                        try {
+                            onResult.accept(result);
+                        } catch (RuntimeException ignored) {
+                            // 回调是调用方代码，它的异常不能污染投递路径
+                        }
+                    }
                 });
         } catch (Exception e) {
             // URI.create / HttpRequest.newBuilder 等同步异常（配置已在 reload 校验，理论上罕见）
             // 9A-16（漏洞 1）：不拼 e.getMessage()，只拼类型
             logFailure(Messages.get("alert.log.webhook-det-build", e.getClass().getSimpleName()));
+            return false;
         }
+        return true;
+    }
+
+    /**
+     * 限流判定：不同类型的平台有不同的最小发送间隔。
+     *
+     * <p><b>容量必须为 1</b>。这一点不看平台文档是想不到的：一个"令牌桶"直觉上该有突发容量，
+     * 但钉钉的限额是"任意 60 秒窗口内 ≤ 20 条"。容量 C、间隔 T 时的最坏窗口是
+     * {@code C + floor(60000/T)} 条——C=3、T=3200 会给出 21 条，直接触发钉钉的
+     * <b>10 分钟封禁</b>。所以这里只做"两次发送之间的最小间隔"，不做突发。
+     *
+     * @return true = 放行；false = 丢弃
+     */
+    private boolean admitByRateLimit(long nowMs) {
+        long minInterval = minIntervalMsFor(type);
+        if (minInterval <= 0) {
+            return true;   // onebot 是本地实现，无常规范上限
+        }
+        long last = lastSendAtMs.get();
+        // firstSendsAllowed：初始化时 lastSendAtMs = Long.MIN_VALUE，保证启动后的第一条不会被丢。
+        // 这一条容易被忽略但很致命：插件启动 → 防抖 3 个周期（约 3 秒）后第一条告警就绪，
+        // 而 wecom/dingtalk 的间隔是 4000ms。若初始化成 now，重启后的第一条告警会被静默丢弃，
+        // 而重启往往发生在故障处置期间，正是最需要告警的时候。
+        if (last != Long.MIN_VALUE && nowMs - last < minInterval) {
+            return false;
+        }
+        return lastSendAtMs.compareAndSet(last, nowMs);
+    }
+
+    /**
+     * 各平台的最小发送间隔（毫秒）。
+     *
+     * <p>取值依据（均为官方文档上限 × 安全系数）：</p>
+     * <ul>
+     *   <li>wecom / dingtalk：官方 20 条/分钟 → 理论 3000ms。取 <b>4000ms</b>（15/分钟）。
+     *       留 25% 余量的原因：平台按"收到的请求"计窗口，失败的重试也占额度；
+     *       且钉钉超限的代价是封 10 分钟，不是丢一条。</li>
+     *   <li>feishu：官方 100 次/分钟、<b>5 次/秒</b>。两个限额里更严的是前者 → 600ms 理论值，
+     *       取 <b>700ms</b>（约 85/分钟）。注意别按 5 次/秒（200ms）推——那是每秒口径。</li>
+     *   <li>discord：约 30 条/分钟/webhook → 取 <b>2000ms</b>。</li>
+     *   <li>onebot：本地实现，无常规范上限 → 不限。</li>
+     * </ul>
+     */
+    static long minIntervalMsFor(String type) {
+        if (type == null) {
+            return 0L;
+        }
+        return switch (type) {
+            case "wecom", "dingtalk" -> 4000L;
+            case "feishu" -> 700L;
+            case "discord" -> 2000L;
+            default -> 0L;
+        };
     }
 
     /**

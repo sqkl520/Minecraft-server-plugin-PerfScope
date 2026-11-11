@@ -19,6 +19,8 @@ package cn.perfscope.command;
 
 import cn.perfscope.PerfScope;
 import cn.perfscope.alert.Metric;
+import cn.perfscope.alert.WebhookNotifier;
+import cn.perfscope.alert.WebhookResponse;
 import cn.perfscope.compat.SchedulerAdapter;
 import cn.perfscope.compat.ServerCompat;
 import cn.perfscope.config.ConfigManager;
@@ -210,6 +212,11 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 break;
             case "reload": case "rl":
                 handleReload(sender);
+                break;
+            // v1.4：webhook 自检。三个国内平台的失败模式全是静默的（HTTP 200 + 业务码），
+            // 服主唯一的观测渠道是"告警群一直没消息"，而"没有告警"和"告警没送到"看起来一样。
+            case "webhook":
+                handleWebhook(sender, args);
                 break;
             // 9A-20 #5：插件自身健康（采集存活/模块三态/历史/告警）——此前对内全瞎，只能全量 reload
             case "status":
@@ -1317,6 +1324,165 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         }
     }
 
+    // ==================== v1.4：webhook 自检 ====================
+
+    /**
+     * {@code /perfscope webhook [status|test]}。
+     *
+     * <p><b>为什么需要这个命令</b>：企业微信 / 飞书 / 钉钉在业务失败时返回 HTTP 200，
+     * 错误码在响应体里。配置写错、签名错、机器人被移出群，服主唯一的观测渠道是
+     * "群里一直没消息"——而"服务器很健康所以没有告警"和"告警根本没送到"看起来完全一样。
+     * 这个命令把"能不能通"从需要等一次真实故障，变成随时可查。</p>
+     */
+    private void handleWebhook(CommandSender sender, String[] args) {
+        if (!sender.hasPermission("perfscope.admin") && !sender.hasPermission("perfscope.reload")) {
+            sender.sendMessage(Component.text(Messages.get("no-permission-reload"), RED));
+            return;
+        }
+        String sub = args.length > 1 ? args[1].toLowerCase(java.util.Locale.ROOT) : "status";
+        if ("test".equals(sub)) {
+            runWebhookTest(sender);
+        } else if ("status".equals(sub)) {
+            showWebhookStatus(sender);
+        } else {
+            sender.sendMessage(Component.text(Messages.get("cmd.webhook.usage"), YELLOW));
+        }
+    }
+
+    /** 展示当前 webhook 配置与最近一次投递结果（不发起任何网络请求）。 */
+    private void showWebhookStatus(CommandSender sender) {
+        WebhookNotifier wn = plugin.getWebhookNotifier();
+        if (wn == null || !wn.isReady()) {
+            sender.sendMessage(Component.text(Messages.get("cmd.webhook.not-ready"), YELLOW));
+            return;
+        }
+        sender.sendMessage(Component.text(Messages.get("cmd.webhook.status-line",
+            plugin.getConfigManager().get().alerts_webhookType,
+            wn.authOrSecretHint()), GRAY));
+
+        WebhookResponse.Result last = wn.lastResult();
+        if (last == null) {
+            sender.sendMessage(Component.text(Messages.get("cmd.webhook.no-attempt-yet"), GRAY));
+        } else {
+            sender.sendMessage(webhookResultComponent(last));
+        }
+        long dropped = wn.droppedByRateLimit();
+        if (dropped > 0) {
+            // 这是服主发现"我的告警被节流了"的唯一信号，必须显式展示
+            sender.sendMessage(Component.text(Messages.get("cmd.webhook.dropped", dropped), YELLOW));
+        }
+    }
+
+    /**
+     * 发送一条探测消息并回报结果。
+     *
+     * <p>网络请求会阻塞，所以在异步线程执行；结果再经 {@link SchedulerAdapter#runLater}
+     * 跳回主线程渲染——Folia 上异步线程直接给玩家发消息会抛异常。</p>
+     */
+    private void runWebhookTest(CommandSender sender) {
+        WebhookNotifier wn = plugin.getWebhookNotifier();
+        if (wn == null || !wn.isReady()) {
+            sender.sendMessage(Component.text(Messages.get("cmd.webhook.not-ready"), YELLOW));
+            return;
+        }
+        // 防连点：同一发送者 10 秒内只允许一次，避免把群刷屏
+        if (!tryWebhookTest(sender.getName())) {
+            sender.sendMessage(Component.text(Messages.get("cmd.webhook.test-throttled"), YELLOW));
+            return;
+        }
+        sender.sendMessage(Component.text(Messages.get("cmd.webhook.test-sending"), GRAY));
+
+        SchedulerAdapter.runAsyncOnce(plugin, () -> {
+            WebhookResponse.Result result = wn.probe(java.time.Duration.ofSeconds(10));
+            // 回主线程渲染：异步线程不碰任何 Bukkit API。
+            //
+            // 注意：结果同时写控制台日志。原因不是"日志更好看"，而是 RCON / 控制台这类
+            // CommandSender 在异步往返期间可能已经失效——RCON 会话执行完命令就断开，
+            // 之后再 sendMessage 不会报错也不会送达。只发消息出去会让 /webhook test
+            // 在 RCON 下表现为"没反应"，而这种静默正是本命令要消灭的东西。
+            SchedulerAdapter.runLater(plugin, () -> {
+                if (!plugin.isEnabled()) {
+                    return;
+                }
+                String rendered = renderWebhookResultPlain(result);
+                plugin.getLogger().info("[PerfScope] " + rendered);
+                try {
+                    if (result == null) {
+                        sender.sendMessage(Component.text(Messages.get("cmd.webhook.not-ready"), YELLOW));
+                    } else {
+                        sender.sendMessage(webhookResultComponent(result));
+                    }
+                } catch (RuntimeException ignored) {
+                    // sender 可能已失效（RCON 断开）；结果已进控制台，不影响正确性
+                }
+            }, 1L);
+        });
+    }
+
+    /**
+     * 纯文本版的结果渲染，供控制台日志使用（{@link Component} 只能给 sender，进不了 logger）。
+     */
+    private String renderWebhookResultPlain(WebhookResponse.Result r) {
+        if (r == null) {
+            return Messages.get("cmd.webhook.not-ready");
+        }
+        if (r.ok()) {
+            return Messages.get("cmd.webhook.test-ok", r.httpStatus());
+        }
+        return switch (r.outcome()) {
+            case HTTP_ERROR -> Messages.get("cmd.webhook.test-http", r.httpStatus())
+                + " " + Messages.get("cmd.webhook.action-http");
+            case BIZ_ERROR -> Messages.get("cmd.webhook.test-biz", r.bizCode(), r.detail())
+                + " " + Messages.get("cmd.webhook.action-biz");
+            default -> Messages.get("cmd.webhook.test-bad-body", r.detail())
+                + " " + Messages.get("cmd.webhook.action-bad-body");
+        };
+    }
+
+    /**
+     * 把投递结果渲染成一条带<b>可执行处置建议</b>的消息。
+     *
+     * <p>只说"失败"没有用：签名错、被限流、机器人被移出群在 HTTP 层都是 200，
+     * 服主看到 {@code 310000} 并不知道该改什么。</p>
+     */
+    private Component webhookResultComponent(WebhookResponse.Result r) {
+        if (r.ok()) {
+            return Component.text(Messages.get("cmd.webhook.test-ok", r.httpStatus()), GREEN);
+        }
+        String reason;
+        String action;
+        switch (r.outcome()) {
+            case HTTP_ERROR -> {
+                reason = Messages.get("cmd.webhook.test-http", r.httpStatus());
+                action = Messages.get("cmd.webhook.action-http");
+            }
+            case BIZ_ERROR -> {
+                reason = Messages.get("cmd.webhook.test-biz", r.bizCode(), r.detail());
+                action = Messages.get("cmd.webhook.action-biz");
+            }
+            default -> {
+                reason = Messages.get("cmd.webhook.test-bad-body", r.detail());
+                action = Messages.get("cmd.webhook.action-bad-body");
+            }
+        }
+        return Component.text(reason, RED).append(Component.newline())
+            .append(Component.text(action, GRAY));
+    }
+
+    /** 探测命令的简单防连点（按发送者名；只保留最近一次的时间戳）。 */
+    private final java.util.Map<String, Long> webhookTestLastAt = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final long WEBHOOK_TEST_MIN_INTERVAL_MS = 10_000L;
+
+    private boolean tryWebhookTest(String who) {
+        long now = System.currentTimeMillis();
+        Long last = webhookTestLastAt.get(who);
+        if (last != null && now - last < WEBHOOK_TEST_MIN_INTERVAL_MS) {
+            return false;
+        }
+        webhookTestLastAt.put(who, now);
+        return true;
+    }
+
     // ==================== 9A-20 #5：插件自身状态 ====================
 
     /**
@@ -1949,6 +2115,8 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             Messages.get("cmd.help.alerts.desc"));
         sendHelpLine(sender, Messages.get("cmd.help.reload.display"), "/perfscope reload",
             Messages.get("cmd.help.reload.desc"));
+        sendHelpLine(sender, Messages.get("cmd.help.webhook.display"), "/perfscope webhook test",
+            Messages.get("cmd.help.webhook.desc"));
 
         if (sender instanceof Player) {
             sender.sendMessage(Component.text(""));
@@ -1970,13 +2138,14 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         if (args.length == 1) {
             String[] subs = {"all", "tps", "mspt", "entities", "chunks", "memory", "cpu",
                 "players", "world", "redstone", "tileentities", "uptime", "history", "hotspot", "diagnose", "trend", "gc",
-                "status", "alerts", "report", "monitor", "reload", "help"};
+                "status", "alerts", "report", "monitor", "reload", "webhook", "help"};
             boolean canExport = sender.hasPermission("perfscope.admin") || sender.hasPermission("perfscope.export");
             boolean canReload = sender.hasPermission("perfscope.admin") || sender.hasPermission("perfscope.reload");
             for (String s : subs) {
                 // P0-10：report/reload 按权限过滤
                 if (s.equals("report") && !canExport) continue;
                 if (s.equals("reload") && !canReload) continue;
+                if (s.equals("webhook") && !canReload) continue;
                 if (s.startsWith(args[0].toLowerCase())) completions.add(s);
             }
         } else if (args.length == 2) {
@@ -1994,6 +2163,11 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 case "report":
                     for (String fmt : new String[]{"html", "txt", "json"}) {
                         if (fmt.startsWith(args[1].toLowerCase())) completions.add(fmt);
+                    }
+                    break;
+                case "webhook":
+                    for (String sub : new String[]{"status", "test"}) {
+                        if (sub.startsWith(args[1].toLowerCase())) completions.add(sub);
                     }
                     break;
             }

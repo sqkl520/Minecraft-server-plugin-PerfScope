@@ -1368,8 +1368,10 @@ public class AlertService {
         WebhookNotifier wn = webhookNotifier;
         if (wn != null) {
             try {
-                wn.send(consoleText);
-                webhookQueued = wn.isReady();
+                // v1.4：用 send() 的返回值判断"是否真的交出去了"，而不是 isReady()。
+                // isReady() 只回答"配置齐了没有"——被限流丢弃、序列化失败、URL 构建失败
+                // 都会让它返回 true，于是计数器把压根没发出的消息也记成"已排队"。
+                webhookQueued = wn.sendWithResult(consoleText, null);
             } catch (Exception | LinkageError e) {
                 plugin.getLogger().warning(logText("alert.log.webhook-failed", e.getMessage()));
             }
@@ -1414,8 +1416,8 @@ public class AlertService {
         WebhookNotifier wn = webhookNotifier;
         if (wn != null) {
             try {
-                wn.send(text);
-                webhookQueued = wn.isReady();
+                // v1.4：同 emit()，用返回值而不是 isReady()
+                webhookQueued = wn.sendWithResult(text, null);
             } catch (Exception | LinkageError e) {
                 plugin.getLogger().warning(logText("alert.log.webhook-failed", e.getMessage()));
             }
@@ -1428,7 +1430,11 @@ public class AlertService {
                 } else {
                     pushFailToday++;
                 }
-                if (webhookQueued) {
+                // v1.4：这里以前放在循环里，导致一条 digest（一次 HTTP 请求覆盖 N 条告警）
+                // 把 webhookQueuedToday 加 N。计数单位应该是"发出的消息条数"，不是"告警条数"，
+                // 所以移出循环——与上面 pushOkToday 的口径（按告警条数）刻意不同：
+                // 一个统计"有多少条告警被处理"，一个统计"有多少条 webhook 消息被发出"。
+                if (i == 0 && webhookQueued) {
                     webhookQueuedToday++;
                 }
             }

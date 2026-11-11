@@ -114,6 +114,62 @@ public final class SchedulerAdapter {
         return new TaskHandle(bukkitTask);
     }
 
+    /**
+     * 在<b>异步线程</b>上跑一次性任务。
+     *
+     * <p><b>为什么需要它</b>：本类此前只有"异步定时"，没有"异步一次"。命令层若要执行阻塞操作
+     * （如 {@code /perfscope webhook test} 要真的发一条 HTTP 并等结果），就只能退化成
+     * "同步阻塞主线程"或"自己 new Thread"——前者卡 tick，后者在 Folia 下绕过调度器、
+     * 关服时也不受管。</p>
+     *
+     * <p><b>Folia 安全性</b>：任务体<b>不得</b>碰任何 Bukkit 世界/实体 API——异步线程访问
+     * region 数据会抛 {@code IllegalStateException}。需要回主线程时应再经 {@link #runLater}。</p>
+     *
+     * @param plugin 插件实例
+     * @param task   任务体（不得触碰 Bukkit 世界数据）
+     * @return 统一任务句柄，可 cancel
+     */
+    public static TaskHandle runAsyncOnce(Plugin plugin, Runnable task) {
+        if (FOLIA) {
+            try {
+                // Folia 侧只有"定频异步"。用一次性包装把一个可能很长的任务塞进去，
+                // 跑完立即 cancel——比每 50ms 检查一次标记更直接，也不会重复执行。
+                final java.util.concurrent.atomic.AtomicBoolean ran =
+                    new java.util.concurrent.atomic.AtomicBoolean(false);
+                Object[] holder = new Object[1];
+                holder[0] = FoliaSchedulerBridge.runAsyncAtFixedRate(plugin, () -> {
+                    if (!ran.compareAndSet(false, true)) {
+                        return;
+                    }
+                    try {
+                        task.run();
+                    } finally {
+                        cancelQuietly(holder[0]);
+                    }
+                }, 1L, 50L);
+                return new TaskHandle(holder[0], plugin);
+            } catch (Throwable t) {
+                plugin.getLogger().severe(Messages.get("run.compat.folia-scheduler-unavailable", describe(t)));
+                return TaskHandle.noop();
+            }
+        }
+        BukkitTask bukkitTask = plugin.getServer().getScheduler()
+            .runTaskAsynchronously(plugin, task);
+        return new TaskHandle(bukkitTask);
+    }
+
+    /** 取消一个 FoliaTask 句柄，吞掉一切异常（关闭路径不制造新失败）。 */
+    private static void cancelQuietly(Object scheduledTask) {
+        if (scheduledTask == null) {
+            return;
+        }
+        try {
+            scheduledTask.getClass().getMethod("cancel").invoke(scheduledTask);
+        } catch (Throwable ignored) {
+            // 已经结束 / 方法不存在：都不是错误
+        }
+    }
+
     // ==================== 9A-1：运行期能力探针的挂载点 ====================
     // 探针本体在 ServerCompat.probeRuntimeAvailability(Logger, boolean)（不引入调度依赖，便于单测）。
     // 挂载方式（PerfScope.onEnable() 内、startCollectionTasks() 之后）：

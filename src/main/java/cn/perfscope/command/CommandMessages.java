@@ -284,6 +284,66 @@ public final class CommandMessages {
         put(en, zh, "cmd.report.copy-hint", "Click to copy the path", "点击复制路径");
         put(en, zh, "cmd.reload.notice", "Note: {0}", "注意: {0}");
 
+        put(en, zh, "cmd.help.webhook.display", "/perfscope webhook", "/perfscope webhook");
+        put(en, zh, "cmd.help.webhook.desc",
+            "Webhook state, or send a live test message to confirm delivery works",
+            "查看 webhook 状态，或真的发一条测试消息确认投递可用");
+
+        // ---- v1.4：/perfscope webhook 自检 ----
+        // 这一组的存在理由：三个国内平台在业务失败时返回 HTTP 200，失败是静默的。
+        // 所以每条回执都必须给出"下一步该做什么"，只报错误码没有用。
+        put(en, zh, "cmd.webhook.usage",
+            "Usage: /perfscope webhook status | /perfscope webhook test",
+            "用法：/perfscope webhook status | /perfscope webhook test");
+        put(en, zh, "cmd.webhook.not-ready",
+            "Webhook is not ready (alerts.webhook.enabled is false, or the URL is empty/rejected). "
+                + "Check the console for the reason, then run /perfscope reload",
+            "webhook 未就绪（alerts.webhook.enabled 为 false，或 url 为空/被拒绝）。"
+                + "原因见控制台日志，改好后执行 /perfscope reload");
+        put(en, zh, "cmd.webhook.status-line",
+            "Webhook: type={0} | {1}",
+            "Webhook：type={0} | {1}");
+        put(en, zh, "cmd.webhook.no-attempt-yet",
+            "No delivery attempt has been made yet this session",
+            "本次会话尚未尝试过投递");
+        put(en, zh, "cmd.webhook.dropped",
+            "{0} message(s) were dropped by the client-side rate limiter "
+                + "(platforms cap around 20/min; DingTalk bans for 10 minutes when exceeded)",
+            "有 {0} 条消息被客户端限流丢弃"
+                + "（平台上限约 20 条/分钟，钉钉超限会封禁 10 分钟）");
+        put(en, zh, "cmd.webhook.test-throttled",
+            "A test was sent recently; wait a few seconds before trying again "
+                + "(this guards against spamming the group)",
+            "刚发送过测试消息，请稍等几秒再试（防止把群刷屏）");
+        put(en, zh, "cmd.webhook.test-sending",
+            "Sending a test message... (this posts a real message to the group)",
+            "正在发送测试消息……（这会真的往群里发一条）");
+        put(en, zh, "cmd.webhook.test-ok",
+            "Delivered: HTTP {0}, and the platform confirmed success",
+            "送达成功：HTTP {0}，平台确认成功");
+        put(en, zh, "cmd.webhook.test-http",
+            "Not delivered: HTTP {0}",
+            "未送达：HTTP {0}");
+        put(en, zh, "cmd.webhook.test-biz",
+            "Not delivered: the platform rejected it with code {0} ({1})",
+            "未送达：平台拒绝了这条消息，code {0}（{1}）");
+        put(en, zh, "cmd.webhook.test-bad-body",
+            "Not delivered: the response was not a recognisable platform reply ({0})",
+            "未送达：响应不是平台可识别的回复（{0}）");
+        put(en, zh, "cmd.webhook.action-http",
+            "-> Check that the URL is complete, that the robot has not been removed from the group, "
+                + "and that this server can reach the platform over the network",
+            "-> 请检查：URL 是否完整、机器人是否还在群里、本机网络能否访问该平台");
+        put(en, zh, "cmd.webhook.action-biz",
+            "-> Check the signing secret matches the robot console exactly (no stray spaces), "
+                + "that the platform's security mode is one this plugin supports, and that you are not rate limited",
+            "-> 请检查：加签密钥是否与机器人后台完全一致（注意两端不要有空格）、"
+                + "平台的安全设置是否为插件支持的模式、以及是否触发了频率限制");
+        put(en, zh, "cmd.webhook.action-bad-body",
+            "-> A reverse proxy or login page is probably intercepting the request; "
+                + "point the URL straight at the platform",
+            "-> 多半是反向代理或登录页拦截了请求；请把 URL 直接指向平台地址");
+
         // ==================== 插件状态 ====================
         put(en, zh, "cmd.status.version-label", "Version: ", "版本: ");
         put(en, zh, "cmd.status.version-line", "{0} | Server: {1}", "{0} | 服务端: {1}");

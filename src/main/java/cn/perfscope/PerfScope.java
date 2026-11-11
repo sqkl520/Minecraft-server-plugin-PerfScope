@@ -239,6 +239,11 @@ public final class PerfScope extends JavaPlugin {
         getLogger().info("========================================");
     }
 
+    /** v1.4：供命令层 /status 与 /webhook test 使用（未装配时返回 null）。 */
+    public WebhookNotifier getWebhookNotifier() {
+        return webhookNotifier;
+    }
+
     /** v1.4：供命令层 /status 展示端点状态（未启用时返回 null）。 */
     public cn.perfscope.export.PrometheusEndpoint getPrometheusEndpoint() {
         return prometheusEndpoint;
