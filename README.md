@@ -282,14 +282,14 @@ general:
 
 ### 接入 Prometheus / Grafana
 
-`prometheus.enabled: true` 后，插件在 `127.0.0.1:9940/metrics` 暴露 Prometheus 文本格式
+`prometheus.enabled: true` 后，插件在 `127.0.0.1:8940/metrics` 暴露 Prometheus 文本格式
 （0.0.4）的指标，零第三方依赖。在 `prometheus.yml` 里加一段即可：
 
 ```yaml
 scrape_configs:
   - job_name: minecraft
     static_configs:
-      - targets: ["127.0.0.1:9940"]
+      - targets: ["127.0.0.1:8940"]
 ```
 
 除了 TPS/MSPT/内存/实体/区块这些基础指标，端点还导出本插件独有的**可信度信号**——

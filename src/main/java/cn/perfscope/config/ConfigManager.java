@@ -1288,8 +1288,20 @@ public class ConfigManager {
 
     /** Prometheus 端点的默认监听地址：只听回环，避免默认就把指标暴露到局域网。 */
     private static final String PROMETHEUS_BIND_DEFAULT = "127.0.0.1";
-    /** 默认端口（避开常用服务：9090 Prometheus、9100 node_exporter、9940 为本项目约定）。 */
-    private static final int PROMETHEUS_PORT_DEFAULT = 9940;
+    /**
+     * 默认端口：8940。同时避开常用服务（9090 Prometheus、9100 node_exporter）与 99xx 出口带。
+     *
+     * <p><b>8940 的理由不是"本项目约定"，而是它确实没人要</b>：该端口在 IANA 注册表与
+     * Prometheus 官方 {@code Default-port-allocations} wiki 中<b>均未分配</b>（8941–8952 同样空闲），
+     * 所以默认值撞上别人监听的先验概率最低。</p>
+     *
+     * <p><b>9940 必须让开</b>：它早已分配给 {@code minecraft-prometheus-exporter}
+     * （见 Prometheus wiki 的分配表），{@code hank880907/papermc_prometheus_exporter}
+     * 也占用它——同机两套 exporter 抢同一端口时只能活一个，而失败方是后启动的本插件。
+     * 整个 99xx 段都很挤：9940 = minecraft-prometheus-exporter、9941 = huawei-lte-exporter、
+     * 9942 = drbd、9943 = FileStat。</p>
+     */
+    private static final int PROMETHEUS_PORT_DEFAULT = 8940;
     private static final String PROMETHEUS_PATH_DEFAULT = "/metrics";
     private static final int PROMETHEUS_PORT_MIN = 1;
     private static final int PROMETHEUS_PORT_MAX = 65535;
@@ -1639,7 +1651,12 @@ public class ConfigManager {
          */
         public String prometheus_bind;
 
-        /** 监听端口（{@code prometheus.port}，默认 9940）。 */
+        /**
+         * 监听端口（{@code prometheus.port}，默认 8940）。
+         *
+         * <p>8940 在 IANA 与 Prometheus 的 {@code Default-port-allocations} wiki 中均未分配；
+         * 旧的默认值 9940 已被 {@code minecraft-prometheus-exporter} 占用。</p>
+         */
         public int prometheus_port;
 
         /** 抓取路径（{@code prometheus.path}，默认 {@code /metrics}）。 */

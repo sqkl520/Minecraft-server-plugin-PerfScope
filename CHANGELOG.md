@@ -19,7 +19,34 @@
 > 本节是给使用者看的：只有**改了什么、有什么影响**。过程与过程性记录在上层工作区
 > `docs/reports/`，不在本仓库。按影响面从大到小排列喵。
 
+### Added — 逐告警 Prometheus 指标（v1.4）
+
+- **`perfscope_alert{key,module}`**：每条可判定的告警键一条序列，
+  值 `0` 正常 / `1` 警告 / `2` 严重喵。
+  - **级别走值不走标签**。这是刻意的：若做成 `{severity="warning"}`，级别升级时
+    Prometheus 看到的是「一条序列 stale、另一条全新」，`ALERTS_FOR_STATE` 归零——
+    运维写的 `for: 5m` 每次级别翻转都重新计时，插件那套抖动治理在指标层被完全抵消喵。
+    做成值则序列恒定，升级只是 `1 → 2`喵。
+  - **健康也输出 `0`**。否则恢复时序列直接消失，既收不到 `resolved` 通知，
+    也无法用 `absent()` 区分"没告警"与"采集挂了"喵。
+  - **不可判定的维度不发 0**（模块被禁用 / 平台不支持 / 哨兵值 `-1`）。
+    给没测的维度发 0 等于宣称它健康；这类盲区由既有的
+    `perfscope_module_available{module} 0` 表达喵。
+  - 有了它，运维可以直接写 `perfscope_alert > 0` 把告警接进自己的
+    Alertmanager / Grafana，不需要本插件再造一套 Alertmanager 语义喵。
+- 默认 Prometheus 端口 **9940 → 8940**。9940 在 Prometheus 官方端口分配表里已分配给
+  `minecraft-prometheus-exporter`（`papermc_prometheus_exporter` 也占用它），
+  而 9941/9942/9943 同样已被占用；8940 在 IANA 与 Prometheus 两张表中均未分配喵。
+  端口被占时日志会直接点名冲突对象并给出替代值喵。
+
 ### Fixed — 会让用户看到错误结论的问题
+
+- **关掉告警功能的服务器会永久虚报告警**。`AlertService.start()` 原先先 `loadState()`
+  再从磁盘回灌上次运行的告警，**之后**才检查 `alerts.enabled`——于是关掉告警的服会把
+  旧告警装进内存表，而 `onSnapshot` 入口就早退，这些告警**既不会更新也不会被解决**，
+  永久污染 `/metrics` 与 `/perfscope status` 的告警计数喵。
+  现在先判开关再加载；磁盘上的 `alerts.state` 不会丢（`persistState()` 以
+  `stateLoaded` 为写盘前提，跳过读取即跳过写盘）喵。
 
 - **在非 Paper 系服务端上装上去会半装配后崩溃**。README 与 `plugin.yml` 都只声称支持 Paper 系，
   但 `onEnable` 里没有平台守卫：在纯 Bukkit/Spigot 上会走完全部初始化，然后在第一个 Paper 专有

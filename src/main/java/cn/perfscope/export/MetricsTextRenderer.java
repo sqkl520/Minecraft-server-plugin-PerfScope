@@ -129,6 +129,10 @@ public final class MetricsTextRenderer {
 
         buildInfo(sb, ctx);
         health(sb, ctx, snap);
+        // v1.4：告警段放在 snap == null 判断**之前**。
+        // 它只读 ctx 与 snap.alertLevels，不依赖任何采集值——而这个门控原本会让
+        // "采集器自己挂了"这个最该看告警的时刻，告警指标一起消失。
+        alerts(sb, ctx, snap);
         if (snap == null) {
             return sb.toString();
         }
@@ -144,7 +148,6 @@ public final class MetricsTextRenderer {
         gc(sb, snap);
         serverInfo(sb, snap);
         modules(sb, snap);
-        alerts(sb, ctx);
 
         return sb.toString();
     }
@@ -335,13 +338,43 @@ public final class MetricsTextRenderer {
         }
     }
 
-    private static void alerts(StringBuilder sb, Context ctx) {
+    private static void alerts(StringBuilder sb, Context ctx, MetricsSnapshot snap) {
         help(sb, "perfscope_alerts_active", "Alerts currently open (confirmed, not recovered).", "gauge");
         sample(sb, "perfscope_alerts_active", null, Integer.toString(ctx.activeAlerts()));
 
         help(sb, "perfscope_alerts_suspended",
             "Alerts suspended because their source module has been unavailable (unknown state).", "gauge");
         sample(sb, "perfscope_alerts_suspended", null, Integer.toString(ctx.suspendedAlerts()));
+
+        // v1.4：每告警一条序列，级别走**值**而不是标签。
+        //
+        // 为什么级别不做标签：warning→critical 的升级若体现为标签变化，Prometheus 看到的
+        // 是一条序列 stale、另一条全新开始，`ALERTS_FOR_STATE` 归零——运维写的 `for: 5m`
+        // 每次级别翻转都重新计时，在有抖动治理保护的环境里依然永不触发。
+        // 做成值则序列恒定不变，升级只是 1 → 2。
+        //
+        // 0 也要输出：健康是一种可观测事实。没有这一行，恢复时序列直接消失，
+        // 既收不到 resolved 通知，也无法用 absent() 区分"没告警"与"采集挂了"。
+        //
+        // 键全集由采集层定义（MetricsSnapshot.alertLevels），不含的键 = 该维度不可判定
+        // （模块禁用 / 平台不支持 / 哨兵值），刻意不发 0 —— 给没测的维度发 0 等于宣称它健康。
+        help(sb, "perfscope_alert",
+            "Per-alert state: 0 = healthy, 1 = warning, 2 = critical. Always one series per judgeable key, "
+                + "including healthy ones; a key absent here is not currently judgeable "
+                + "(module disabled, unsupported platform, or no data yet).",
+            "gauge");
+        if (snap != null && snap.alertLevels != null) {
+            for (Map.Entry<String, Integer> e : snap.alertLevels.entrySet()) {
+                String key = e.getKey();
+                Integer level = e.getValue();
+                if (key == null || level == null) {
+                    continue;
+                }
+                sb.append("perfscope_alert{key=\"").append(escape(key))
+                    .append("\",module=\"").append(escape(moduleOfKey(key)))
+                    .append("\"} ").append(level).append('\n');
+            }
+        }
 
         // 生命周期累计计数在 v1.3.0 尚未在 AlertService 里实现（见 ROADMAP V1.4-06），
         // 因此在 map 为空时整组不输出，而不是发一堆 0 假装"从未发生过告警"。
@@ -354,6 +387,20 @@ public final class MetricsTextRenderer {
             sb.append("perfscope_alert_events_total{type=\"").append(escape(e.getKey())).append("\"} ")
                 .append(e.getValue()).append('\n');
         }
+    }
+
+    /**
+     * 从告警键推出模块名（{@code metric:scope} 的前缀）。
+     *
+     * <p>键前缀与 {@link MetricsSnapshot#MODULE_*} 的字面值相同，所以这是一个纯映射，
+     * 不需要额外数据。未知前缀返回空串，绝不抛异常——渲染失败会让整次抓取 500。</p>
+     */
+    static String moduleOfKey(String key) {
+        if (key == null) {
+            return "";
+        }
+        int idx = key.indexOf(':');
+        return idx > 0 ? key.substring(0, idx) : key;
     }
 
     // ==================== 工具 ====================

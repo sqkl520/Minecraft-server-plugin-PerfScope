@@ -158,6 +158,16 @@ public final class CoreMessages {
         put(en, zh, "core.prometheus.start-failed",
             "[PerfScope] Prometheus endpoint not started (skipped; the plugin itself is unaffected): {0}",
             "[PerfScope] Prometheus 端点未启动（已跳过，不影响插件本体）: {0}");
+        // bind 失败且端口仍是旧默认值 9940 时追加的定向提示。
+        // 9940 是 minecraft-prometheus-exporter 的已分配端口，撞上时只说 "Address already in use"
+        // 帮不到人——必须点名是谁占了，并给出可执行的下一步。
+        put(en, zh, "core.prometheus.bind-conflict-hint",
+            "Port {0} is already assigned to minecraft-prometheus-exporter in Prometheus's default port "
+                + "allocations; if that exporter (or papermc_prometheus_exporter) runs on this machine, "
+                + "set prometheus.port to {1} in config.yml",
+            "端口 {0} 已分配给 minecraft-prometheus-exporter（见 Prometheus 默认端口分配表）；"
+                + "若本机已装该 exporter（或 papermc_prometheus_exporter），"
+                + "请把 config.yml 里的 prometheus.port 改为 {1}");
         put(en, zh, "core.prometheus.render-failed",
             "[PerfScope] Metrics render failed on the HTTP thread (throttled, at most 1/s): {0}",
             "[PerfScope] 指标渲染在 HTTP 线程失败（已限频，最多每秒 1 条）: {0}");

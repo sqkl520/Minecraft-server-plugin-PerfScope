@@ -105,6 +105,27 @@ public class MetricsSnapshot {
     // 空列表 = 尚未采样/模块不可用——展示层据此渲染"暂无热点数据"。
     public List<ChunkHotspot> topEntityChunks = new ArrayList<>();
 
+    /**
+     * 每个「可判定的告警键」的当前级别（v1.4，供 Prometheus 导出）。
+     *
+     * <p><b>{@code 0} 也要放进来</b>，这是它与 {@link #alerts} 的本质区别：{@code alerts} 只在
+     * 越过阈值时才有条目，而这里要求「健康」也是一个可观测的事实。没有这一条，
+     * 运维的 {@code perfscope_alert{...} == 0} 规则在恢复时只会看到序列消失，
+     * 既收不到恢复通知，也无法用 {@code absent()} 区分"没告警"与"采集挂了"。</p>
+     *
+     * <p><b>键的"全集"由采集层定义</b>，不由告警层定义。原因：{@code AlertService.onSnapshot}
+     * 在 {@code alerts.enabled=false} 时首行早退，而阈值判定在采集层照常进行——
+     * 若全集由告警层提供，服主关掉告警投递会让整套 Prometheus 序列一起消失，
+     * 那是纯粹的信息丢失，而不是他想要的"别再推消息给我"。</p>
+     *
+     * <p><b>不在全集里的键 = 该维度此刻不可判定</b>（模块被禁用 / 平台不支持 /
+     * 哨兵值 -1 / 尚未预热）。刻意<b>不</b>发 0，因为给没测的维度发 0 等于宣称它健康。
+     * 渲染层据此整行不输出，与 {@code MetricsTextRenderer} 的既有原则一致。</p>
+     *
+     * <p>取值：{@code 0} = 正常，{@code 1} = 警告，{@code 2} = 严重。</p>
+     */
+    public Map<String, Integer> alertLevels = new java.util.LinkedHashMap<>();
+
     // === 模块可用性（P0-5）：采集失败或被配置禁用的模块名集合 ===
     // 展示层约定：命中本集合的模块显示"不可用"（灰色），而非 0/空值
     // 9A-20 #3：本集合语义保持不变（disabled 也进本集合，向后兼容 40 处既有判断）；

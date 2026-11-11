@@ -274,13 +274,13 @@ general:
 ### Wiring up Prometheus / Grafana
 
 With `prometheus.enabled: true` the plugin exposes Prometheus text format (0.0.4) metrics on
-`127.0.0.1:9940/metrics`, with no third-party dependencies. Add a scrape job:
+`127.0.0.1:8940/metrics`, with no third-party dependencies. Add a scrape job:
 
 ```yaml
 scrape_configs:
   - job_name: minecraft
     static_configs:
-      - targets: ["127.0.0.1:9940"]
+      - targets: ["127.0.0.1:8940"]
 ```
 
 Beyond TPS/MSPT/memory/entities/chunks, the endpoint exports the plugin's own **trustworthiness

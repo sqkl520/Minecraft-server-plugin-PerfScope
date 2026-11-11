@@ -307,8 +307,11 @@ prometheus:
   enabled: false
   # 监听地址。127.0.0.1 = 只听本机（安全）；容器/多机抓取需改 0.0.0.0 并建议同时设置 auth-token。
   bind: "127.0.0.1"
-  # 监听端口。9940 是本项目约定，避开 9090(Prometheus) 与 9100(node_exporter)。
-  port: 9940
+  # 监听端口。默认 8940：该端口在 IANA 与 Prometheus 官方 Default-port-allocations wiki 中均未分配
+  # （8941-8952 同样空闲），同时避开了 9090(Prometheus) 与 9100(node_exporter)。
+  # 不要改回 9940 及 99xx 段：9940 已被 minecraft-prometheus-exporter 占用（papermc_prometheus_exporter
+  # 也用它），9941 = huawei-lte-exporter、9942 = drbd、9943 = FileStat，撞端口的只会是本插件。
+  port: 8940
   # 抓取路径。必须以 / 开头（缺失会自动补上并告警）。
   path: "/metrics"
   # 跨服身份标签 server_id。留空 = 自动派生（首个世界名，回退为端口）。

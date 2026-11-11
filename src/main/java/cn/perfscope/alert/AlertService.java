@@ -437,16 +437,25 @@ public class AlertService {
      * 启动告警服务：按 general.update_interval 在主线程周期检查最新快照。
      * 幂等（先停后启，不叠加任务）；alerts.enabled=false 时不启动。
      * reload 场景：重建定时器以应用新间隔，但不清空冷却/活跃/防抖状态（避免重载导致告警重推）。
+     *
+     * <p><b>顺序约束</b>：{@code loadState()} 必须在 {@code alerts_enabled} 检查<b>之后</b>。
+     * 告警功能关闭时若仍 rehydrate，这些告警会留在 {@code activeAlerts} 里，而
+     * {@code onSnapshot} 在入口就早退（见该方法首行）——它们既不会被更新，也不会被恢复，
+     * 永久污染 {@code perfscope_alerts_active} 与 {@code perfscope_alert} 的计数喵。</p>
+     *
+     * <p><b>为什么不丢历史</b>：{@link #persistState()} 以 {@code stateLoaded} 为写盘前提，
+     * 跳过读取就跳过写盘，磁盘上的 {@code alerts.state} 原样保留；之后 reload 打开告警功能时
+     * {@code stateLoaded} 仍为 false，正常加载喵。</p>
      */
     public void start() {
         stop(); // 防呆：先停旧定时器，支持重复调用不叠加（与 MetricsCollector.start 同范式）
         loadOptions();   // 9A-14：刷新 alerts.recovery-debounce-cycles / digest-mode 等扩展键
-        loadState();     // 9A-14：rehydrate（每进程仅一次）
         ConfigManager.ConfigData cfg = configManager.get();
         if (!cfg.alerts_enabled) {
             plugin.getLogger().info(logText("alert.log.disabled"));
             return;
         }
+        loadState();     // 9A-14：rehydrate（每进程仅一次）——必须在 enabled 检查之后
         long interval = Math.max(1, cfg.general_updateInterval);
         // 首查延迟一个采集周期：等采集器先产出首份快照；runGlobalTimer 在主线程执行，玩家消息发送天然安全
         timerHandle = SchedulerAdapter.runGlobalTimer(plugin, this::checkCycle, interval, interval);

@@ -58,6 +58,17 @@ public final class PrometheusEndpoint {
     /** 端口被占等启动失败后，隔多久再重试（reload 之外的自愈机会）。 */
     private static final int WORKER_THREADS = 2;
 
+    /**
+     * 旧默认端口：9940。仅用于在 bind 失败时认出"用的是我们改掉的那个默认值"。
+     *
+     * <p>9940 已分配给 {@code minecraft-prometheus-exporter}，装它的机器上本插件必然抢不到。
+     * 只对这一个值给定向提示——用户自己改过的端口不该被我们猜测动机。</p>
+     */
+    private static final int LEGACY_DEFAULT_PORT_CONFLICT = 9940;
+
+    /** 建议改用的端口：8940（IANA 与 Prometheus 分配表均未占用），与 ConfigManager 默认值一致。 */
+    private static final int PROMETHEUS_PORT_SUGGESTED = 8940;
+
     private final PerfScope plugin;
     /** 端点启动失败的原因（null = 正常或未启用）；供 /status 展示。 */
     private volatile String failureReason;
@@ -121,8 +132,18 @@ public final class PrometheusEndpoint {
             // LinkageError 覆盖"jlink 裁过 JDK、缺 jdk.httpserver 模块"这种情形
             server = null;
             boundAddress = null;
-            failureReason = e.getClass().getSimpleName()
+            String reason = e.getClass().getSimpleName()
                 + (e.getMessage() == null ? "" : ": " + e.getMessage());
+            if (e instanceof java.net.BindException) {
+                // 9940 是旧默认值，且早已分配给 minecraft-prometheus-exporter：
+                // 装了那个 exporter 的机器上，本插件永远是后启动、抢不到端口的那一方。
+                // 只对旧默认值提示——用户自己改过的端口不该被我们猜测动机。
+                if (port == LEGACY_DEFAULT_PORT_CONFLICT) {
+                    reason = reason + " | " + cn.perfscope.util.Messages.get(
+                        "core.prometheus.bind-conflict-hint", port, PROMETHEUS_PORT_SUGGESTED);
+                }
+            }
+            failureReason = reason;
             if (cfg.general_debug) {
                 plugin.getLogger().log(Level.WARNING,
                     cn.perfscope.util.Messages.get("core.prometheus.start-failed", failureReason), e);

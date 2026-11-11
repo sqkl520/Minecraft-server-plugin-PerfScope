@@ -127,6 +127,9 @@ public class MetricsCollector {
     private List<Alert> cachedEntityAlerts = new ArrayList<>();
     private List<String> cachedEntityWarnings = new ArrayList<>();
     private List<String> cachedEntityCriticals = new ArrayList<>();
+    // v1.4：级别缓存——非采样周期这些键必须照常输出，否则 5 次抓取里有 4 次序列消失，
+    // 运维的 for: 计时器会被反复重置。与上面 alerts 同生命周期。
+    private Map<String, Integer> cachedEntityLevels = new LinkedHashMap<>();
 
     // 区块缓存
     private boolean chunksCacheReady = false;
@@ -139,6 +142,8 @@ public class MetricsCollector {
     private List<Alert> cachedChunkAlerts = new ArrayList<>();
     private List<String> cachedChunkWarnings = new ArrayList<>();
     private List<String> cachedChunkCriticals = new ArrayList<>();
+    // v1.4：同 cachedEntityLevels
+    private Map<String, Integer> cachedChunkLevels = new LinkedHashMap<>();
 
     // 方块实体缓存（collectTileEntities 无阈值告警，仅缓存计数）
     private boolean teCacheReady = false;
@@ -585,6 +590,10 @@ public class MetricsCollector {
         snap.activeWarnings = List.copyOf(snap.activeWarnings);
         snap.activeCriticals = List.copyOf(snap.activeCriticals);
         snap.topEntityChunks = List.copyOf(snap.topEntityChunks);
+        // v1.4：alertLevels 会被 HTTP 线程读取，必须与其它集合一同固化。
+        // 用 unmodifiableMap(LinkedHashMap) 而不是 Map.copyOf —— 后者迭代序未定义，
+        // 会让 /metrics 的输出顺序在两次抓取间变化，diff 与 harness 断言都会变得不可靠。
+        snap.alertLevels = Collections.unmodifiableMap(new LinkedHashMap<>(snap.alertLevels));
         snap.unavailable = Collections.unmodifiableSet(new LinkedHashSet<>(snap.unavailable));
         snap.warmingUp = Collections.unmodifiableSet(new LinkedHashSet<>(snap.warmingUp));
         snap.disabledModules = Collections.unmodifiableSet(new LinkedHashSet<>(snap.disabledModules));
@@ -837,6 +846,7 @@ public class MetricsCollector {
         List<Alert> alertList = List.of();
         List<String> warningList = List.of();
         List<String> criticalList = List.of();
+        Map<String, Integer> levelList = Map.of();
         boolean disabled = false;
         boolean platformSkipped = false;   // 9B-3
 
@@ -864,6 +874,7 @@ public class MetricsCollector {
                 alertList = List.copyOf(tmp.alerts);
                 warningList = List.copyOf(tmp.activeWarnings);
                 criticalList = List.copyOf(tmp.activeCriticals);
+                levelList = freezeMap(new LinkedHashMap<>(tmp.alertLevels));
             }
         }
 
@@ -881,6 +892,7 @@ public class MetricsCollector {
         cachedEntityAlerts = alertList;
         cachedEntityWarnings = warningList;
         cachedEntityCriticals = criticalList;
+        cachedEntityLevels = new LinkedHashMap<>(levelList);
     }
 
     private void applyEntitiesCache(MetricsSnapshot snap) {
@@ -902,6 +914,7 @@ public class MetricsCollector {
         snap.alerts.addAll(cachedEntityAlerts);
         snap.activeWarnings.addAll(cachedEntityWarnings);
         snap.activeCriticals.addAll(cachedEntityCriticals);
+        snap.alertLevels.putAll(cachedEntityLevels);
     }
 
     /** 区块采集（分级降频）：每 CHUNK_SAMPLE_EVERY 个周期遍历一次已加载区块并刷新缓存，其余周期复用缓存值填入快照。 */
@@ -925,6 +938,7 @@ public class MetricsCollector {
         List<Alert> alertList = List.of();
         List<String> warningList = List.of();
         List<String> criticalList = List.of();
+        Map<String, Integer> levelList = Map.of();
         boolean disabled = false;
         boolean platformSkipped = false;   // 9B-3
 
@@ -950,6 +964,7 @@ public class MetricsCollector {
                 alertList = List.copyOf(tmp.alerts);                        // 9A-10 #3
                 warningList = List.copyOf(tmp.activeWarnings);              // 9A-10 #3
                 criticalList = List.copyOf(tmp.activeCriticals);            // 9A-10 #3
+                levelList = freezeMap(new LinkedHashMap<>(tmp.alertLevels)); // v1.4
             }
         }
 
@@ -967,6 +982,7 @@ public class MetricsCollector {
         cachedChunkAlerts = alertList;
         cachedChunkWarnings = warningList;
         cachedChunkCriticals = criticalList;
+        cachedChunkLevels = new LinkedHashMap<>(levelList);   // v1.4
     }
 
     private void applyChunksCache(MetricsSnapshot snap) {
@@ -987,6 +1003,7 @@ public class MetricsCollector {
         snap.alerts.addAll(cachedChunkAlerts);
         snap.activeWarnings.addAll(cachedChunkWarnings);
         snap.activeCriticals.addAll(cachedChunkCriticals);
+        snap.alertLevels.putAll(cachedChunkLevels);           // v1.4
     }
 
     /** 方块实体采集（分级降频）：每 TE_SAMPLE_EVERY 个周期遍历一次并刷新缓存，其余周期复用缓存值填入快照。 */
@@ -1355,6 +1372,9 @@ public class MetricsCollector {
         snap.alerts.addAll(jvm.alerts);
         snap.activeWarnings.addAll(jvm.activeWarnings);
         snap.activeCriticals.addAll(jvm.activeCriticals);
+        // v1.4：memory / cpu 的级别在 JVM 异步拍产生，不在这里并入的话，
+        // 主线程快照里这两个键会缺席——表现为序列在主/异步拍之间反复消失。
+        snap.alertLevels.putAll(jvm.alertLevels);
     }
 
     /**
@@ -1523,9 +1543,13 @@ public class MetricsCollector {
         if (snap.tps1m < cfg.tps_criticalThreshold) {
             addAlert(snap, Alert.measuredWithThresholds("tps:global", Alert.LEVEL_CRITICAL, snap.tps1m,
                     cfg.tps_criticalThreshold, cfg.tps_criticalThreshold, MetricsSnapshot.MODULE_TPS, snap.timestamp));
+            recordLevel(snap, "tps:global", 2);
         } else if (snap.tps1m < cfg.tps_warningThreshold) {
             addAlert(snap, Alert.measuredWithThresholds("tps:global", Alert.LEVEL_WARNING, snap.tps1m,
                     cfg.tps_warningThreshold, cfg.tps_warningThreshold, MetricsSnapshot.MODULE_TPS, snap.timestamp));
+            recordLevel(snap, "tps:global", 1);
+        } else {
+            recordLevel(snap, "tps:global", 0);
         }
     }
 
@@ -1560,12 +1584,20 @@ public class MetricsCollector {
             collectMSPT_TPSFallback(snap);
         }
 
-        if (snap.msptAvg > 0 && snap.msptAvg > cfg.mspt_criticalThreshold) {
-            addAlert(snap, Alert.measuredWithThresholds("mspt:global", Alert.LEVEL_CRITICAL, snap.msptAvg,
-                    cfg.mspt_criticalThreshold, cfg.mspt_criticalThreshold, MetricsSnapshot.MODULE_MSPT, snap.timestamp));
-        } else if (snap.msptAvg > 0 && snap.msptAvg > cfg.mspt_warningThreshold) {
-            addAlert(snap, Alert.measuredWithThresholds("mspt:global", Alert.LEVEL_WARNING, snap.msptAvg,
-                    cfg.mspt_warningThreshold, cfg.mspt_warningThreshold, MetricsSnapshot.MODULE_MSPT, snap.timestamp));
+        // v1.4：msptAvg <= 0 是「未采集」哨兵（TPS 反推路径无 MSPT），此时该维度不可判定，
+        // 整块不调用 recordLevel —— 让键从全集缺席，而不是发一个假 0 宣称健康。
+        if (snap.msptAvg > 0) {
+            if (snap.msptAvg > cfg.mspt_criticalThreshold) {
+                addAlert(snap, Alert.measuredWithThresholds("mspt:global", Alert.LEVEL_CRITICAL, snap.msptAvg,
+                        cfg.mspt_criticalThreshold, cfg.mspt_criticalThreshold, MetricsSnapshot.MODULE_MSPT, snap.timestamp));
+                recordLevel(snap, "mspt:global", 2);
+            } else if (snap.msptAvg > cfg.mspt_warningThreshold) {
+                addAlert(snap, Alert.measuredWithThresholds("mspt:global", Alert.LEVEL_WARNING, snap.msptAvg,
+                        cfg.mspt_warningThreshold, cfg.mspt_warningThreshold, MetricsSnapshot.MODULE_MSPT, snap.timestamp));
+                recordLevel(snap, "mspt:global", 1);
+            } else {
+                recordLevel(snap, "mspt:global", 0);
+            }
         }
     }
 
@@ -1662,9 +1694,13 @@ public class MetricsCollector {
         if (pct >= cfg.players_criticalThreshold) {
             addAlert(snap, Alert.measuredWithReference("players:global", Alert.LEVEL_CRITICAL,
                 snap.playerCount, snap.maxPlayers, MetricsSnapshot.MODULE_PLAYERS, snap.timestamp));
+            recordLevel(snap, "players:global", 2);
         } else if (pct >= cfg.players_warningThreshold) {
             addAlert(snap, Alert.measuredWithReference("players:global", Alert.LEVEL_WARNING,
                 snap.playerCount, snap.maxPlayers, MetricsSnapshot.MODULE_PLAYERS, snap.timestamp));
+            recordLevel(snap, "players:global", 1);
+        } else {
+            recordLevel(snap, "players:global", 0);
         }
     }
 
@@ -1707,12 +1743,19 @@ public class MetricsCollector {
             if (ws == null) {
                 continue; // 无覆盖的世界不单独判定，由下方总数判定覆盖
             }
+            // v1.4：只有「配置了 worlds 覆盖」的世界才进全集——没覆盖的世界永远不可能报警，
+            // 给它发一条恒为 0 的序列会在 Grafana 上造出一个点不进去的假维度。
+            String entKey = "entities:world:" + entry.getKey();
             if (entry.getValue() > ws.entities_totalCriticalThreshold) {
-                addAlert(snap, Alert.measured("entities:world:" + entry.getKey(), Alert.LEVEL_CRITICAL, entry.getValue(),
+                addAlert(snap, Alert.measured(entKey, Alert.LEVEL_CRITICAL, entry.getValue(),
                     MetricsSnapshot.MODULE_ENTITIES, snap.timestamp));
+                recordLevel(snap, entKey, 2);
             } else if (entry.getValue() > ws.entities_totalWarningThreshold) {
-                addAlert(snap, Alert.measured("entities:world:" + entry.getKey(), Alert.LEVEL_WARNING, entry.getValue(),
+                addAlert(snap, Alert.measured(entKey, Alert.LEVEL_WARNING, entry.getValue(),
                     MetricsSnapshot.MODULE_ENTITIES, snap.timestamp));
+                recordLevel(snap, entKey, 1);
+            } else {
+                recordLevel(snap, entKey, 0);
             }
         }
 
@@ -1720,9 +1763,13 @@ public class MetricsCollector {
         if (snap.totalEntities > cfg.entities_totalCriticalThreshold) {
             addAlert(snap, Alert.measured("entities:global", Alert.LEVEL_CRITICAL, snap.totalEntities,
                 MetricsSnapshot.MODULE_ENTITIES, snap.timestamp));
+            recordLevel(snap, "entities:global", 2);
         } else if (snap.totalEntities > cfg.entities_totalWarningThreshold) {
             addAlert(snap, Alert.measured("entities:global", Alert.LEVEL_WARNING, snap.totalEntities,
                 MetricsSnapshot.MODULE_ENTITIES, snap.timestamp));
+            recordLevel(snap, "entities:global", 1);
+        } else {
+            recordLevel(snap, "entities:global", 0);
         }
     }
 
@@ -1756,12 +1803,17 @@ public class MetricsCollector {
         snap.forceLoadedChunksByWorld = forceByWorld;
 
         for (Map.Entry<String, Integer> entry : byWorld.entrySet()) {
+            String chunkKey = "chunks:world:" + entry.getKey();
             if (entry.getValue() > cfg.chunks_loadedCriticalThreshold) {
-                addAlert(snap, Alert.measured("chunks:world:" + entry.getKey(), Alert.LEVEL_CRITICAL, entry.getValue(),
+                addAlert(snap, Alert.measured(chunkKey, Alert.LEVEL_CRITICAL, entry.getValue(),
                     MetricsSnapshot.MODULE_CHUNKS, snap.timestamp));
+                recordLevel(snap, chunkKey, 2);
             } else if (entry.getValue() > cfg.chunks_loadedWarningThreshold) {
-                addAlert(snap, Alert.measured("chunks:world:" + entry.getKey(), Alert.LEVEL_WARNING, entry.getValue(),
+                addAlert(snap, Alert.measured(chunkKey, Alert.LEVEL_WARNING, entry.getValue(),
                     MetricsSnapshot.MODULE_CHUNKS, snap.timestamp));
+                recordLevel(snap, chunkKey, 1);
+            } else {
+                recordLevel(snap, chunkKey, 0);
             }
         }
     }
@@ -1783,9 +1835,13 @@ public class MetricsCollector {
         if (snap.heapUsagePercent >= cfg.memory_heapCriticalThreshold) {
             addAlert(snap, Alert.measuredWithThresholds("memory:global", Alert.LEVEL_CRITICAL, snap.heapUsagePercent,
                     cfg.memory_heapCriticalThreshold, cfg.memory_heapCriticalThreshold, MetricsSnapshot.MODULE_MEMORY, snap.timestamp));
+            recordLevel(snap, "memory:global", 2);
         } else if (snap.heapUsagePercent >= cfg.memory_heapWarningThreshold) {
             addAlert(snap, Alert.measuredWithThresholds("memory:global", Alert.LEVEL_WARNING, snap.heapUsagePercent,
                     cfg.memory_heapWarningThreshold, cfg.memory_heapWarningThreshold, MetricsSnapshot.MODULE_MEMORY, snap.timestamp));
+            recordLevel(snap, "memory:global", 1);
+        } else {
+            recordLevel(snap, "memory:global", 0);
         }
     }
 
@@ -1862,6 +1918,9 @@ public class MetricsCollector {
                             cfg.cpu_processWarningThreshold, cfg.cpu_processWarningThreshold - margin,
                             MetricsSnapshot.MODULE_CPU, snap.timestamp));
                 }
+                // 级别跟闩锁走，不跟瞬时值：闩锁的存在就是为了让边界抖动不反复翻转，
+                // 若这里改用瞬时值判定，指标会比告警本身抖得多，Prometheus 侧反而更吵。
+                recordLevel(snap, "cpu:process", processCpuLatched ? 1 : 0);
             }
             if (snap.systemCpuLoad > 0) {
                 systemCpuLatched = latched(
@@ -1872,6 +1931,7 @@ public class MetricsCollector {
                             cfg.cpu_systemWarningThreshold, cfg.cpu_systemWarningThreshold - margin,
                             MetricsSnapshot.MODULE_CPU, snap.timestamp));
                 }
+                recordLevel(snap, "cpu:system", systemCpuLatched ? 1 : 0);
             }
         } else {
             // 非 sun.* MXBean：无 CPU 数据，显式置 -1（避免默认 0 误导），并解除闩锁
@@ -2139,6 +2199,23 @@ public class MetricsCollector {
         } else {
             snap.activeWarnings.add(alert.message());
         }
+    }
+
+    /**
+     * 记录一个告警键的当前级别（含健康时的 0），供 Prometheus 导出（v1.4）。
+     *
+     * <p><b>为什么与 {@link #addAlert} 分开而不是合并</b>：{@code addAlert} 只在越阈值时被调用，
+     * 而这里要求「健康」也是一条可观测事实。两者语义不同——一个是"有事要报"，
+     * 一个是"这个维度现在是什么状态"——合并会让调用点难以表达"判定过了但没超阈"。</p>
+     *
+     * <p>调用约定：<b>每个判定点必须调用恰好一次</b>，无论是越阈还是正常。
+     * 漏调 = 该键从全集消失 = 运维看到序列消失，误以为是恢复。</p>
+     *
+     * @param key   与 {@link Alert#key()} 同一命名（{@code metric:scope}）
+     * @param level {@code 0} 正常 / {@code 1} 警告 / {@code 2} 严重
+     */
+    private static void recordLevel(MetricsSnapshot snap, String key, int level) {
+        snap.alertLevels.put(key, level);
     }
 
     private double round2(double value) {
