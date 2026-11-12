@@ -1648,6 +1648,12 @@ public class ConfigManager {
          *
          * <p>默认只听回环。容器化或多机抓取时必须改 {@code 0.0.0.0}，
          * 此时启动会打一条 WARNING，并且 {@code /perfscope status} 会显示端点与鉴权状态。</p>
+         *
+         * <p><b>容器里的 127.0.0.1 是容器自己的回环</b>，不是宿主机也不是面板节点。
+         * 在 Docker / Pterodactyl / MCSManager 中保持默认值时，容器外的 Prometheus
+         * 必然连不上（connection refused / 超时），而进容器 {@code curl 127.0.0.1} 却是通的。
+         * 要被抓取就改 {@code 0.0.0.0} 并抓容器/节点 IP；面板服还需先加一条端口分配
+         * （Wings 按分配项里的具体 IP 绑宿主端口，所以宿主机 {@code localhost} 可能仍不通）。</p>
          */
         public String prometheus_bind;
 

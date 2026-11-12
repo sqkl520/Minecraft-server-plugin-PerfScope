@@ -216,6 +216,28 @@
 - `plugin.yml` 版本号由 Maven filtering 从 `pom.xml` 注入，无需手工同步喵。
 - bStats 匿名统计项目 ID 已注册（35061），**数据已实际上报**；上报内容为聚合分布，
   不含配置阈值、玩家名、世界名或聊天内容。可在 `general.bstats-enabled: false` 关闭喵。
+
+### Docs — 容器 / 面板服的抓取说明（v1.4）
+
+- **删掉一句错的配置注释**。原 `config.yml` 写着「面板服（MCSManager / Pterodactyl）
+  常无法开放入站端口，那种环境用 push 模式更合适」——这句话是错的，而且指向一个
+  不存在的功能喵。
+  - **前提是错的**：Pterodactyl/Wings 通过 Docker `HostConfig.PortBindings` 真的发布
+    allocation 端口（源码 `environment/docker/container.go`），`DockerBindings()` 还会把
+    `127.0.0.1` 的绑定改写到 `pterodactyl0` 网桥（默认 `172.18.0.1`）。加端口是管理面板里
+    约三次点击。MCSManager 同样发布端口；AMP 实例通常以原生进程运行、根本没有容器网络喵。
+    抽样 93 份服务商文档，写死「不支持额外端口」的约 2%喵。
+  - **push 模式不存在**，也没有加入计划喵。
+- **新增「容器 / 面板服：先把 bind 改掉」小节**（README 中英双语）。真正的头号故障是
+  **绑错地址**，不是「开不了端口」：容器里 `bind: 127.0.0.1` 指的是容器自己的回环，
+  容器外的 Prometheus 永远连不上。上游同类插件的三个 issue（#36 / #123 / #275）
+  **全是这一个原因**喵。
+  - 给出判定方法（外面 `connection refused`、容器内 `curl 127.0.0.1` 却 200，这个反差就是证据）、
+    按部署方式的对照表、Pterodactyl 的三步操作、以及两个反直觉点
+    （`allocation_limit` 为 `NULL` 时客户端看不到按钮；Wings 绑的是分配项里那个具体 IP，
+    所以宿主机自己的 `localhost` 可能反而不通）喵。
+  - 对确实无法开端口的那约 2%，明确写「本插件没有 push 模式，也没有计划」，
+    并指向已有的 webhook 告警作为替代——告警由服务器主动发出，不需要入站端口喵。
 - **Windows 上进程 CPU 不再可用**（见上方 Changed）。判定与实测理由集中在
   `ServerCompat.isProcessCpuReliable()`；Linux / macOS 不受影响喵。
 - 本次性能结论与完整证据链见 `docs/06-tasks/research/v140-01-cpu-async-blocking.md`喵。

@@ -301,11 +301,30 @@ hotspots:
 #
 # ⚠️ 安全：端点会暴露在线玩家数、世界名、插件数量。默认只听 127.0.0.1 且不鉴权——
 # 本机抓取安全，但绑到 0.0.0.0 就等于对局域网/公网开放。改绑定时插件会打 WARNING。
-# 面板服（MCSManager / Pterodactyl）常无法开放入站端口，那种环境用 push 模式更合适。
+#
+# ⚠️ 容器里最常见的坑（同类 exporter 的社区 issue 几乎全是这一条喵）：
+#   容器内的 127.0.0.1 是【容器自己】的回环，既不是宿主机，也不是面板节点。
+#   因此在 Docker / Pterodactyl / MCSManager 里保持 bind: "127.0.0.1"，
+#   容器外的 Prometheus 无论怎么抓都连不上——外部表现为 connection refused / 超时，
+#   而进容器里 curl 127.0.0.1:8940 却是通的（这个反差就是判定依据）。
+#   要被抓取：bind 改成 "0.0.0.0"，然后抓【容器 IP 或节点 IP】，不是抓 127.0.0.1。
+#
+# 面板服怎么把端口开出来（以 Pterodactyl 系为例，管理员约三步）：
+#   1) 面板加端口分配：Admin → Servers → 该服 → Build Configuration →
+#      "Assign Additional Ports"，从节点池里选一个分配项。
+#      注意：分配是【节点端口池里的既有条目】，不是随手填个数字——所以实际监听端口
+#      以分到的那个为准，未必是 8940（下面的 prometheus.port 要与它一致）。
+#      （MCSManager 在实例的端口列表里加；非 Docker 实例不涉及发布，直接绑宿主端口即可。）
+#   2) 本文件 bind 改 "0.0.0.0"——只加分配不改 bind，外部照样进不来。
+#   3) Prometheus 抓 http://<节点IP>:<分到的公网端口>/metrics。
+#   注意：Wings 是按【分配项里那个具体 IP】去绑宿主端口的（分配写 127.0.0.1 时会被改写到
+#   pterodactyl0 网桥，默认 172.18.0.1），所以从宿主机自己的 localhost:8940 抓可能失败。
+#   这不代表端点没起来——用 docker ps 看实际端口映射，抓映射出来的那个 IP:端口喵。
 prometheus:
   # 总开关。默认关闭：绝大多数服主没有 Prometheus，开了只会多一个监听端口。
   enabled: false
-  # 监听地址。127.0.0.1 = 只听本机（安全）；容器/多机抓取需改 0.0.0.0 并建议同时设置 auth-token。
+  # 监听地址。127.0.0.1 = 只听本机（安全；但容器外抓不到，原因见上方"容器里最常见的坑"）；
+  # 容器 / 多机 / 面板服抓取必须改 0.0.0.0（启动会打 WARNING），并建议同时设置 auth-token。
   bind: "127.0.0.1"
   # 监听端口。默认 8940：该端口在 IANA 与 Prometheus 官方 Default-port-allocations wiki 中均未分配
   # （8941-8952 同样空闲），同时避开了 9090(Prometheus) 与 9100(node_exporter)。

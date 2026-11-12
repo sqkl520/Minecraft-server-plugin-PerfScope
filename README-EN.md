@@ -294,6 +294,107 @@ signals** — which is what distinguishes it from a generic MC exporter:
 | `perfscope_alerts_active` / `perfscope_alerts_suspended` | Current state of the alert state machine |
 | `perfscope_tps{period}` / `perfscope_tick_duration_seconds{stat}` | Note the unit: tick duration is in **seconds**; multiply by 1000 in Grafana to show MSPT |
 
+#### Scraping from a container / panel host
+
+**Almost every bug report against comparable exporters is this one thing, so it goes first.**
+Inside a container, `bind: "127.0.0.1"` binds the **container's own loopback** — not the host,
+and not the panel node. A Prometheus running outside that container cannot reach it, no matter
+what you try, even when it runs on the very same physical machine as the MC server.
+
+The diagnosis is a single contrast: scraping from outside gives `connection refused` / a timeout,
+while `curl 127.0.0.1:8940/metrics` inside the container returns 200. That combination means the
+bind was never changed — it is not the network, not a firewall, and not the plugin failing to start.
+
+> All three issues on the upstream `sladkoff/minecraft-prometheus-exporter` project
+> (#36, #123, #275) are this same cause. One reporter's closing comment was
+> "I'm such an idiot, it's the first line in the documentation."
+> This subsection exists so it does not happen here.
+
+**Rule: whenever the server runs in a container, change `prometheus.bind` to `"0.0.0.0"` first,
+then pick the target address for your setup.**
+
+| Deployment | `config.yml` | Scrape target |
+|---|---|---|
+| Bare metal (no container) | `bind: "127.0.0.1"` | `127.0.0.1:8940` |
+| Docker / docker-compose on the same host | `bind: "0.0.0.0"` + publish the port | `<host IP>:8940` |
+| Prometheus and MC on the same compose network | `bind: "0.0.0.0"` | the service name, e.g. `mc:8940` |
+| Pterodactyl / Pelican | `bind: "0.0.0.0"` + an extra allocation | `<node IP>:<allocated port>` |
+| MCSManager | `bind: "0.0.0.0"` + add the port to the instance | `<host IP>:<port>` |
+| AMP | `127.0.0.1` (same machine) or `0.0.0.0` | `127.0.0.1:8940` or `<host IP>:<port>` |
+| Shared hosting that forbids extra ports | cannot be scraped | see the end of this subsection |
+
+**Bare metal / same machine** — keep the default `bind: "127.0.0.1"` and scrape
+`127.0.0.1:8940`. This is the safe default and needs no change.
+
+**Docker / docker-compose** — two options:
+
+- (a) keep `bind: "0.0.0.0"` inside the container and publish the port
+  (`docker run -p 8940:8940 ...`, or `ports: ["8940:8940"]` in compose), then scrape
+  `<host IP>:8940`;
+- (b) when Prometheus runs on the same compose network as the server, set `bind: "0.0.0.0"` and
+  scrape the **service name** directly: `mc:8940` — no port publishing at all.
+
+**Pterodactyl (Pelican shares the same panel lineage, so the same applies)** — the panel hands out
+host ports as "allocations". The first two steps are the admin's, the last two are yours:
+
+1. the port pool is created per port range under `Admin → Nodes → Allocation`;
+2. the allocation is attached to the server under
+   `Admin → Servers → [server] → Build Configuration → Assign Additional Ports`;
+3. in `config.yml` change `bind` to `"0.0.0.0"` — adding the allocation without changing the bind
+   still leaves the endpoint unreachable from outside;
+4. Prometheus scrapes `http://<node IP>:<allocated port>/metrics`.
+
+> **Why you cannot see the "Create Allocation" button**: the client-side button only appears when
+> the server's `allocation_limit` is greater than 0, and on a stock panel that value may be `NULL`.
+> Until an admin raises the limit, a regular user simply **does not see the entry point** — it is
+> not something you are doing wrong, ask the admin.
+
+> **A counter-intuitive Wings behaviour**: Wings binds the *specific IP* recorded on the allocation,
+> not `0.0.0.0`. The endpoint can therefore be perfectly reachable from outside while
+> **not** reachable from the host's own `localhost`. That is expected, not a bug — scrape the
+> allocation IP, not `127.0.0.1`.
+
+**MCSManager** — container instances publish ports from a user-editable list (add the port in the
+instance settings); non-Docker instances bind the host port directly, with no publishing involved.
+Same rule either way: `bind: "0.0.0.0"` and scrape the host IP plus that port.
+
+**AMP** — instances typically run as native tmux processes, so there is no container network to
+cross. With Prometheus on the same machine, `bind: "127.0.0.1"` works; across machines, use
+`"0.0.0.0"` plus the host port.
+
+**Shared hosting that genuinely forbids extra ports** — this exists, but it is rare (a survey of 93
+provider guides found roughly 2% with a hard "not supported"). If your host really does not allow
+extra ports, this endpoint **cannot be scraped from outside**, and the plugin has **no push mode
+and no plan to add one**. Use the built-in webhook alerting instead (`alerts.webhook.*`, supporting
+Discord / WeCom / Feishu / DingTalk / OneBot): the server sends the alert outbound, so no inbound
+port is needed and you get notified without Prometheus.
+
+**Set a token before you open it up.** Binding `0.0.0.0` means anyone who can reach that port can
+read player counts, world names and plugin counts. Set a `prometheus.auth-token` and have the
+scraper send an `Authorization: Bearer <token>` header:
+
+```yaml
+# config.yml
+prometheus:
+  bind: "0.0.0.0"
+  auth-token: "replace-with-a-random-string"
+```
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: minecraft
+    static_configs:
+      - targets: ["10.0.0.12:8940"]
+    authorization:
+      type: Bearer
+      credentials: "the-same-random-string"
+```
+
+The plugin logs a WARNING whenever it detects a non-loopback bind (it is logged with or without a
+token, marked `NO AUTH` in the message when none is set) — seeing that line means the endpoint is
+now reachable from outside the container.
+
 A few conventions worth knowing before reading the data:
 
 - **Uncollected metrics are omitted entirely**, never rendered as `-1`. A missing row shows as a gap

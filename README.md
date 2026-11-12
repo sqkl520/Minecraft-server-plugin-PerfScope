@@ -27,7 +27,7 @@
 - **按世界独立告警** —— 各世界可覆盖实体告警阈值
 - **阈值告警主动推送**（v1.1 新增，v1.2 收敛） —— 告警触发时推送控制台 + 在线持有 `perfscope.alert` 权限的玩家；默认需连续 3 个采集周期超标才首次推送（防抖，可配）；同一告警默认 300 秒冷却防刷屏；级别升级（警告→严重）只推一条"（级别升级）"消息、不受冷却限制；故障恢复时发送恢复通知；可在 `config.yml` 的 `alerts` 段配置
 - **Webhook 推送**（v1.2 新增，v1.4 扩展） —— 告警 / 恢复 / 每日摘要可推送到 Discord、
-  QQ OneBot、**企业微信 / 飞书 / 钉钉**群机器人；全异步发送，失败只记日志不阻塞喵。
+  QQ OneBot、**企业微信 / 飞书 / 钉钉**群机器人；全异步发送，失败只记日志不阻塞。
 - **每日摘要**（v1.2 新增） —— 每天固定时刻推送 3 行概况：最低 TPS（含时刻）/ 峰值实体与内存 / 告警统计；若配置时刻服务端恰好停机，启动后会自动补发当天一次
 - **历史摘要**（v1.2 新增） —— `/perfscope history` 查看近 24 小时概况：覆盖时长、最低 TPS 与发生时刻、峰值实体、峰值内存，回答"什么时候开始变差的"
 - **热点区块定位**（v1.2 新增） —— `/perfscope hotspot` 列出全服实体密度 Top3 区块与坐标（含主导类型占比），把"实体多"下钻到"去哪个坐标看看"；坐标可点击复制
@@ -278,7 +278,7 @@ general:
 
 > 注：**红石活动**与**网络吞吐量**监测已于 v1.1 下线（红石为空实现、网络为硬编码假数据），相关指标与功能不再提供；`/perfscope redstone` 子命令保留入口但仅返回下线提示。
 
-> 注（Windows 上的进程 CPU）：`getProcessCpuLoad()` 的 Windows 实现每次调用都要枚举全部进程名，实测单次阻塞 **p50 171 ms / p90 257 ms / max 332 ms**，而它跑在 Bukkit 的**共享**异步池上，会挤占其他插件的异步任务。因此**在 Windows 上本插件不采集进程 CPU**，该指标显示「未知」，`cpu.process_warning_threshold` 不会触发；系统 CPU 与其余全部指标照常工作。Linux / macOS 读 `/proc` 或等价接口，是微秒级，进程 CPU 正常采集喵。
+> 注（Windows 上的进程 CPU）：`getProcessCpuLoad()` 的 Windows 实现每次调用都要枚举全部进程名，实测单次阻塞 **p50 171 ms / p90 257 ms / max 332 ms**，而它跑在 Bukkit 的**共享**异步池上，会挤占其他插件的异步任务。因此**在 Windows 上本插件不采集进程 CPU**，该指标显示「未知」，`cpu.process_warning_threshold` 不会触发；系统 CPU 与其余全部指标照常工作。Linux / macOS 读 `/proc` 或等价接口，是微秒级，进程 CPU 正常采集。
 
 ### 接入 Prometheus / Grafana
 
@@ -303,7 +303,96 @@ scrape_configs:
 | `perfscope_alerts_active` / `perfscope_alerts_suspended` | 告警状态机的当前状态 |
 | `perfscope_tps{period}` / `perfscope_tick_duration_seconds{stat}` | 注意单位：tick 时长是**秒**，Grafana 里乘 1000 显示为 MSPT |
 
-几条设计约定，看数据前值得知道喵：
+#### 容器 / 面板服：先把 `bind` 改掉
+
+**同类 exporter 的报错几乎全出自这一条，所以放在最前面。** 容器里的 `bind: "127.0.0.1"`
+绑的是**容器自己的回环**，不是宿主机，也不是面板节点。跑在容器外的 Prometheus 无论怎么抓
+都连不上，哪怕它和 MC 服务端在同一台物理机上。
+
+判定只看一个反差：从外面抓是 `connection refused` / 超时，进容器里
+`curl 127.0.0.1:8940/metrics` 却是 200。这个组合说明 bind 没改——既不是网络、不是防火墙，
+也不是插件没起来。
+
+> 上游同类插件 `sladkoff/minecraft-prometheus-exporter` 的三个 issue（#36、#123、#275）
+> 全是这一个原因，其中一位报告者最后的评论是
+> "I'm such an idiot, it's the first line in the documentation"。
+> 这一小节存在的唯一目的，就是让它在 PerfScope 上不再发生。
+
+**规则：只要服务端跑在容器里，先把 `prometheus.bind` 改成 `"0.0.0.0"`，再按场景决定抓哪个地址。**
+
+| 部署方式 | `config.yml` | Prometheus 抓取目标 |
+|---|---|---|
+| 宿主机直装（非容器） | `bind: "127.0.0.1"` | `127.0.0.1:8940` |
+| 同机 Docker / docker-compose | `bind: "0.0.0.0"` + 发布端口 | `<宿主机IP>:8940` |
+| Prometheus 与 MC 在同一 compose 网络 | `bind: "0.0.0.0"` | 服务名，如 `mc:8940` |
+| Pterodactyl / Pelican | `bind: "0.0.0.0"` + 增加端口分配 | `<节点IP>:<分配到的端口>` |
+| MCSManager | `bind: "0.0.0.0"` + 端口列表加端口 | `<宿主IP>:<端口>` |
+| AMP | `127.0.0.1`（同机）或 `0.0.0.0` | `127.0.0.1:8940` 或 `<宿主IP>:<端口>` |
+| 明确禁止额外端口的虚拟主机 | 无法被抓取 | 见本节末 |
+
+**宿主机直装 / 同机抓取** —— 保持默认 `bind: "127.0.0.1"`，抓 `127.0.0.1:8940`。这是安全
+的默认值，不需要动。
+
+**Docker / docker-compose** —— 两个选择：
+
+- (a) 容器内 `bind: "0.0.0.0"`，再把端口发布出来（`docker run -p 8940:8940 ...`，或 compose 里
+  `ports: ["8940:8940"]`），Prometheus 抓 `<宿主机IP>:8940`；
+- (b) Prometheus 与 MC 在同一个 compose 网络里时，容器内 `bind: "0.0.0.0"`，直接抓 **服务名**：
+  `mc:8940`（连端口都不用发布）。
+
+**Pterodactyl（Pelican 属同一面板谱系，同理）** —— 面板把宿主端口以「分配（allocation）」
+的形式发给服务器。管理员做前两步，你自己做后两步：
+
+1. 端口池在 `Admin → Nodes → Allocation` 里按端口段创建；
+2. 给该服务器加分配：`Admin → Servers → [服务器] → Build Configuration → Assign Additional Ports`；
+3. `config.yml` 里把 `bind` 改成 `"0.0.0.0"`——只加分配不改 bind，外部照样进不来；
+4. Prometheus 抓 `http://<节点IP>:<分配到的端口>/metrics`。
+
+> **为什么看不到「Create Allocation」按钮**：客户端那个按钮只在服务器的 `allocation_limit`
+> 大于 0 时才出现，而面板上的初始值可能是 `NULL`。也就是说，在管理员抬高上限之前，普通用户
+> **根本看不到这个入口**——不是你操作不对，得找管理员。
+
+> **Wings 的一个反直觉行为**：Wings 是按分配项里那个**具体 IP** 去绑宿主端口的，不是绑
+> `0.0.0.0`。所以端点可能从外部完全可达，却从**宿主机自己的 `localhost`** 抓不到。这是预期
+> 行为，不是 bug——抓分配 IP，不要抓 `127.0.0.1`。
+
+**MCSManager** —— 容器实例的端口来自用户可编辑的端口列表（在实例设置里加），非 Docker 实例
+直接绑宿主端口、不涉及发布。两种情况同一条规则：`bind: "0.0.0.0"`，抓宿主 IP 与对应端口。
+
+**AMP** —— 实例通常以原生 tmux 进程运行，没有容器网络要跨。Prometheus 在同一台机器上时
+`bind: "127.0.0.1"` 就能用；跨机才需要 `"0.0.0.0"` 加宿主端口。
+
+**我真的没有额外端口可用** —— 这种主机确实存在，但很少（抽样 93 份服务商文档，写死「不支持」
+的约 2%）。如果所在主机明确禁止开放额外端口，那么这个端点**无法被外部抓取**，且本插件
+**没有推送模式（push mode），也没有加入的计划**。这种场景请改用本插件自带的 webhook 告警
+（`alerts.webhook.*`，支持 Discord / 企业微信 / 飞书 / 钉钉 / OneBot）：告警由服务器主动发出，
+不需要任何入站端口，没有 Prometheus 也能收到通知。
+
+**开放前先设 token。** 绑 `0.0.0.0` 意味着任何能访问该端口的人都能读到在线玩家数、世界名与
+插件数量。设一个 `prometheus.auth-token`，抓取方带 `Authorization: Bearer <token>` 头：
+
+```yaml
+# config.yml
+prometheus:
+  bind: "0.0.0.0"
+  auth-token: "换成一串随机字符串"
+```
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: minecraft
+    static_configs:
+      - targets: ["10.0.0.12:8940"]
+    authorization:
+      type: Bearer
+      credentials: "换成同一串随机字符串"
+```
+
+插件在检测到非回环绑定时会打一条 WARNING（没设 token 时也照打，并在括号里标 `NO AUTH`）——
+看到这条，就说明端点已经对容器外开放了。
+
+几条设计约定，看数据前值得知道：
 
 - **未采集的指标整行不输出**，不会出现 `-1`。缺行让 Grafana 显示 gap，比画一条贴底的假线诚实。
   例如 Windows 上 `perfscope_cpu_process_ratio` 就是缺的。
@@ -312,7 +401,7 @@ scrape_configs:
 - **Folia 上** `perfscope_build_info` 带 `tps_scope="global_region"`，因为那里的 TPS 只是
   global region 的局部值，不是全服。
 - 端点默认只听回环。改成 `0.0.0.0` 时启动会打 WARNING：玩家数、世界名、插件数量都在里面，
-  公网可达前请先设 `auth-token`喵。
+  公网可达前请先设 `auth-token`。具体抓取方式见上方「容器 / 面板服」小节。
 
 ## 性能与开销（自测，非保证）
 
@@ -452,7 +541,7 @@ mvn test -Dtest=CsvLayoutTest   # 跑单个测试类
 mvn clean package -DskipTests   # 跳过测试打包
 ```
 
-测试依赖为 `test` 作用域，不会进入最终 JAR 喵。
+测试依赖为 `test` 作用域，不会进入最终 JAR。
 
 ## 许可证
 
