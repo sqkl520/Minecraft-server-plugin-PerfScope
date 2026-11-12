@@ -87,16 +87,35 @@ players:
 entities:
   enabled: true
   # 实体总数告警阈值（全服合计：所有世界实体数相加后与下方阈值比较，与命令层 /perfscope entities 的总数口径一致）
-  # 配置了 worlds 覆盖的世界按各自阈值逐世界判定、同时仍计入全服合计总数；未配置的世界由全服合计阈值覆盖
-  total_warning_threshold: 2000
-  total_critical_threshold: 3000
+  #
+  # 【默认值依据】60 人在线的正常 Paper 服，全服实体数落在 5,000-15,000 区间
+  #   （规模调研给出的区间，非本机实测）。旧默认 2000/3000 是"小服"假设，正常服开服
+  #   几秒就会报 critical —— 那是首次安装被满屏误报淹没的主要原因之一。
+  #   新默认按该区间的**上界**再留余量取整：
+  #     total_warning_threshold  = 20,000（上界 15,000 再留约 33%：阈值贴着上界会在玩家高峰期反复越界）
+  #     total_critical_threshold = 30,000（上界的 2 倍；warning:critical 仍为 1:1.5，与旧默认同形）
+  #   ⚠️ 小服请下调。开服后先执行 /perfscope entities 看自己服的真实数量，
+  #      再把阈值定在"正常高峰值 × 1.3"左右，否则永远收不到告警。
+  #      单区块的实体密度是另一个键（hotspots.chunk-warning-threshold），不受此处影响。
+  total_warning_threshold: 20000
+  total_critical_threshold: 30000
 
 # 区块监测
 chunks:
   enabled: true
   # 加载区块数告警阈值 (每世界)
-  loaded_warning_threshold: 1500
-  loaded_critical_threshold: 2500
+  #
+  # ⚠️ 口径是「每个世界」，不是全服合计。只开 1 个世界的服上，这个值等于全服总数——
+  #    所以阈值必须按"单个世界可能达到的上限"定，不能按"全服峰值均摊给 3 个世界"定。
+  #
+  # 【默认值依据】同样来自上述调研区间：60 人在线的正常 Paper 服，全服加载区块数
+  #   3,000-8,000。单世界最坏情况是整个区间都压在一个世界上（单世界服），故按上界取：
+  #     loaded_warning_threshold  = 10,000（上界 8,000 再留约 25%，取整）
+  #     loaded_critical_threshold = 15,000（warning 的 1.5 倍，与实体阈值同一比例）
+  #   ⚠️ 小服请下调；视距（view-distance）调得很高、或玩家长期分散在野外的服，实际值会更高，
+  #      请先执行 /perfscope chunks 看每个世界的真实数字再定。改 view-distance 后也记得复核。
+  loaded_warning_threshold: 10000
+  loaded_critical_threshold: 15000
 
 # 内存监测
 memory:
@@ -119,7 +138,7 @@ cpu:
   # Linux / macOS 不受影响（读取是微秒级）。这个开关对两类平台的含义不同：
   #   - Windows：进程 CPU 本就不采，关掉只剩"系统 CPU 不采 + 告警停止"。
   #   - Linux/macOS：关掉可以省掉整个 CPU 采集与告警。
-  # 如果你的服只关心 TPS/MSPT/内存，把 enabled 设为 false 可以完全省掉这部分开销喵。
+  # 如果你的服只关心 TPS/MSPT/内存，把 enabled 设为 false 可以完全省掉这部分开销。
   enabled: true
   # 进程 CPU 使用率告警阈值 (百分比)
   # 注意分母是【整机 CPU】：16 核机器上单个线程打满只显示 6.25%，
@@ -180,7 +199,24 @@ report:
 #   （例如 60 ≈ 1 分钟；与 tps 的 1 分钟均值窗口对齐才有实际意义）。
 alerts:
   # 总开关 (false = 完全不做告警检查与推送)
-  enabled: true
+  #
+  # 【v1.4 起默认 false —— 告警是"选择加入"，不是"默认开启"】
+  #   原因：任何一套随包默认阈值都不可能同时适合小服与超大服。默认开启时，服主在还没看过
+  #   自己服的真实规模之前，就先被一轮与自己无关的 critical 告警刷屏（首装几分钟内就发生），
+  #   而插件本身其实运转正常。默认关闭后：采集、/perfscope 全量诊断、报告、历史、Prometheus
+  #   全部照常工作，只有"推送"这一层需要你先点头。
+  #
+  #   开启步骤（三步，约 1 分钟）：
+  #     1) 启动一次服务器，执行下列命令，记下你自己服的真实数字：
+  #          /perfscope entities    → 看全服实体总数与"按世界分布"
+  #          /perfscope chunks      → 看每个世界的加载区块数
+  #          /perfscope             → 看 TPS / MSPT / 内存 的常态读数
+  #     2) 按"正常高峰值 × 1.3"改写上面 entities / chunks / memory / tps 段的阈值
+  #        （随包默认按 60 人在线的中服估算，小服与超大服都必须自己调）。
+  #     3) 把本行改成 enabled: true，再执行 /perfscope reload。
+  #
+  #   ⚠️ 旧版本配置里已写 enabled: true 的服主不受影响：配置从你的文件读，不与随包默认合并。
+  enabled: false
   # 控制台推送 (critical 用 severe / warning 用 warning / 恢复用 info)
   console: true
   # 游戏内推送 (发送给在线且有 perfscope.alert 权限的玩家)
@@ -211,10 +247,13 @@ alerts:
   # 实测（E5-2660 v2，90% 阈值）6 小时产出 1333 条消息。下面三项共同把它压到个位数。
   # 三项各自独立可调，全部设为 0 即完全恢复旧行为。
 
-  # 抖动窗口（秒，默认 60，0 = 关闭）
+  # 抖动窗口（秒，默认 180，0 = 关闭）
   # 该窗口内发生的"恢复 → 再次越界"，视为同一次事故的中间态：
   # 不推送"已恢复正常"，也不推送"问题再次出现"，状态机静默接管。
-  # 用户日志里 5 次恢复有 4 次发生在 2-40 秒内，60 秒即可挡掉绝大部分假恢复。
+  # 取值依据：用户日志里 5 次恢复有 4 次发生在 2-40 秒内（60 秒即可挡掉绝大部分假恢复）；
+  # 真机 10 分钟波动负载实测的「恢复 → 再次越界」间隔落在 4-66 秒，60 秒窗口会漏掉 66 秒那次，
+  # 故取 180 秒留出余量。不再更长的原因：超过 5 分钟会把真实的短暂故障也吞掉
+  # （故障发生 → 5 分钟内自愈 → 用户从未收到过任何通知）。
   flap-window-seconds: 180
 
   # 同级别重推的数值变化阈值（默认 8，0 = 关闭）
@@ -302,7 +341,7 @@ hotspots:
 # ⚠️ 安全：端点会暴露在线玩家数、世界名、插件数量。默认只听 127.0.0.1 且不鉴权——
 # 本机抓取安全，但绑到 0.0.0.0 就等于对局域网/公网开放。改绑定时插件会打 WARNING。
 #
-# ⚠️ 容器里最常见的坑（同类 exporter 的社区 issue 几乎全是这一条喵）：
+# ⚠️ 容器里最常见的坑（同类 exporter 的社区 issue 几乎全是这一条）：
 #   容器内的 127.0.0.1 是【容器自己】的回环，既不是宿主机，也不是面板节点。
 #   所以在 Docker（bridge / 自定义网络）/ Pterodactyl / MCSManager 里保持 bind: "127.0.0.1"，
 #   容器外的 Prometheus 无论怎么抓都连不上——外部表现为 connection refused / 超时，
@@ -329,7 +368,7 @@ hotspots:
 #   注意：Wings 绑宿主端口用的是【分配项里记录的那个 IP】——可能是具体地址，也可能是 0.0.0.0
 #   （分配写 127.0.0.1 时会被改写到 pterodactyl0 网桥，默认 172.18.0.1），所以分配记的是具体
 #   非回环地址时，从宿主机自己的 localhost:8940 抓可能失败。
-#   这不代表端点没起来——用 docker ps 看实际端口映射，抓映射出来的那个 IP:端口喵。
+#   这不代表端点没起来——用 docker ps 看实际端口映射，抓映射出来的那个 IP:端口。
 prometheus:
   # 总开关。默认关闭：绝大多数服主没有 Prometheus，开了只会多一个监听端口。
   enabled: false
@@ -352,7 +391,7 @@ prometheus:
   # 属凭据：插件日志只会记录端点地址，绝不回显本值。
   # 注意：设了 token 却忘了在 prometheus.yml 里带请求头时，插件返回 401 + WWW-Authenticate:
   # Bearer，而 Prometheus 把任何非 200 都记为抓取失败（up == 0）——表现为 target DOWN 且没有
-  # 可读原因，像网络故障；去 Prometheus 的 Targets 页面看 scrape error 才能定位喵。
+  # 可读原因，像网络故障；去 Prometheus 的 Targets 页面看 scrape error 才能定位。
   auth-token: ""
 
 # 各世界单独设置 (可覆盖全局设置)
@@ -360,13 +399,28 @@ prometheus:
 # 未在此处配置的世界，不逐世界判定，统一由上方 entities 段的全服合计阈值覆盖。
 # 世界名必须是 Bukkit 的真实世界名（区分大小写，如 world / world_nether / world_the_end）。
 # 9A-11：加载时插件会把这里的世界名与当前已加载世界比对，不认识的名字会 WARNING 并列出可用世界名。
+#
+# 【v1.4 重标定：这三项是**示例**，不是推荐值】
+#   值来自一个明确假设，不是实测：把上方全服告警阈值(20,000/30,000)按
+#   「主世界 60% / 下界 25% / 末地 15%」的常见占比摊到三个世界。
+#   三个世界的阈值之和恰好等于全服阈值，所以两套口径不会互相打架。
+#   ⚠️ 你的服可能只有 1 个世界、或有自定义世界名，这时请**直接改这里的世界名与数值**，
+#      或整段删掉（删掉后未配置的世界由全服合计阈值统一判定，功能不会少）。
+#      用 /perfscope entities 的「按世界分布」查看你自己服的真实占比。
+#
+# 【为什么加了 critical 行】旧示例只写 warning，critical 会静默回退成全服的 30,000——
+#   于是「某世界 warning 了、全服没 critical、这个世界也永远 critical 不了」，
+#   阈值形同虚设。这里显式给出 1.5 倍（与全服 warning:critical 同一比例）。
 worlds:
   world:
     entities:
-      total_warning_threshold: 2500
+      total_warning_threshold: 12000
+      total_critical_threshold: 18000
   world_nether:
     entities:
-      total_warning_threshold: 2000
+      total_warning_threshold: 5000
+      total_critical_threshold: 7500
   world_the_end:
     entities:
-      total_warning_threshold: 1500
+      total_warning_threshold: 3000
+      total_critical_threshold: 4500

@@ -109,9 +109,13 @@ public final class CoreRules {
     /**
      * 泄漏启发式：窗口内堆占用持续抬升，且窗口后半段谷值未回落到起点。
      *
-     * <p>措辞纪律（9A-8）：原 detail 声称"GC 后水位未回落"，但代码从未做过 GC 后测量
-     * （{@code HistorySample} 里没有 gcCount 字段）。现在只陈述<b>观测到的事实</b>
-     * （窗口内最低点仍高于起点），不声称做过 GC 后采样。</p>
+     * <p>措辞纪律（9A-8）：原 detail 声称"GC 后水位未回落"，但代码从未做过 GC 后测量。
+     * 现在只陈述<b>观测到的事实</b>（窗口内最低点仍高于起点），不声称做过 GC 后采样。</p>
+     *
+     * <p>v1.4 备注：{@code HistorySample} 现在<b>已带</b> {@code gcCount}/{@code gcTime}
+     * （CSV schema 加列），因此"GC 后测量"如今在数据上是可行的——但本规则仍不做，
+     * 它需要按 GC 事件对齐样本边界（花括号式切割），而不是简单地"取最近一次 GC 之后的样本"。
+     * 在做到那一步之前，本规则的措辞仍必须停在"观测到的事实"，不得暗示做过 GC 后采样。</p>
      */
     public static final class MemoryLeakRule implements DiagnosticRule {
         private static final long WINDOW_MINUTES = 30;

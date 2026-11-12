@@ -3,7 +3,7 @@
 本项目：**PerfScope** —— Minecraft 服务器性能监测插件（Paper 1.20.4+ / Purpur / Pufferfish / Folia / Leaves，Java 17）。
 后台定时采集性能快照 → 游戏内 17 个子命令一屏诊断 → HTML/TXT/JSON 报告导出 → ActionBar 实时监测 → 阈值告警。
 
-> **仓库**：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope> ｜ **版本**：`1.2.1`（当前正式版；`[Unreleased]` 累积未发布改动）
+> **仓库**：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope> ｜ **版本**：`1.3.0`（当前正式版；最新 tag 与 `versions/PerfScope-1.3.0.jar` 均为 1.3.0；`[Unreleased]` 累积 v1.4 未发布改动）
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/)。v1.2「找得到」开发周期已收尾，各段以 **Wave（开发波次）** 划分并标注对应提交哈希。
 
@@ -18,8 +18,16 @@
 
 > 本节是给使用者看的：只有**改了什么、有什么影响**。过程与过程性记录在上层工作区
 > `docs/reports/`，不在本仓库。按影响面从大到小排列喵。
+>
+> **⚠️ 本节混装了已发布与未发布内容**。标了「v1.4 未发布」的小节**不在** `v1.3.0`
+> 的任何发布包中（既不在 git tag `v1.3.0`，也不在 `versions/PerfScope-1.3.0.jar`）——
+> 它们对应 `pom.xml` 的 `1.3.0` 之后、`[Unreleased]` 区段累积的 v1.4 改动，目前的
+> `1.3.0` 归档 JAR 里查不到 Prometheus 端点、`/perfscope webhook` 子命令与
+> 企业微信 / 飞书 / 钉钉通道。要用这些功能只能自己从源码构建喵。
 
-### Added — 逐告警 Prometheus 指标（v1.4）
+### v1.4 未发布 — 逐告警 Prometheus 指标
+
+> **v1.4 未发布**：本小节不在 v1.3.0 的任何发布包中，需自行从源码构建喵。
 
 - **`perfscope_alert{key,module}`**：每条可判定的告警键一条序列，
   值 `0` 正常 / `1` 警告 / `2` 严重喵。
@@ -39,7 +47,9 @@
   而 9941/9942/9943 同样已被占用；8940 在 IANA 与 Prometheus 两张表中均未分配喵。
   端口被占时日志会直接点名冲突对象并给出替代值喵。
 
-### Fixed — 会让用户看到错误结论的问题
+### v1.4 未发布 — 告警状态加载顺序
+
+> **v1.4 未发布**：本小节不在 v1.3.0 的任何发布包中，需自行从源码构建喵。
 
 - **关掉告警功能的服务器会永久虚报告警**。`AlertService.start()` 原先先 `loadState()`
   再从磁盘回灌上次运行的告警，**之后**才检查 `alerts.enabled`——于是关掉告警的服会把
@@ -47,6 +57,8 @@
   永久污染 `/metrics` 与 `/perfscope status` 的告警计数喵。
   现在先判开关再加载；磁盘上的 `alerts.state` 不会丢（`persistState()` 以
   `stateLoaded` 为写盘前提，跳过读取即跳过写盘）喵。
+
+### Fixed — 会让用户看到错误结论的问题
 
 - **在非 Paper 系服务端上装上去会半装配后崩溃**。README 与 `plugin.yml` 都只声称支持 Paper 系，
   但 `onEnable` 里没有平台守卫：在纯 Bukkit/Spigot 上会走完全部初始化，然后在第一个 Paper 专有
@@ -101,7 +113,10 @@
   与界面语言不一致。现在全部改走消息键表（新增 36 个键），`language: en` 下控制台
   零中文；`language: zh` 的输出与改造前逐字一致喵。
 
-### Added — 新功能
+### v1.4 未发布 — 企业微信 / 飞书 / 钉钉群机器人
+
+> **v1.4 未发布**：本小节不在 v1.3.0 的任何发布包中（归档 JAR 的 `config.yml` 里
+> `alerts.webhook.type` 只有 `discord | onebot`，没有 `secret` 键），需自行从源码构建喵。
 
 - **支持企业微信 / 飞书 / 钉钉群机器人**（`alerts.webhook.type` 新增 `wecom` / `feishu` / `dingtalk`）。
   飞书与钉钉支持可选的 `alerts.webhook.secret` 加签喵。
@@ -110,9 +125,11 @@
     钉钉 `msgtype`+`text.content`（签名拼在 URL query，时间戳用**毫秒**）喵。
   - 老配置零改动可用：`type: discord` / `type: onebot` 行为不变，缺 `secret` 键走默认空串喵。
 
-### Fixed — 会让用户看到错误结论的问题
+### v1.4 未发布 — webhook 投递结果判定 / 自检 / 限流
 
-- **webhook 投递失败却显示成功**（本次最重要的修复）。企业微信 / 飞书 / 钉钉在**业务失败时也返回
+> **v1.4 未发布**：本小节不在 v1.3.0 的任何发布包中，需自行从源码构建喵。
+
+- **webhook 投递失败却显示成功**（本批最重要的修复）。企业微信 / 飞书 / 钉钉在**业务失败时也返回
   HTTP 200**，错误码在响应体里；而旧实现用 `BodyHandlers.discarding()` 丢掉响应体、只看
   `statusCode >= 300`，于是这三家的每一次失败都被当成成功喵。
   - **这个 bug 在 OneBot 上早已存在**：OneBot v11 的 `/send_private_msg` 恒定返回 HTTP 200，
@@ -128,7 +145,7 @@
 - **续读响应体会放大内存**。改用读取响应体后补了 4 KB 上限——旧实现的 `discarding()` 顺带保证了
   不会因远端返回巨大响应而 OOM，改成读取后这个保护必须显式补回喵。
 
-### Added — webhook 自检与限流（v1.4）
+#### webhook 自检与限流
 
 - **`/perfscope webhook status | test`**。三个国内平台的失败模式全是静默的（HTTP 200 + 业务码），
   服主唯一的观测渠道是"告警群一直没消息"，而"服务器健康所以没告警"和"告警根本没送到"看起来一样喵。
@@ -145,7 +162,7 @@
     `C + floor(60000/T)`。实测 3000ms + 容量 2 就是 22 条，会触发封禁；4000ms 才留出余量喵。
   - 被丢弃的条数在 `/perfscope webhook status` 可见——这是服主发现自己告警被节流的唯一信号喵。
 
-### Fixed — webhook 计数口径（v1.4）
+#### webhook 计数口径
 
 - **`webhookQueuedToday` 把没发出去的消息也记成"已排队"**。旧代码用
   `webhookQueued = wn.isReady()` 判断，而 `isReady()` 只回答"配置齐了没有"——
@@ -154,6 +171,8 @@
   一次 HTTP 请求覆盖 8 条告警就加 8喵。计数单位应是"发出的消息条数"，已移出循环喵。
   （`pushOkToday` 仍按告警条数计——两者刻意不同：一个统计"处理了多少条告警"，
   一个统计"发出了多少条消息"喵。）
+
+### v1.4 未发布 — Prometheus 指标端点
 
 - **Prometheus 指标端点**（`prometheus.*`，默认关闭）。用 JDK 自带的
   `com.sun.net.httpserver` 实现，**零第三方依赖**、不增加 jar 体积，让指标脱离游戏内命令
@@ -176,7 +195,7 @@
 ### Added — 新配置键
 
 - `prometheus.enabled` / `bind` / `port` / `path` / `server-id` / `auth-token`（默认全关、
-  `127.0.0.1:9940/metrics`、无鉴权）喵。
+  `127.0.0.1:9940/metrics`、无鉴权；**v1.4 未发布**，不在 v1.3.0 发布包中）喵。
 - `alerts.refire-min-interval-seconds`（默认 60）：复燃识别窗口，`0` = 关闭复燃识别喵。
 - `hotspots.scan-shards`（默认 10）：热点分区增量扫描的分片数，`1` = 关闭分片（旧的一次性全遍历）喵。
 - `general.language`、`cpu.hysteresis_margin`、`alerts.flap-window-seconds`、`alerts.repush-delta`
@@ -216,8 +235,14 @@
 - `plugin.yml` 版本号由 Maven filtering 从 `pom.xml` 注入，无需手工同步喵。
 - bStats 匿名统计项目 ID 已注册（35061），**数据已实际上报**；上报内容为聚合分布，
   不含配置阈值、玩家名、世界名或聊天内容。可在 `general.bstats-enabled: false` 关闭喵。
+- **Windows 上进程 CPU 不再可用**（见上方 Changed）。判定与实测理由集中在
+  `ServerCompat.isProcessCpuReliable()`；Linux / macOS 不受影响喵。
+- 本次性能结论与完整证据链见 `docs/06-tasks/research/v140-01-cpu-async-blocking.md`喵。
 
-### Docs — 容器 / 面板服的抓取说明（v1.4）
+### v1.4 未发布 — 文档：容器 / 面板服的抓取说明
+
+> **v1.4 未发布**：本节描述的是 v1.4 的 Prometheus 部署文档（README 中英双语），
+> 同样不在 v1.3.0 的任何发布包中喵。
 
 - **删掉一句错的配置注释**。原 `config.yml` 写着「面板服（MCSManager / Pterodactyl）
   常无法开放入站端口，那种环境用 push 模式更合适」——这句话是错的，而且指向一个
@@ -244,9 +269,37 @@
     这两种情况 `127.0.0.1` 就够用，不必放大 bind 白白丢掉回环保护喵。
   - 对确实无法开端口的那约 2%，明确写「本插件没有 push 模式，也没有计划」，
     并指向已有的 webhook 告警作为替代——告警由服务器主动发出，不需要入站端口喵。
-- **Windows 上进程 CPU 不再可用**（见上方 Changed）。判定与实测理由集中在
-  `ServerCompat.isProcessCpuReliable()`；Linux / macOS 不受影响喵。
-- 本次性能结论与完整证据链见 `docs/06-tasks/research/v140-01-cpu-async-blocking.md`喵。
+
+### v1.4 未发布 — 文档：版本口径修正（README / CHANGELOG / versions）
+
+> 起因：README / CHANGELOG 一边把「最新正式版」写成 `1.2.1`，一边用大段篇幅描述
+> Prometheus 端点、`/perfscope webhook` 与企业微信 / 飞书 / 钉钉——而这些**不在任何
+> 已发布的包里**（tag `v1.3.0` 与 `versions/PerfScope-1.3.0.jar` 都没有）。同时 README
+> 没写「最新正式版是 1.3.0」。对一个监测插件来说，文档承诺了下载不到的软件就是信任问题，
+> 本次把这些口径全部对齐喵。
+
+- **README 安装段（中英双语）**：`> **下载**` 行的「最新正式版 v1.2.1」改为 **v1.3.0**
+  （`PerfScope-1.3.0.jar`），并在其下加一行「本文档同时描述了尚未发布的 v1.4 内容」的
+  总说明喵。
+- **README 的 v1.4 功能小节**：Prometheus / Grafana 接入节、配置段的 `webhook.secret` /
+  `wecom|feishu|dingtalk` 通道、功能列表的 Webhook 推送条目，均加「**v1.4 未发布**」
+  标记，写明不在 v1.3.0 任何发布包中、需自行从源码构建喵。
+- **CHANGELOG 头部**：`1.2.1（当前正式版）` 改为 `1.3.0（当前正式版）`，并注明最新 tag 与
+  `versions/` 归档均为 1.3.0喵。
+- **CHANGELOG 的 1.3.0 汇总节**：把混装的 v1.4 小节（逐告警 Prometheus 指标、企业微信 /
+  飞书 / 钉钉通道、webhook 自检 / 限流 / 计数口径 / 投递判定、容器抓取文档）显式标为
+  「v1.4 未发布」，与已发布内容区分；顶部加总说明喵。
+- **`versions/README.md`**：修正了三处与归档 JAR 实际内容不符之处喵。
+  - 1.3.0 条目写着「11k 区块实测 p95 54→29ms、超 tick 周期 7.6%→0%」——这组数字在仓库
+    任何实测记录里都找不到。真实 A/B（`docs/06-tasks/research/v140-01-hotspot-sharding.md`
+    §4.2，11,047 区块空闲服、同一 JAR 只改 `scan-shards`）是 **p95 33→30ms（噪声内）、
+    max 78→41ms、超 1 tick 周期 2/300→0/300**。已改为实测值喵。
+  - 键数写成 **724**，但 `check-i18n.mjs` 对 tag `v1.3.0` 源码实测是 **725**（`docs/…/
+    v130-07-release-materials.md:34` 也记 724，属同源笔误）。已改为 725 并标注来源喵。
+  - 表格每行的 GitHub Releases 链接单独占一行且无 `|`，markdown 会把它渲染在表格外。
+    已合并进同一单元格喵。
+  - 补上「1.3.0 归档早于 v1.4 的 Prometheus 工作」与「为什么 `target/` 里也有一个同名
+    1.3.0 但内容不同」两节；英文段此前仍推荐 1.2.0，一并更新为 1.3.0喵。
 
 ### 升级注意 — 从 1.2.x 升到 1.3.0
 

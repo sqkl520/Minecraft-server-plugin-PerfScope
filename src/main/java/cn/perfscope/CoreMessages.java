@@ -60,6 +60,19 @@ public final class CoreMessages {
             "  [PerfScope] bStats anonymous metrics disabled (pluginId is 0; set it after registering at bstats.org)",
             "  [PerfScope] bStats 匿名统计未启用 (pluginId 占位为 0，作者注册 bstats.org 后替换生效)");
 
+        // ---- 首次安装引导（v1.4）----
+        // 为什么单独一条：随包默认 alerts.enabled=false（告警是"选择加入"）。控制台若只留
+        // AlertService 的 "Alert service is not enabled (alerts.enabled=false)"，用户知道
+        // "没开"但不知道"该怎么做"——而这一步恰好依赖他自己服的规模（阈值必须自己调）。
+        // 因此这条只做一件事：给出可执行的三步，且**不**在告警已启用时出现（否则是假话）。
+        // {0} = 配置键名（alerts.enabled），不写死字面量，改键名时只需改调用点一处。
+        put(en, zh, "core.banner.alerts-off-by-default",
+            "[PerfScope] Alerts are OFF by default. Check your server's real counts with "
+                + "/perfscope entities and /perfscope chunks, set the thresholds for your size, "
+                + "then enable with {0}: true",
+            "[PerfScope] 告警默认关闭。先用 /perfscope entities 与 /perfscope chunks 查看本服真实规模，"
+                + "按你的规模改好阈值，再把 {0} 设为 true 开启");
+
         // ---- 采集健康自检 ----
         put(en, zh, "core.health.stale",
             "[PerfScope] Collection stopped updating {0}s ago (last success {1}, {2} consecutive failures) — "

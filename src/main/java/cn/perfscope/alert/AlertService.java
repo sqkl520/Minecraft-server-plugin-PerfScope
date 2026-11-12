@@ -1043,6 +1043,23 @@ public class AlertService {
             if (current.containsKey(key)) {
                 continue; // 本周期仍活跃：已在步骤 2 处理
             }
+            // v1.4：采集层**可能刻意不生成**某条仍然越界的告警消息（目前只有实体：全服合计与
+            // 逐世界口径重叠时，全服那条会被去重——见 MetricsCollector#shouldEmitGlobalEntitiesAlert）。
+            // 这种键在 current 里缺席，但它的事实是"问题还在"，若当作干净周期处理，
+            // 就会推出一条与事实相反的"已恢复正常"。
+            //
+            // 判据用 snap.alertLevels：采集层对每个**判定过**的键每周期必写一次（健康时写 0），
+            // 它是"判定结果"而非"要不要发消息"的派生值，因此正好能区分这两种缺席：
+            //   · 键在表里且 >0 → 判定过、确实越界，只是消息被更具体的同级告警覆盖了；
+            //   · 键不在表里 / 值为 0 → 模块没判定它，或它真的干净了 → 走正常恢复流程。
+            // 本保险只在键**已处于活跃态**时生效（循环只遍历 activeAlerts），所以它只能
+            // 阻止一次误报的"已恢复"，不可能让从没告过警的键卡在活跃态。
+            Integer judgedLevel = snap.alertLevels == null ? null : snap.alertLevels.get(key);
+            if (judgedLevel != null && judgedLevel > 0) {
+                recoveryCounts.remove(key);
+                cleanRunStartMs.remove(key);
+                continue;
+            }
             String module = rec.module;
             if (module != null && snap.unavailable.contains(module)) {
                 // 模块不可用：不算恢复（"消息消失"不等于"故障恢复"），先统计不可用时长
@@ -2266,7 +2283,48 @@ public class AlertService {
         return java.util.Map.copyOf(out);
     }
 
+    /**
+     * 9A-14 / 9A-18：追加一行告警历史到 {@code alerts.jsonl}。
+     *
+     * <p><b>为什么必须异步</b>：本方法由 {@link #recordEvent} 经 {@link #onSnapshot} 调用，
+     * 而 onSnapshot 跑在主线程定时器上。旧实现在 tick 线程上做 {@code isFile() + length() +
+     * open/write/close}，轮转时还多一次全文件 {@code Files.move}——与 {@link #persistState}
+     * 被 JFR 抓到的是同一类问题（见其 javadoc：{@code Files.write ← persistState ← onSnapshot}）。
+     * 现改为投递到单写者守护线程 {@link #stateWriter}。</p>
+     *
+     * <p><b>为什么复用同一个写线程而不是再起一条</b>：两者同属"告警持久化"，写的是同一个
+     * 数据目录、同一种小写入、同一个生命周期（构造时创建、关服时 shutdown）；
+     * 复用省掉一条常驻线程，并让既有的 {@code shutdown() + awaitTermination} 天然覆盖
+     * 事件队列的排空——新增一条线程就得再配一套排空钩子，而漏配的代价是关服丢数据。</p>
+     *
+     * <p>JSON 行在调用方（主线程）拼好再投递，异步线程只做 IO——与 persistState 的
+     * "先在调用方快照、再交给写线程"原则一致（这里读的是不可变的 {@link AlertEvent} record，
+     * 不存在正在变化的结构）。</p>
+     *
+     * <p>写失败只记日志：历史功能静默降级，绝不影响告警本体。</p>
+     */
     private void appendEventLine(AlertEvent ev) {
+        try {
+            final String line = "{\"ts\":" + ev.ts()
+                + ",\"type\":\"" + jsonEscape(ev.type())
+                + "\",\"key\":\"" + jsonEscape(ev.key())
+                + "\",\"level\":\"" + jsonEscape(ev.level())
+                + "\",\"value\":\"" + jsonEscape(ev.value())
+                + "\",\"display\":\"" + jsonEscape(ev.display())
+                + "\"}\n";
+            try {
+                stateWriter.execute(() -> writeEventLine(line));
+            } catch (Exception e) {
+                // 执行器已关闭（关服后期）：退回同步写，保证最后一批事件不丢
+                writeEventLine(line);
+            }
+        } catch (Exception | LinkageError e) {
+            plugin.getLogger().warning(logText("alert.log.events-write-failed", e.getMessage()));
+        }
+    }
+
+    /** 9A-18：真正的追加动作，只在告警状态写线程（或关服兜底）上执行。 */
+    private void writeEventLine(String line) {
         try {
             File f = eventsFile();
             File dir = f.getParentFile();
@@ -2278,13 +2336,6 @@ public class AlertService {
                 Files.move(f.toPath(), new File(dir, "alerts.jsonl.1").toPath(),
                     StandardCopyOption.REPLACE_EXISTING);
             }
-            String line = "{\"ts\":" + ev.ts()
-                + ",\"type\":\"" + jsonEscape(ev.type())
-                + "\",\"key\":\"" + jsonEscape(ev.key())
-                + "\",\"level\":\"" + jsonEscape(ev.level())
-                + "\",\"value\":\"" + jsonEscape(ev.value())
-                + "\",\"display\":\"" + jsonEscape(ev.display())
-                + "\"}\n";
             Files.write(f.toPath(), line.getBytes(StandardCharsets.UTF_8),
                 StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         } catch (Exception | LinkageError e) {

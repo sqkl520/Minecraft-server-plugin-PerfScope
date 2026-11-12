@@ -80,6 +80,15 @@ public class ConfigManager {
     /** 9D：界面语言配置键（general.language）。 */
     public static final String LANGUAGE_CONFIG_KEY = "general.language";
 
+    /**
+     * 告警总开关的配置键（v1.4）。
+     *
+     * <p>抽成常量的唯一目的是让启动横幅那句"用 {0}: true 开启"能拼出<b>真实的键名</b>：
+     * 键名一旦改名，文案会自动跟着改，不会出现"日志教你改一个不存在的键"。
+     * 读取处（{@link #load()}）同样引用本常量，保证两处不可能漂移。</p>
+     */
+    public static final String ALERTS_ENABLED_KEY = "alerts.enabled";
+
     private final PerfScope plugin;
     /** 配置快照——load() 末尾整体替换发布（单次发布、原子可见）；volatile 保证异步任务（如自动报告）读取的跨线程可见性（A9a Wave4 修正） */
     private volatile ConfigData config;
@@ -200,14 +209,18 @@ public class ConfigManager {
         fresh.players_criticalThreshold = readInt("players.critical_threshold", 98);
 
         // === 实体 ===
+        // 默认值必须与 jar 内 config.yml 逐字一致（缺键的旧配置靠这里兜底）：
+        // 20,000 / 30,000 的依据见 config.yml entities 段的注释（60 人正常服 5,000-15,000 实体）。
         fresh.entities_enabled = readBool("entities.enabled", true);
-        fresh.entities_totalWarningThreshold = readInt("entities.total_warning_threshold", 2000);
-        fresh.entities_totalCriticalThreshold = readInt("entities.total_critical_threshold", 3000);
+        fresh.entities_totalWarningThreshold = readInt("entities.total_warning_threshold", 20000);
+        fresh.entities_totalCriticalThreshold = readInt("entities.total_critical_threshold", 30000);
 
         // === 区块 ===
+        // 同上：10,000 / 15,000 的依据见 config.yml chunks 段的注释
+        // （60 人正常服 3,000-8,000 区块；口径是「每世界」，故按区间上界取）。
         fresh.chunks_enabled = readBool("chunks.enabled", true);
-        fresh.chunks_loadedWarningThreshold = readInt("chunks.loaded_warning_threshold", 1500);
-        fresh.chunks_loadedCriticalThreshold = readInt("chunks.loaded_critical_threshold", 2500);
+        fresh.chunks_loadedWarningThreshold = readInt("chunks.loaded_warning_threshold", 10000);
+        fresh.chunks_loadedCriticalThreshold = readInt("chunks.loaded_critical_threshold", 15000);
 
         // === 内存 ===
         fresh.memory_enabled = readBool("memory.enabled", true);
@@ -234,7 +247,11 @@ public class ConfigManager {
         fresh.report_retentionDays = readInt("report.retention_days", 7);
 
         // === 告警（P0-4 基础版：控制台 + OP 游戏内 + 冷却；Wave 7C：+ 防抖收敛） ===
-        fresh.alerts_enabled = readBool("alerts.enabled", true);
+        // v1.4：缺键默认 **false**（首次安装不推送告警）。原因：随包默认的实体/区块阈值即使按
+        // 中服调高，也无法覆盖"小服"与"超大服"两端——默认开启等于让服主在还没看过自己服规模时
+        // 先挨一轮误报。缺键 = 旧配置未写过本键，按"未显式启用"处理；显式写 true 的配置原样生效
+        // （配置从用户文件读，不与 jar 内默认合并）。
+        fresh.alerts_enabled = readBool(ALERTS_ENABLED_KEY, false);
         fresh.alerts_console = readBool("alerts.console", true);
         fresh.alerts_in_game = readBool("alerts.in-game", true);
         fresh.alerts_cooldownSeconds = readInt("alerts.cooldown-seconds", 300);
@@ -970,14 +987,15 @@ public class ConfigManager {
         cfg.players_criticalThreshold = players[1];
 
         // 实体（高值差，采集层为逐世界语义，warning 应 <= critical）
+        // 回退值与 readInt 的缺省、以及 jar 内 config.yml 必须三者一致（见 load() 里的说明）
         int[] entities = sanitizeIntPair("entities.total_warning_threshold/critical_threshold",
-            cfg.entities_totalWarningThreshold, cfg.entities_totalCriticalThreshold, 2000, 3000);
+            cfg.entities_totalWarningThreshold, cfg.entities_totalCriticalThreshold, 20000, 30000);
         cfg.entities_totalWarningThreshold = entities[0];
         cfg.entities_totalCriticalThreshold = entities[1];
 
         // 区块（高值差，warning 应 <= critical）
         int[] chunks = sanitizeIntPair("chunks.loaded_warning_threshold/critical_threshold",
-            cfg.chunks_loadedWarningThreshold, cfg.chunks_loadedCriticalThreshold, 1500, 2500);
+            cfg.chunks_loadedWarningThreshold, cfg.chunks_loadedCriticalThreshold, 10000, 15000);
         cfg.chunks_loadedWarningThreshold = chunks[0];
         cfg.chunks_loadedCriticalThreshold = chunks[1];
 

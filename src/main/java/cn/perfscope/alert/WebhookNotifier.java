@@ -213,22 +213,35 @@ public class WebhookNotifier {
      * <p>与 {@link #send} 的区别：不经过限流（用户正盯着等答复，丢弃会让"测试"变成"没反应"），
      * 但会记录到 lastResult。</p>
      *
-     * @param timeout 等待上限
+     * @param timeout 等待上限；null 或非正数时退回 {@link #REQUEST_TIMEOUT}
      * @return 投递结果；未就绪时返回 null
      */
     public WebhookResponse.Result probe(java.time.Duration timeout) {
         if (!ready) {
             return null;
         }
+        // 三件套一次性抓成局部量：typeSnapshot 原本就抓了（f-s01-conc-02 的教训），
+        // 但 url / secret 仍在下面各处**live 读 this**——reload() 会改写这两个 volatile，
+        // 若在本次探测构造请求的窗口里发生，就会出现"载荷用旧密钥签名、目标 URL 带新密钥"
+        // 的混搭（飞书/钉钉必然验签失败，报出来的却是 BAD_BODY，服主查不到真因）。
+        // 与 sendWithResult 同一处置：整条请求链只认快照。
         final String typeSnapshot = type;
+        final String urlSnapshot = url;
+        final String secretSnapshot = secret;
+        // 参数真正生效：调用方（/perfscope webhook test）给 10 秒就该等 10 秒，
+        // 旧实现无条件用 REQUEST_TIMEOUT(5s)，于是命令提示的等待上限与实际不符。
+        final Duration effectiveTimeout =
+            (timeout == null || timeout.isZero() || timeout.isNegative())
+                ? REQUEST_TIMEOUT
+                : timeout;
         try {
             JsonObject payload = "feishu".equals(typeSnapshot)
-                ? signedFeishuPayload(PROBE_TEXT, secret, System.currentTimeMillis())
+                ? signedFeishuPayload(PROBE_TEXT, secretSnapshot, System.currentTimeMillis())
                 : buildPayload(typeSnapshot, PROBE_TEXT);
             String body = gson.toJson(payload);
-            URI target = URI.create(buildTargetUrl(typeSnapshot, url, secret));
+            URI target = URI.create(buildTargetUrl(typeSnapshot, urlSnapshot, secretSnapshot));
             HttpRequest request = HttpRequest.newBuilder(target)
-                .timeout(REQUEST_TIMEOUT)
+                .timeout(effectiveTimeout)
                 .header("Content-Type", "application/json")
                 .header("User-Agent", "PerfScope/" + pluginVersion())
                 .POST(HttpRequest.BodyPublishers.ofString(body, java.nio.charset.StandardCharsets.UTF_8))

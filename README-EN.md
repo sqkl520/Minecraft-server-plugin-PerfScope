@@ -26,7 +26,7 @@ A comprehensive performance monitoring plugin for Minecraft servers, focused on 
 - **Auto Report Generation** —— Configurable interval, async generation without blocking main thread, auto cleanup by retention days
 - **Per-World Independent Alerts** —— Override entity alert thresholds per world
 - **Threshold Alert Push** (new in v1.1, converged in v1.2) —— When an alert fires, pushes to the console + online players holding the `perfscope.alert` permission; by default an alert must stay over-threshold for 3 consecutive collection cycles before the first push (debounce, configurable); the same alert has a default 300-second cooldown to prevent spam; level upgrades (warning→critical) send a single "（级别升级）" message bypassing the cooldown; a recovery notice is sent when the issue clears; configurable in the `alerts` section of `config.yml`
-- **Webhook Push** (new in v1.2, extended in v1.4) —— Alerts / recoveries / daily summaries can be pushed to Discord, QQ OneBot, or a **WeCom / Feishu / DingTalk** group robot, so the owner is reachable even when offline; sent fully asynchronously, failures are logged without blocking
+- **Webhook Push** (new in v1.2, extended in v1.4) —— Alerts / recoveries / daily summaries can be pushed to Discord and QQ OneBot; from v1.4 also to **WeCom / Feishu / DingTalk** group robots (those three channels are unreleased — see below). Sent fully asynchronously, failures are logged without blocking
 - **Daily Summary** (new in v1.2) —— A 3-line digest at a fixed time each day: lowest TPS (with time) / peak entities & heap / alert statistics; if the server happens to be down at the configured time, one catch-up summary is sent after startup
 - **History Summary** (new in v1.2) —— `/perfscope history` shows the last ~24 hours: coverage, lowest TPS with its timestamp, peak entities, peak heap — answering "when did it start getting worse"
 - **Hotspot Localization** (new in v1.2) —— `/perfscope hotspot` lists the top-3 entity-density chunks server-wide with coordinates (and dominant type share), drilling from "many entities" down to "go look at this spot"; coordinates are click-to-copy
@@ -119,7 +119,9 @@ GC: 42 次 / 5.23 秒
 
 ## Installation
 
-> **Download**: [GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest) (latest stable **v1.2.1**, `PerfScope-1.2.1.jar`)
+> **Download**: [GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest) (latest stable **v1.3.0**, `PerfScope-1.3.0.jar`)
+
+> **Version note**: this document also describes **not-yet-released v1.4** work (the Prometheus metrics endpoint, `/perfscope webhook status|test`, and the WeCom / Feishu / DingTalk webhook channels). None of it is in **any v1.3.0 artifact** — build from source if you need it. The relevant sections are marked individually.
 
 1. Download the latest JAR file
 2. Place it in your server's `plugins/` directory
@@ -136,6 +138,8 @@ GC: 42 次 / 5.23 秒
 > **Neither layer uploads**: player names, world names, coordinates, chat content, plugin lists, config file contents, alert text, or server addresses. It can be disabled in `plugins/bStats/config.yml` or via `general.bstats-enabled: false` in this plugin's config.yml.
 
 ## Configuration
+
+> **v1.4 unreleased**: the `alerts.webhook.secret` key and the `type: wecom | feishu | dingtalk` channels below are v1.4 work and are in no v1.3.0 artifact; v1.3.0 supports only `discord` / `onebot`. Build from source if you need them.
 
 Key configuration options (`config.yml`):
 
@@ -272,6 +276,8 @@ general:
 > Note (process CPU on Windows): the Windows implementation of `getProcessCpuLoad()` enumerates every process name on each call, measured at **p50 171 ms / p90 257 ms / max 332 ms** of blocking, and it runs on Bukkit's **shared** async pool where it competes with other plugins' async tasks. PerfScope therefore **does not collect process CPU on Windows** — that metric shows "unknown" and `cpu.process_warning_threshold` never fires; system CPU and every other metric work as normal. On Linux / macOS the value comes from `/proc` or an equivalent interface at microsecond cost, so process CPU is collected normally there.
 
 ### Wiring up Prometheus / Grafana
+
+> **v1.4 unreleased**: everything in this section (the `prometheus.*` config, the metrics endpoint, per-alert metrics such as `perfscope_alert`) is in **no v1.3.0 artifact** — the archived v1.3.0 jar's `config.yml` has no `prometheus:` block and exports none of these metrics. Build from source (`mvn clean package`) if you need it.
 
 With `prometheus.enabled: true` the plugin exposes Prometheus text format (0.0.4) metrics on
 `127.0.0.1:8940/metrics`, with no third-party dependencies. Add a scrape job:
@@ -494,7 +500,7 @@ Collection cost: p50 0ms / p95 54ms / max 127ms (66 samples, main thread)
 
 **The most important thing about this table**: collection cost grows **far more slowly with scale**
 than early estimates suggested. An early benchmark measured 66.6ms at 11k chunks and the
-"50k entities would be 100ms+" figure was extrapolated from it — but after v1.4's hotspot
+"50k entities would be 100ms+" figure was extrapolated from it — but after v1.3.0's hotspot
 partitioning, the 8,222-entity tier tops out at **22ms**. Partitioning spreads the heaviest sweep
 across several collection cycles, so the old model of "scale up → per-cycle cost rises linearly"
 no longer holds.

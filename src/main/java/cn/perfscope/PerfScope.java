@@ -237,6 +237,23 @@ public final class PerfScope extends JavaPlugin {
         getLogger().info("========================================");
         getLogger().info(Messages.get("startup-done"));
         getLogger().info("========================================");
+
+        // v1.4：首次安装引导——告警默认关闭时必须告诉用户怎么开，且必须在启动横幅**之后**
+        // （横幅是"我起来了"，这一行是"你还要做一件事"；反过来会打断横幅的视觉块）。
+        //
+        // 为什么放在最后而不是紧跟 alerts 初始化：此时 banner 与全部可选出口（bStats /
+        // Prometheus）的启动日志都已打完，这条是"最后一条建议"，不会夹在状态行中间。
+        //
+        // 只在**真的关闭**时打印：告警已启用时打这条就是假话。reload 不走这里
+        // （reload 走 PerfScope#reload，不重复启动横幅），所以不会每次 reload 刷一遍。
+        //
+        // 不塞进 general.verbose_startup 门控：那是"详细的启动诊断信息"，而这条是
+        // "你少配了一步"的操作提示——verbose_startup: false 的服主更需要它。
+        ConfigManager.ConfigData startupCfg = configManager.get();
+        if (startupCfg != null && !startupCfg.alerts_enabled) {
+            getLogger().info(Messages.get("core.banner.alerts-off-by-default",
+                ConfigManager.ALERTS_ENABLED_KEY));
+        }
     }
 
     /** v1.4：供命令层 /status 与 /webhook test 使用（未装配时返回 null）。 */

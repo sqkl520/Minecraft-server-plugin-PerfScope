@@ -656,22 +656,24 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
 
         // f-s02-logic-03：世界视图必须判该世界自己的实体数与覆盖阈值，否则单世界页会打出全服级警告。
         // world == null（全服视图）保持原行为：全服总数 vs 全局阈值。
+        // v1.4：这里的 2000/3000 只是"配置快照为 null"时的兜底（thresholdOf 的契约），
+        // 实际几乎不可达；但仍改成与 jar 内 config.yml 一致的新默认，避免三处默认值漂移。
         Integer alertEntities;
         int warnThreshold;
         int criticalThreshold;
         if (world == null) {
             alertEntities = snap.totalEntities;
-            warnThreshold = (int) thresholdOf(cfgNow(), "entities_totalWarningThreshold", 2000.0);
-            criticalThreshold = (int) thresholdOf(cfgNow(), "entities_totalCriticalThreshold", 3000.0);
+            warnThreshold = (int) thresholdOf(cfgNow(), "entities_totalWarningThreshold", 20000.0);
+            criticalThreshold = (int) thresholdOf(cfgNow(), "entities_totalCriticalThreshold", 30000.0);
         } else {
             // 该世界不在 map 里 = 0 实体 → null → 不报警
             alertEntities = snap.entitiesByWorld.get(world.getName());
             // worlds 段无覆盖时 getWorldSettings 返回 null → 回退全局（同 ThresholdColors / showWorld 口径）
             ConfigManager.WorldSettings ws = configManager.getWorldSettings(world.getName());
             warnThreshold = ws != null ? ws.entities_totalWarningThreshold
-                : (int) thresholdOf(cfgNow(), "entities_totalWarningThreshold", 2000.0);
+                : (int) thresholdOf(cfgNow(), "entities_totalWarningThreshold", 20000.0);
             criticalThreshold = ws != null ? ws.entities_totalCriticalThreshold
-                : (int) thresholdOf(cfgNow(), "entities_totalCriticalThreshold", 3000.0);
+                : (int) thresholdOf(cfgNow(), "entities_totalCriticalThreshold", 30000.0);
         }
         if (alertEntities != null) {
             if (alertEntities > criticalThreshold) {
@@ -1159,6 +1161,15 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         HistorySample peakHeapAt = null;
         double sumTps = 0;
         int tpsCount = 0;
+        // v1.4：新增三指标的窗口极值/累计（全部按 -1 哨兵过滤，见下方逐处）
+        HistorySample peakMsptAt = null;
+        HistorySample peakCpuAt = null;
+        long gcTimeDeltaMs = 0L;
+        long gcCountDelta = 0L;
+        boolean gcSeen = false;
+        boolean gcAnyRecorded = false;
+        long prevGcTime = HistorySample.NO_LONG;
+        long prevGcCount = HistorySample.NO_LONG;
         for (HistorySample s : samples) {
             if (s.tps1m() > 0 && s.tps1m() <= 20.5) {
                 sumTps += s.tps1m();
@@ -1171,6 +1182,31 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             if (s.heapUsagePercent() > 0 && s.heapUsagePercent() > peakHeap) {
                 peakHeap = s.heapUsagePercent();
                 peakHeapAt = s;
+            }
+            // 尖峰：msptMax <= 0 是"未采集"（TPS 反推/avg-only 路径），不能当 0 比较——否则
+            // 一个未采集的 0 会永远赢不了真实尖峰，看起来像"从没尖峰过"，其实是无数据。
+            if (s.msptMax() > 0 && (peakMsptAt == null || s.msptMax() > peakMsptAt.msptMax())) {
+                peakMsptAt = s;
+            }
+            // CPU：0.0 是合法读数，只排除负哨兵
+            if (s.cpuProcess() >= 0 && (peakCpuAt == null || s.cpuProcess() > peakCpuAt.cpuProcess())) {
+                peakCpuAt = s;
+            }
+            // GC 是累计量：逐对取正差累加。静态差（last-first）在重启后会算出一个负数或偏小的假值，
+            // 而 GC 计数在重启时归零正是最常见的场景——按相邻样本增量累加才能跨重启仍然正确。
+            if (s.gcTime() != HistorySample.NO_LONG && s.gcCount() != HistorySample.NO_LONG) {
+                gcAnyRecorded = true;
+                boolean hasPrev = prevGcTime != HistorySample.NO_LONG;
+                // 计数器回退 = 进程重启（累计量归零）。这一对差值无意义，跳过；
+                // prev 会被更新到新基线，于是重启后的增量照常累加。
+                boolean reset = hasPrev && (s.gcTime() < prevGcTime || s.gcCount() < prevGcCount);
+                if (hasPrev && !reset) {
+                    gcTimeDeltaMs += s.gcTime() - prevGcTime;
+                    gcCountDelta += s.gcCount() - prevGcCount;
+                    gcSeen = true;
+                }
+                prevGcTime = s.gcTime();
+                prevGcCount = s.gcCount();
             }
         }
         if (tpsCount > 0) {
@@ -1188,6 +1224,24 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 .append(Component.text(peakHeap + "%", WHITE))
                 .append(Component.text(Messages.get("cmd.label.timestamp-paren", formatTrendTime(peakHeapAt.timestamp())), GRAY)));
         }
+        // v1.4：尖峰 / CPU / GC 三行。三者都走"有数据就给数值，没数据就说没数据"——
+        // 旧文件（v1.3 写的 7 列行）这几列读出来是 -1，必须显示"无数据"而不是 0 或空白。
+        sender.sendMessage(goldLabel(Messages.get("cmd.trend.peak-mspt"))
+            .append(peakMsptAt == null
+                ? Component.text(Messages.get("cmd.trend.not-recorded"), GRAY)
+                : Component.text(String.format(java.util.Locale.ROOT, "%.2f ms", peakMsptAt.msptMax()), WHITE)
+                    .append(Component.text(Messages.get("cmd.label.timestamp-paren", formatTrendTime(peakMsptAt.timestamp())), GRAY))));
+        sender.sendMessage(goldLabel(Messages.get("cmd.trend.peak-cpu"))
+            .append(peakCpuAt == null
+                ? Component.text(Messages.get("cmd.trend.not-recorded"), GRAY)
+                : Component.text(String.format(java.util.Locale.ROOT, "%.1f%%", peakCpuAt.cpuProcess()), WHITE)
+                    .append(Component.text(Messages.get("cmd.label.timestamp-paren", formatTrendTime(peakCpuAt.timestamp())), GRAY))));
+        sender.sendMessage(goldLabel(Messages.get("cmd.trend.gc"))
+            .append(gcSeen
+                ? Component.text(Messages.get("cmd.trend.gc-value",
+                    gcCountDelta, String.format(java.util.Locale.ROOT, "%.1f", gcTimeDeltaMs / 1000.0)), WHITE)
+                : Component.text(Messages.get(gcAnyRecorded
+                    ? "cmd.trend.gc-insufficient" : "cmd.trend.not-recorded"), GRAY)));
         sender.sendMessage(Component.text(Messages.get("cmd.trend.coverage",
             formatTrendTime(oldest.timestamp()), formatTrendTime(latest.timestamp())), GRAY));
     }

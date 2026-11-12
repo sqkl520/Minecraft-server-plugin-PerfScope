@@ -1738,6 +1738,9 @@ public class MetricsCollector {
         // 9A-10 #2：WorldSettings 必须从**传入的 cfg** 取，不能再走 configManager.getWorldSettings()
         //（后者内部读 configManager 的当前引用——reload 时会让"逐世界判定"用新一代阈值，
         // 而"全服总数判定"用旧一代阈值，同一份快照混用两代配置）。
+        //
+        // v1.4：本周期逐世界判定的最高级别，供下方全服总数判定去重（见那里的长注释）。
+        int maxWorldLevel = 0;
         for (Map.Entry<String, Integer> entry : byWorld.entrySet()) {
             ConfigManager.WorldSettings ws = worldSettingsFrom(cfg, entry.getKey());
             if (ws == null) {
@@ -1750,27 +1753,70 @@ public class MetricsCollector {
                 addAlert(snap, Alert.measured(entKey, Alert.LEVEL_CRITICAL, entry.getValue(),
                     MetricsSnapshot.MODULE_ENTITIES, snap.timestamp));
                 recordLevel(snap, entKey, 2);
+                maxWorldLevel = 2;
             } else if (entry.getValue() > ws.entities_totalWarningThreshold) {
                 addAlert(snap, Alert.measured(entKey, Alert.LEVEL_WARNING, entry.getValue(),
                     MetricsSnapshot.MODULE_ENTITIES, snap.timestamp));
                 recordLevel(snap, entKey, 1);
+                maxWorldLevel = Math.max(maxWorldLevel, 1);
             } else {
                 recordLevel(snap, entKey, 0);
             }
         }
 
-        // 全服总数判定（与命令层 /ps entities 的总数口径一致）
+        // 全服总数判定（与命令层 /ps entities 的总数口径一致：所有世界实体数相加）。
+        //
+        // v1.4 去重——只改"发不发这条消息"，不动任何展示数字】
+        // 配置了 worlds 覆盖的世界，其实体数**同时**计入全服合计（口径见 config.yml 与
+        // /perfscope entities，v1.4 刻意不改）。于是同一批实体既触发一条 entities:world:<名>，
+        // 又触发一条 entities:global——一个世界就产出两条消息，四个世界可产出多条。
+        // 修法是：全服级别**照常计算并写入 alertLevels**（perfscope_alert 的完整状态不因去重而消失），
+        // 但只有当它**高于**本周期逐世界判定的最高级别时才真正生成消息。
+        //   · 全服 critical + 逐世界 warning → 仍然发（"整体已 critical"是逐世界消息没有的信息）；
+        //   · 全服越界而没有任何逐世界越界（三个世界各差一点、加起来超了）→ 照常发，
+        //     这恰恰是逐世界口径看不见的问题，不能因为去重把它也吞掉；
+        //   · 全服与某个逐世界同级别或更低 → 静默（那条逐世界消息已经说了同一件事，且说得更具体）。
+        //
+        // 否决过的方案：
+        //   ① 计算全服总数时排除有覆盖的世界 —— snap.totalEntities 是 /perfscope entities、
+        //      报告与 Prometheus 的**展示数字**，改它会让用户看到的"全服实体数"与各世界之和对不上；
+        //      而且当所有世界都配了覆盖时全服口径会恒为 0，"实体分散在多个世界"的超标彻底失声。
+        //   ③ 只在文档里说明重叠 —— 一条消息都不减少，等于没修。
+        int globalLevel;
         if (snap.totalEntities > cfg.entities_totalCriticalThreshold) {
-            addAlert(snap, Alert.measured("entities:global", Alert.LEVEL_CRITICAL, snap.totalEntities,
-                MetricsSnapshot.MODULE_ENTITIES, snap.timestamp));
-            recordLevel(snap, "entities:global", 2);
+            globalLevel = 2;
         } else if (snap.totalEntities > cfg.entities_totalWarningThreshold) {
-            addAlert(snap, Alert.measured("entities:global", Alert.LEVEL_WARNING, snap.totalEntities,
-                MetricsSnapshot.MODULE_ENTITIES, snap.timestamp));
-            recordLevel(snap, "entities:global", 1);
+            globalLevel = 1;
         } else {
-            recordLevel(snap, "entities:global", 0);
+            globalLevel = 0;
         }
+        if (shouldEmitGlobalEntitiesAlert(globalLevel, maxWorldLevel)) {
+            addAlert(snap, Alert.measured("entities:global",
+                globalLevel == 2 ? Alert.LEVEL_CRITICAL : Alert.LEVEL_WARNING,
+                snap.totalEntities, MetricsSnapshot.MODULE_ENTITIES, snap.timestamp));
+        }
+        recordLevel(snap, "entities:global", globalLevel);
+    }
+
+    /**
+     * 全服实体总数告警是否应当真正生成消息（v1.4 去重规则）。
+     *
+     * <p>规则：只有当全服级别**严格高于**本周期逐世界判定的最高级别时才发。</p>
+     * <ul>
+     *   <li>{@code (2, 0)} / {@code (1, 0)} → 发：没有任何世界单独超标，全服口径是唯一信号；</li>
+     *   <li>{@code (2, 1)} / {@code (2, 2)} → 不发：更具体的逐世界消息已经覆盖同一件事；</li>
+     *   <li>{@code (1, 1)} → 不发；{@code (0, *)} → 不适用（未越界，调用方本就不会进这个分支）。</li>
+     * </ul>
+     *
+     * <p>这里刻意只判「要不要发消息」，<b>不</b>参与级别记录——{@code alertLevels} 里
+     * {@code entities:global} 必须始终反映全服总数的真实判定，否则 Prometheus 上会出现
+     * "总数明明 critical 但序列显示 0"的假恢复。</p>
+     *
+     * @param globalLevel   全服总数对照全局阈值的级别（0/1/2）
+     * @param maxWorldLevel 本周期逐世界判定的最高级别（0/1/2；无覆盖世界时为 0）
+     */
+    static boolean shouldEmitGlobalEntitiesAlert(int globalLevel, int maxWorldLevel) {
+        return globalLevel > maxWorldLevel;
     }
 
     // ==================== 区块 ====================

@@ -27,7 +27,7 @@
 - **按世界独立告警** —— 各世界可覆盖实体告警阈值
 - **阈值告警主动推送**（v1.1 新增，v1.2 收敛） —— 告警触发时推送控制台 + 在线持有 `perfscope.alert` 权限的玩家；默认需连续 3 个采集周期超标才首次推送（防抖，可配）；同一告警默认 300 秒冷却防刷屏；级别升级（警告→严重）只推一条"（级别升级）"消息、不受冷却限制；故障恢复时发送恢复通知；可在 `config.yml` 的 `alerts` 段配置
 - **Webhook 推送**（v1.2 新增，v1.4 扩展） —— 告警 / 恢复 / 每日摘要可推送到 Discord、
-  QQ OneBot、**企业微信 / 飞书 / 钉钉**群机器人；全异步发送，失败只记日志不阻塞。
+  QQ OneBot；v1.4 起再支持**企业微信 / 飞书 / 钉钉**群机器人（该三通道未发布，见下）。全异步发送，失败只记日志不阻塞。
 - **每日摘要**（v1.2 新增） —— 每天固定时刻推送 3 行概况：最低 TPS（含时刻）/ 峰值实体与内存 / 告警统计；若配置时刻服务端恰好停机，启动后会自动补发当天一次
 - **历史摘要**（v1.2 新增） —— `/perfscope history` 查看近 24 小时概况：覆盖时长、最低 TPS 与发生时刻、峰值实体、峰值内存，回答"什么时候开始变差的"
 - **热点区块定位**（v1.2 新增） —— `/perfscope hotspot` 列出全服实体密度 Top3 区块与坐标（含主导类型占比），把"实体多"下钻到"去哪个坐标看看"；坐标可点击复制
@@ -128,7 +128,9 @@ GC: 42 次 / 5.23 秒
 
 ## 安装
 
-> **下载**：[GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest)（最新正式版 **v1.2.1**，`PerfScope-1.2.1.jar`）
+> **下载**：[GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest)（最新正式版 **v1.3.0**，`PerfScope-1.3.0.jar`）
+
+> **版本注意**：本文档同时描述了尚未发布的 **v1.4** 内容（Prometheus 指标端点、`/perfscope webhook status|test`、企业微信 / 飞书 / 钉钉 webhook 通道）。这些**不在 v1.3.0 的任何发布包中**，要用需自行从源码构建；相关小节另有标注。
 
 1. 下载最新版本的 JAR 文件
 2. 放入服务器的 `plugins/` 目录
@@ -145,6 +147,8 @@ GC: 42 次 / 5.23 秒
 > **两层都不会上传**：玩家名、世界名、坐标、聊天内容、插件列表、配置文件内容、告警文本、服务器地址。可在 `plugins/bStats/config.yml` 或本插件 config.yml 的 `general.bstats-enabled: false` 关闭。
 
 ## 配置
+
+> **v1.4 未发布**：下面的 `alerts.webhook.secret` 与 `type: wecom | feishu | dingtalk` 三个通道属于 v1.4，不在 v1.3.0 的任何发布包中；v1.3.0 只支持 `discord` / `onebot`。需自行从源码构建。
 
 主要配置项（`config.yml`）：
 
@@ -281,6 +285,8 @@ general:
 > 注（Windows 上的进程 CPU）：`getProcessCpuLoad()` 的 Windows 实现每次调用都要枚举全部进程名，实测单次阻塞 **p50 171 ms / p90 257 ms / max 332 ms**，而它跑在 Bukkit 的**共享**异步池上，会挤占其他插件的异步任务。因此**在 Windows 上本插件不采集进程 CPU**，该指标显示「未知」，`cpu.process_warning_threshold` 不会触发；系统 CPU 与其余全部指标照常工作。Linux / macOS 读 `/proc` 或等价接口，是微秒级，进程 CPU 正常采集。
 
 ### 接入 Prometheus / Grafana
+
+> **v1.4 未发布**：本节内容（`prometheus.*` 配置、指标端点、`perfscope_alert` 等逐告警指标）不在 v1.3.0 的任何发布包中——v1.3.0 归档 JAR 的 `config.yml` 里没有 `prometheus:` 段，也没有导出这些指标。需自行从源码构建（`mvn clean package`）。
 
 `prometheus.enabled: true` 后，插件在 `127.0.0.1:8940/metrics` 暴露 Prometheus 文本格式
 （0.0.4）的指标，零第三方依赖。在 `prometheus.yml` 里加一段即可：
@@ -490,7 +496,7 @@ Collection cost: p50 0ms / p95 54ms / max 127ms (66 samples, main thread)
 | 约 50,000 实体 | — | **C** | 未实测；分区后预计远低于旧值 |
 
 **这张表最重要的一件事**：采集开销随规模增长得**远比早期估计平缓**。早期在 11k 区块档测到
-66.6ms，据此推演"5 万实体要 100ms+"——但 v1.4 的热点分区改造之后，8,222 实体档的 `max`
+66.6ms，据此推演"5 万实体要 100ms+"——但 v1.3.0 的热点分区改造之后，8,222 实体档的 `max`
 只有 **22ms**。分区把最重的热点扫描摊到了多个采集周期，所以"规模上升 → 单拍成本线性上升"
 这个旧模型已经不成立了。
 

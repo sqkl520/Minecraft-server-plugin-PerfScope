@@ -256,6 +256,21 @@ public final class CommandMessages {
             "注意：历史持久化不可用，内存环只覆盖约 24 小时，请求的 {0} 天已收窄为 {1} 天");
         put(en, zh, "cmd.trend.coverage",
             "Coverage: {0} – {1} (local time)", "覆盖: {0} ～ {1}（本地时区）");
+        // v1.4：CSV 加列后 trend 能回答的三类问题（尖峰/CPU/GC）。
+        // not-recorded 是硬要求：旧文件（v1.3 的 7 列行）读出来是 -1 哨兵，
+        // 必须显示"未记录"而不是 0——"CPU 峰值 0%"是伪造的健康信号。
+        put(en, zh, "cmd.trend.peak-mspt", "Peak MSPT (spike): ", "峰值 MSPT（尖峰）: ");
+        put(en, zh, "cmd.trend.peak-cpu", "Peak process CPU: ", "进程 CPU 峰值: ");
+        put(en, zh, "cmd.trend.gc", "GC in range: ", "区间内 GC: ");
+        put(en, zh, "cmd.trend.gc-value", "{0} time(s), {1}s", "{0} 次，{1} 秒");
+        // "无数据"有两种原因，不能合并成一句：列本身不存在（旧样本/该平台未采集），
+        // 与"有数据但样本太少算不出增量"。合并会让后者看起来像文件缺列。
+        put(en, zh, "cmd.trend.not-recorded",
+            "no data in this range (this metric was not recorded for these samples)",
+            "该区间无数据（这些样本未记录该指标）");
+        put(en, zh, "cmd.trend.gc-insufficient",
+            "not enough samples (at least 2 are needed to measure the increase)",
+            "样本不足（统计增量至少需要 2 条）");
 
         // ==================== 热点区块 ====================
         put(en, zh, "cmd.hotspots.empty",

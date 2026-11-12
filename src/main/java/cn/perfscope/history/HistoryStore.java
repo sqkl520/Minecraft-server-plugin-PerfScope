@@ -142,7 +142,17 @@ public final class HistoryStore {
             snap.heapUsagePercent,
             snap.playerCount,
             snap.totalEntities,
-            snap.totalLoadedChunks
+            snap.totalLoadedChunks,
+            // v1.4：新增 5 指标。MSPT 极值/CPU 本身就有 -1 哨兵，直接 RAW 透传；
+            // GC 例外——MetricsSnapshot 里 gcCount/gcTime 的默认值是 0（没有 -1 约定），
+            // 而"还没采过"与"真的一次都没 GC"在趋势里必须区分。判据取快照自带的
+            // unavailable 集合（GC 模块被禁用/失败/预热中都在里面）：命中即写 -1，
+            // 让趋势显示"无数据"而不是"GC 0 次"这种伪造的健康信号。
+            snap.msptMax,
+            snap.processCpuLoad,
+            snap.systemCpuLoad,
+            gcAvailable(snap) ? snap.gcCount : HistorySample.NO_LONG,
+            gcAvailable(snap) ? snap.gcTime : HistorySample.NO_LONG
         );
         synchronized (this) {
             // 9A-6 / 9A-18：NTP 回拨（now 小于 lastRecordMs）时旧值会让节流永久卡死——
@@ -167,6 +177,18 @@ public final class HistoryStore {
         if (fs != null) {
             fs.append(sample);
         }
+    }
+
+    /**
+     * v1.4：GC 指标本拍是否可信（不可信则写 -1 哨兵）。
+     *
+     * <p>{@code MetricsSnapshot.gcCount/gcTime} 没有 -1 默认值（与 MSPT/CPU 不同），
+     * 未采集时字段就是 0。记录层无法分辨 0 与"零次 GC"，但快照的 {@code unavailable} 集合
+     * 已经带了这个信息——GC 模块被配置禁用、采集抛异常、或异步缓存尚未产出时都在里面。
+     * 这里只读该集合，不改采集层，也不消费 {@code disabledModules}（"禁用"同样是"没数据"）。</p>
+     */
+    private static boolean gcAvailable(MetricsSnapshot snap) {
+        return !snap.unavailable.contains(MetricsSnapshot.MODULE_GC);
     }
 
     /**

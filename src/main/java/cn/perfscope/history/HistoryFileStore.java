@@ -55,8 +55,24 @@ import java.util.stream.Stream;
  * 天然的分片与过期删除便利。</p>
  *
  * <p><b>文件布局</b>：{@code plugins/PerfScope/history/history-yyyy-MM-dd.csv}，首行为 schema 头，
- * 其后每行：{@code epochMs,tps1m,msptAvg,heapUsagePercent,playerCount,totalEntities,totalLoadedChunks}
- * （RAW 值不消毒）。</p>
+ * 其后每行：{@code epochMs,tps1m,msptAvg,heapUsagePercent,playerCount,totalEntities,totalLoadedChunks,
+ * msptMax,cpuProcess,cpuSystem,gcCount,gcTime}（RAW 值不消毒）。</p>
+ *
+ * <p><b>v1.4 加列与向后兼容</b>（本类最重要的契约，勿轻改）：</p>
+ * <ul>
+ *   <li>新增的 5 列<b>一律追加在尾部</b>，前 7 列的位置与语义不变。于是"v1.3 写的 7 列行"
+ *       与"v1.4 写的 12 列行"在位置 0..6 上是同构的——旧文件按位置读仍然正确，
+ *       新行多出来的尾部列只是被忽略。</li>
+ *   <li>表头升级为 {@code # v3}，但<b>读取端不按版本号分支</b>：它按列名映射，
+ *       表头认得的列名越多映射越全；认不出（如 v1.3 的 7 名表头只给了 7 个 token）就回退到
+ *       位置口径 {@link #LEGACY_COLUMNS}。因此版本号是给人看的，兼容性靠"未映射列 = 缺失 = 哨兵"。</li>
+ *   <li>已存在的当日文件<b>不重写表头</b>（append 模式下重写头部既贵又危险）：升级当天的文件
+ *       会保持 v2 表头 + v3 数据行。这不成问题——读取端在"一行长度 = 完整 12 列"时按位置
+ *       取回尾部的 5 个新列（见 {@link #optionalColumn}），因此升级当天新写入的尖峰/CPU/GC
+ *       照样读得出来；当天更早的 7 列老行则如实读为哨兵。</li>
+ *   <li>缺失列一律返回 <b>-1 哨兵</b>，绝不是 0：趋势里"没有这一列"必须显示"无数据"，
+ *       0 会被读成"CPU 一直是 0%"这种从未发生过的事实。</li>
+ * </ul>
  *
  * <p><b>9A-18 重做（工程纪律）</b>：</p>
  * <ul>
@@ -93,18 +109,34 @@ public class HistoryFileStore {
      * 取值顺序也按它逐项走。旧实现里 {@code format()} 手写 7 段字符串拼接，与 {@code COLUMNS}
      * 是两份独立定义——单侧重排或改名就会让表头序与数据行序悄悄漂移，而读取端按列名映射，
      * 结果是**数据被安到错误的列上**且不报错喵。</p>
+     *
+     * <p><b>v1.4</b>：后 5 项是新增列，只能<b>追加</b>在尾部。下标 0..6 是 v1.3 的既有列，
+     * 它们的相对位置一旦变动，所有已存在的 CSV 都会被读错（位置口径没有版本可依）。</p>
      */
     private static final String[] COLUMNS = {
         "epochMs", "tps1m", "msptAvg", "heapUsagePercent",
-        "playerCount", "totalEntities", "totalLoadedChunks"
+        "playerCount", "totalEntities", "totalLoadedChunks",
+        "msptMax", "cpuProcess", "cpuSystem", "gcCount", "gcTime"
     };
 
-    /** 9A-18：旧格式（无版本头）的列位置 = 0..6。 */
-    private static final int[] LEGACY_COLUMNS = {0, 1, 2, 3, 4, 5, 6};
+    /** 9A-18：v1.3 的锚指标列数——这 7 列缺失/损坏即整行报废（0..6）。 */
+    private static final int REQUIRED_COLUMNS = 7;
+
+    /**
+     * 9A-18：无表头/表头不可识别时的位置口径 = 0..11（恒等映射）。
+     *
+     * <p>v1.4 之前这里是 {@code {0..6}}：长度只有 7，于是"未映射"这件事没有表达方式。
+     * 现在恒等映射 + {@link #parseLine} 的越界检查自然达成同一效果——7 列的老行在
+     * 位置 7..11 上必然越界，因而得到 -1 哨兵；而 12 列的新行即便所在文件没有可识别表头
+     * （例如 v1.3 之前遗留的无头文件被本版本继续追加）也能把新指标读回来。</p>
+     */
+    private static final int[] LEGACY_COLUMNS = {
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
+    };
 
     /** 9A-18：schema 头（版本号 + 列名；读取端按列名映射，未来加列只需追加名字）。 */
     private static final String HEADER =
-        "# v2 " + String.join(",", COLUMNS);
+        "# v3 " + String.join(",", COLUMNS);
 
     /** 9A-18：写队列容量（24h @60s = 1440 条，留 40% 余量；写线程卡住时最多积压这么多）。 */
     private static final int QUEUE_CAPACITY = 2048;
@@ -453,7 +485,9 @@ public class HistoryFileStore {
         Object[] values = {
             sample.timestamp(), sample.tps1m(), sample.msptAvg(),
             sample.heapUsagePercent(), sample.playerCount(),
-            sample.totalEntities(), sample.totalLoadedChunks()
+            sample.totalEntities(), sample.totalLoadedChunks(),
+            sample.msptMax(), sample.cpuProcess(), sample.cpuSystem(),
+            sample.gcCount(), sample.gcTime()
         };
         if (values.length != COLUMNS.length) {
             // 编译期抓不到（数组长度是运行期事实），但这是纯代码常量，一旦不等就是开发期笔误
@@ -785,16 +819,23 @@ public class HistoryFileStore {
     }
 
     /**
-     * 9A-18：解析表头，返回 7 列的列位置映射；不是可识别的表头返回 null。
-     * 支持 {@code # v2 epochMs,...}（版本前缀被忽略，按列名定位）与旧的 {@code # epochMs,...}。
+     * 9A-18 / v1.4：解析表头，返回 {@link #COLUMNS} 每一项在数据行里的位置。
+     *
+     * <p>返回值长度恒等于 {@link #COLUMNS}.length，但元素可以是 <b>-1</b>：表示"表头没给这一列"
+     * （v1.3 的 7 名表头就是这种情形）。-1 并不意味着这里一定是哨兵——{@link #optionalColumn}
+     * 会在一行足够长（= 完整 12 列）时按位置把它读回来，见该方法的注释喵。</p>
+     *
+     * <p>返回 {@code null} = 不是可识别的表头，调用方回退到位置口径 {@link #LEGACY_COLUMNS}。
+     * 判据是<b>前 {@value #REQUIRED_COLUMNS} 个锚指标列名必须全部认得</b>：缺任一锚列就说明
+     * 这不是本插件的表头（或是被人工改坏的），按位置读比按半张映射读更可预测。</p>
      */
     private static int[] parseHeader(String raw) {
         String content = raw.startsWith("#") ? raw.substring(1).trim() : raw.trim();
         if (content.isEmpty()) {
             return null;
         }
-        // 9A-18：版本号与第一个列名以空格分隔（"# v2 epochMs,..."），先按空格剥掉版本前缀，
-        // 否则 "v2 epochMs" 会被当成一个列名（曾导致整表映射失败、回退到位置口径）。
+        // 9A-18：版本号与第一个列名以空格分隔（"# v3 epochMs,..."），先按空格剥掉版本前缀，
+        // 否则 "v3 epochMs" 会被当成一个列名（曾导致整表映射失败、回退到位置口径）。
         int space = content.indexOf(' ');
         if (space > 0) {
             String prefix = content.substring(0, space);
@@ -808,9 +849,9 @@ public class HistoryFileStore {
             return null;
         }
         String[] tokens = content.split(",");
-        if (tokens.length < COLUMNS.length) {
-            return null;
-        }
+        // v1.4：不再要求 token 数 ≥ COLUMNS.length（那会把 v1.3 的 7 列头判为"认不出"，
+        // 于是整份旧文件退到位置口径——结果碰巧一样，但"认不出表头"的诊断信号就没了）。
+        // 现在要求的是"锚列必须齐"，新增列缺了就标 -1。
         int[] idx = new int[COLUMNS.length];
         for (int i = 0; i < COLUMNS.length; i++) {
             int pos = -1;
@@ -820,27 +861,37 @@ public class HistoryFileStore {
                     break;
                 }
             }
-            if (pos < 0) {
-                return null; // 缺列 → 按旧位置口径读（兼容早期文件）
+            if (pos < 0 && i < REQUIRED_COLUMNS) {
+                return null; // 锚列缺失 → 不是我们的表头，按位置口径读（兼容无版本头的早期文件）
             }
             idx[i] = pos;
         }
         return idx;
     }
 
-    /** 解析一行 CSV；空行/注释/列数不足/数值非法 → null（容错跳过，含写一半的最后一行）。 */
+    /**
+     * 解析一行 CSV；空行/注释/锚列不足/锚列数值非法 → null（容错跳过，含写一半的最后一行）。
+     *
+     * <p><b>v1.4 容错口径</b>：</p>
+     * <ul>
+     *   <li>前 {@value #REQUIRED_COLUMNS} 个锚指标仍是硬要求——解析失败整行作废（计入
+     *       {@link #skippedLines()}）。它们是趋势的全部骨架，缺了就没有展示价值。</li>
+     *   <li><b>新增列宽松</b>：位置为 -1（旧表头没有这一列）、超出本行长度（旧 7 列数据行）、
+     *       或单元格内容不是数字，一律回落为 <b>-1 哨兵</b>，<b>不作废整行</b>。
+     *       理由：一列新指标写坏，不该连带丢掉同一行里完好的 TPS/内存——那才是真正的数据损失。</li>
+     * </ul>
+     */
     private static HistorySample parseLine(String line, int[] columns) {
         if (line == null || line.isEmpty() || line.charAt(0) == '#') {
             return null;
         }
         int[] cols = columns == null ? LEGACY_COLUMNS : columns;
         String[] parts = line.split(",", -1);
-        int need = 0;
-        for (int c : cols) {
-            need = Math.max(need, c + 1);
-        }
-        if (parts.length < need) {
-            return null;
+        // 锚列必须存在（-1 表示表头没给该列，同样按缺失处理 → 该行不可用）
+        for (int i = 0; i < REQUIRED_COLUMNS && i < cols.length; i++) {
+            if (cols[i] < 0 || cols[i] >= parts.length) {
+                return null;
+            }
         }
         try {
             return new HistorySample(
@@ -850,10 +901,70 @@ public class HistoryFileStore {
                 Integer.parseInt(parts[cols[3]].trim()),
                 Integer.parseInt(parts[cols[4]].trim()),
                 Integer.parseInt(parts[cols[5]].trim()),
-                Integer.parseInt(parts[cols[6]].trim())
+                Integer.parseInt(parts[cols[6]].trim()),
+                optDouble(parts, cols, 7),
+                optDouble(parts, cols, 8),
+                optDouble(parts, cols, 9),
+                optLong(parts, cols, 10),
+                optLong(parts, cols, 11)
             );
         } catch (NumberFormatException | ArrayIndexOutOfBoundsException e) {
             return null;
+        }
+    }
+
+    /**
+     * v1.4：把一个"可选列"解析成数据行下标；没有就返回 -1。
+     *
+     * <p><b>为什么需要位置回退</b>：升级当天的文件表头仍是 v2（7 个列名），而新样本按 v3
+     * 的 12 列追加在其后。按列名映射时后 5 列全部"没有名字"——若就此写死 -1，那一整天
+     * 明明写进磁盘的尖峰/CPU/GC 会在读取端<b>全部消失</b>，变成"升级当天没数据"的假象。
+     * 由于新增列<b>只能追加在尾部且位置固定</b>，当一行的单元格数达到完整 schema 长度时，
+     * 下标 7..11 必然就是这 5 个新列——位置口径在这里是可靠的。</p>
+     *
+     * <p>反过来，7 列的老行（{@code parts.length < COLUMNS.length}）不做回退：
+     * 那些位置本来就没有值，必须是 -1 哨兵。</p>
+     */
+    private static int optionalColumn(String[] parts, int[] cols, int field) {
+        int pos = field < cols.length ? cols[field] : -1;
+        if (pos >= 0) {
+            return pos;
+        }
+        // 表头没给这一列：只有当本行足够长（= 完整 schema）时才按位置取尾部
+        return parts.length >= COLUMNS.length ? field : -1;
+    }
+
+    /** v1.4：取一个"可选列"的 double 值；列不存在/越界/非数字 → {@link HistorySample#NO_DOUBLE}。 */
+    private static double optDouble(String[] parts, int[] cols, int field) {
+        int pos = optionalColumn(parts, cols, field);
+        if (pos < 0 || pos >= parts.length) {
+            return HistorySample.NO_DOUBLE;
+        }
+        String cell = parts[pos].trim();
+        if (cell.isEmpty()) {
+            return HistorySample.NO_DOUBLE;
+        }
+        try {
+            return Double.parseDouble(cell);
+        } catch (NumberFormatException e) {
+            return HistorySample.NO_DOUBLE;
+        }
+    }
+
+    /** v1.4：取一个"可选列"的 long 值；列不存在/越界/非数字 → {@link HistorySample#NO_LONG}。 */
+    private static long optLong(String[] parts, int[] cols, int field) {
+        int pos = optionalColumn(parts, cols, field);
+        if (pos < 0 || pos >= parts.length) {
+            return HistorySample.NO_LONG;
+        }
+        String cell = parts[pos].trim();
+        if (cell.isEmpty()) {
+            return HistorySample.NO_LONG;
+        }
+        try {
+            return Long.parseLong(cell);
+        } catch (NumberFormatException e) {
+            return HistorySample.NO_LONG;
         }
     }
 
