@@ -234,8 +234,14 @@
   **全是这一个原因**喵。
   - 给出判定方法（外面 `connection refused`、容器内 `curl 127.0.0.1` 却 200，这个反差就是证据）、
     按部署方式的对照表、Pterodactyl 的三步操作、以及两个反直觉点
-    （`allocation_limit` 为 `NULL` 时客户端看不到按钮；Wings 绑的是分配项里那个具体 IP，
-    所以宿主机自己的 `localhost` 可能反而不通）喵。
+    （`allocation_limit` 为 `NULL` 时客户端看不到按钮；抬高上限后还需面板全局开启
+    「Automatic Allocation Creation」，该项默认关闭；Wings 绑的是分配项里记录的那个 IP
+    ——可能是具体地址也可能是 `0.0.0.0`，记的是具体非回环地址时宿主机自己的 `localhost`
+    反而可能不通）喵。
+  - 同时写明「设了 token 却忘了带 `Authorization: Bearer` 头」的症状：插件返回 401，
+    而 Prometheus 把任何非 200 都记成抓取失败，表现为 target 显示 DOWN、无可读原因，
+    看着像网络故障喵。另有 `--network host` 与 `kubectl port-forward` 两个例外，
+    这两种情况 `127.0.0.1` 就够用，不必放大 bind 白白丢掉回环保护喵。
   - 对确实无法开端口的那约 2%，明确写「本插件没有 push 模式，也没有计划」，
     并指向已有的 webhook 告警作为替代——告警由服务器主动发出，不需要入站端口喵。
 - **Windows 上进程 CPU 不再可用**（见上方 Changed）。判定与实测理由集中在

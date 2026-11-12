@@ -305,9 +305,9 @@ scrape_configs:
 
 #### 容器 / 面板服：先把 `bind` 改掉
 
-**同类 exporter 的报错几乎全出自这一条，所以放在最前面。** 容器里的 `bind: "127.0.0.1"`
-绑的是**容器自己的回环**，不是宿主机，也不是面板节点。跑在容器外的 Prometheus 无论怎么抓
-都连不上，哪怕它和 MC 服务端在同一台物理机上。
+**同类 exporter 的报错几乎全出自这一条，所以放在最前面。** 容器有自己的网络命名空间时，里面的
+`bind: "127.0.0.1"` 绑的是**容器自己的回环**，不是宿主机，也不是面板节点。跑在容器外的
+Prometheus 无论怎么抓都连不上，哪怕它和 MC 服务端在同一台物理机上。
 
 判定只看一个反差：从外面抓是 `connection refused` / 超时，进容器里
 `curl 127.0.0.1:8940/metrics` 却是 200。这个组合说明 bind 没改——既不是网络、不是防火墙，
@@ -318,7 +318,13 @@ scrape_configs:
 > "I'm such an idiot, it's the first line in the documentation"。
 > 这一小节存在的唯一目的，就是让它在 PerfScope 上不再发生。
 
-**规则：只要服务端跑在容器里，先把 `prometheus.bind` 改成 `"0.0.0.0"`，再按场景决定抓哪个地址。**
+**规则：服务端跑在容器里、且容器有自己的网络命名空间（bridge / 自定义网络）时，先把
+`prometheus.bind` 改成 `"0.0.0.0"`，再按场景决定抓哪个地址。**
+
+**两个例外**：`--network host`（容器与宿主机共享网络命名空间，容器内的 `127.0.0.1` 就是宿主机
+的回环，`docker run -p` 在此模式下会被完全忽略）和 `kubectl port-forward`（kubelet 在 pod 自己
+的 netns 里拨 `localhost`）。这两种情况 `bind: "127.0.0.1"` 就能抓，不必放大 bind、白白丢掉
+「只听回环」的保护。
 
 | 部署方式 | `config.yml` | Prometheus 抓取目标 |
 |---|---|---|
@@ -352,9 +358,16 @@ scrape_configs:
 > 大于 0 时才出现，而面板上的初始值可能是 `NULL`。也就是说，在管理员抬高上限之前，普通用户
 > **根本看不到这个入口**——不是你操作不对，得找管理员。
 
-> **Wings 的一个反直觉行为**：Wings 是按分配项里那个**具体 IP** 去绑宿主端口的，不是绑
-> `0.0.0.0`。所以端点可能从外部完全可达，却从**宿主机自己的 `localhost`** 抓不到。这是预期
-> 行为，不是 bug——抓分配 IP，不要抓 `127.0.0.1`。
+> **抬高上限后按钮还可能失败**：即使 `allocation_limit` 已经大于 0，「Create Allocation」仍会
+> 报错，除非面板**全局**开启了自动分配——`Admin → Settings → Advanced → "Automatic Allocation
+> Creation"`（对应配置 `pterodactyl.client_features.allocations.enabled`，**默认是关的**）。
+> 关着时服务端抛 `AutoAllocationNotEnabledException`；开着但节点端口池没划端口段，则抛
+> `NoAutoAllocationSpaceAvailableException`。
+
+> **Wings 的一个反直觉行为**：Wings 绑宿主端口时用的是**分配项里记录的那个 IP**——可能是某个
+> 具体地址，也可能是 `0.0.0.0`。所以当分配项记的是具体非回环地址时，端点可能从外部完全可达，
+> 却从**宿主机自己的 `localhost`** 抓不到。这是预期行为，不是 bug——抓分配 IP，不要抓
+> `127.0.0.1`。
 
 **MCSManager** —— 容器实例的端口来自用户可编辑的端口列表（在实例设置里加），非 Docker 实例
 直接绑宿主端口、不涉及发布。两种情况同一条规则：`bind: "0.0.0.0"`，抓宿主 IP 与对应端口。
@@ -391,6 +404,11 @@ scrape_configs:
 
 插件在检测到非回环绑定时会打一条 WARNING（没设 token 时也照打，并在括号里标 `NO AUTH`）——
 看到这条，就说明端点已经对容器外开放了。
+
+**设了 token 却忘了在 `prometheus.yml` 里带请求头**，症状不是一句清晰的鉴权错误：插件返回
+`401` + `WWW-Authenticate: Bearer`，而 Prometheus 把**任何非 200 都当抓取失败**、记成 `up == 0`。
+于是 target 直接显示 DOWN、没有任何可读原因，看起来像网络故障——去 Prometheus 自己的
+Targets 页面看该 target 的 scrape error 才能定位。
 
 几条设计约定，看数据前值得知道：
 

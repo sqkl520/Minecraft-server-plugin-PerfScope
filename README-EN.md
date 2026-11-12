@@ -297,9 +297,10 @@ signals** — which is what distinguishes it from a generic MC exporter:
 #### Scraping from a container / panel host
 
 **Almost every bug report against comparable exporters is this one thing, so it goes first.**
-Inside a container, `bind: "127.0.0.1"` binds the **container's own loopback** — not the host,
-and not the panel node. A Prometheus running outside that container cannot reach it, no matter
-what you try, even when it runs on the very same physical machine as the MC server.
+When a container has its own network namespace, `bind: "127.0.0.1"` inside it binds the
+**container's own loopback** — not the host, and not the panel node. A Prometheus running outside
+that container cannot reach it, no matter what you try, even when it runs on the very same physical
+machine as the MC server.
 
 The diagnosis is a single contrast: scraping from outside gives `connection refused` / a timeout,
 while `curl 127.0.0.1:8940/metrics` inside the container returns 200. That combination means the
@@ -310,8 +311,15 @@ bind was never changed — it is not the network, not a firewall, and not the pl
 > "I'm such an idiot, it's the first line in the documentation."
 > This subsection exists so it does not happen here.
 
-**Rule: whenever the server runs in a container, change `prometheus.bind` to `"0.0.0.0"` first,
-then pick the target address for your setup.**
+**Rule: when the server runs in a container that has its own network namespace (bridge / custom
+network), change `prometheus.bind` to `"0.0.0.0"` first, then pick the target address for your
+setup.**
+
+**Two exceptions**: `--network host` (the container shares the host's network namespace, so a
+container-side `127.0.0.1` *is* host loopback, and `docker run -p` is ignored entirely in that
+mode) and `kubectl port-forward` (the kubelet dials `localhost` from inside the pod's own netns).
+In both, `bind: "127.0.0.1"` is scrapeable — there is no need to widen the bind and give up the
+loopback-only protection for nothing.
 
 | Deployment | `config.yml` | Scrape target |
 |---|---|---|
@@ -349,10 +357,18 @@ host ports as "allocations". The first two steps are the admin's, the last two a
 > Until an admin raises the limit, a regular user simply **does not see the entry point** — it is
 > not something you are doing wrong, ask the admin.
 
-> **A counter-intuitive Wings behaviour**: Wings binds the *specific IP* recorded on the allocation,
-> not `0.0.0.0`. The endpoint can therefore be perfectly reachable from outside while
-> **not** reachable from the host's own `localhost`. That is expected, not a bug — scrape the
-> allocation IP, not `127.0.0.1`.
+> **The button can still fail after the limit is raised**: even with `allocation_limit > 0`,
+> "Create Allocation" keeps failing unless automatic allocation is enabled **globally** under
+> `Admin → Settings → Advanced → "Automatic Allocation Creation"` (config key
+> `pterodactyl.client_features.allocations.enabled`, which **defaults to off**). With it off the
+> service throws `AutoAllocationNotEnabledException`; with it on but no port range in the node's
+> allocation pool, `NoAutoAllocationSpaceAvailableException`.
+
+> **A counter-intuitive Wings behaviour**: Wings binds the **IP recorded on the allocation** — that
+> may be a specific address or it may be `0.0.0.0`. So when the allocation records a specific
+> non-loopback address, the endpoint can be perfectly reachable from outside while **not**
+> reachable from the host's own `localhost`. That is expected, not a bug — scrape the allocation
+> IP, not `127.0.0.1`.
 
 **MCSManager** — container instances publish ports from a user-editable list (add the port in the
 instance settings); non-Docker instances bind the host port directly, with no publishing involved.
@@ -394,6 +410,12 @@ scrape_configs:
 The plugin logs a WARNING whenever it detects a non-loopback bind (it is logged with or without a
 token, marked `NO AUTH` in the message when none is set) — seeing that line means the endpoint is
 now reachable from outside the container.
+
+**Setting a token but forgetting the header in `prometheus.yml`** does not surface as a clear auth
+error: the plugin answers `401` with `WWW-Authenticate: Bearer`, and Prometheus treats **any
+non-200 as a failed scrape**, recording `up == 0`. The target just shows DOWN with no readable
+reason and looks like a network problem — check that target's scrape error in Prometheus's own
+Targets page to find it.
 
 A few conventions worth knowing before reading the data:
 

@@ -304,10 +304,14 @@ hotspots:
 #
 # ⚠️ 容器里最常见的坑（同类 exporter 的社区 issue 几乎全是这一条喵）：
 #   容器内的 127.0.0.1 是【容器自己】的回环，既不是宿主机，也不是面板节点。
-#   因此在 Docker / Pterodactyl / MCSManager 里保持 bind: "127.0.0.1"，
+#   所以在 Docker（bridge / 自定义网络）/ Pterodactyl / MCSManager 里保持 bind: "127.0.0.1"，
 #   容器外的 Prometheus 无论怎么抓都连不上——外部表现为 connection refused / 超时，
 #   而进容器里 curl 127.0.0.1:8940 却是通的（这个反差就是判定依据）。
 #   要被抓取：bind 改成 "0.0.0.0"，然后抓【容器 IP 或节点 IP】，不是抓 127.0.0.1。
+#   例外（这两种 bind 保持 "127.0.0.1" 即可，不必放大）：
+#     a) --network host：容器与宿主机共享网络命名空间，容器内 127.0.0.1 就是宿主回环，
+#        且该模式下 docker run -p 会被完全忽略；
+#     b) kubectl port-forward：kubelet 在 pod 自己的 netns 里拨 localhost。
 #
 # 面板服怎么把端口开出来（以 Pterodactyl 系为例，管理员约三步）：
 #   1) 面板加端口分配：Admin → Servers → 该服 → Build Configuration →
@@ -315,16 +319,24 @@ hotspots:
 #      注意：分配是【节点端口池里的既有条目】，不是随手填个数字——所以实际监听端口
 #      以分到的那个为准，未必是 8940（下面的 prometheus.port 要与它一致）。
 #      （MCSManager 在实例的端口列表里加；非 Docker 实例不涉及发布，直接绑宿主端口即可。）
+#      注意：即使 allocation_limit 大于 0，客户端的「Create Allocation」仍需面板【全局】开启
+#      Admin → Settings → Advanced → "Automatic Allocation Creation"
+#      （pterodactyl.client_features.allocations.enabled，默认关闭，关闭时抛
+#      AutoAllocationNotEnabledException），且节点端口池里要划出端口段，否则抛
+#      NoAutoAllocationSpaceAvailableException。
 #   2) 本文件 bind 改 "0.0.0.0"——只加分配不改 bind，外部照样进不来。
 #   3) Prometheus 抓 http://<节点IP>:<分到的公网端口>/metrics。
-#   注意：Wings 是按【分配项里那个具体 IP】去绑宿主端口的（分配写 127.0.0.1 时会被改写到
-#   pterodactyl0 网桥，默认 172.18.0.1），所以从宿主机自己的 localhost:8940 抓可能失败。
+#   注意：Wings 绑宿主端口用的是【分配项里记录的那个 IP】——可能是具体地址，也可能是 0.0.0.0
+#   （分配写 127.0.0.1 时会被改写到 pterodactyl0 网桥，默认 172.18.0.1），所以分配记的是具体
+#   非回环地址时，从宿主机自己的 localhost:8940 抓可能失败。
 #   这不代表端点没起来——用 docker ps 看实际端口映射，抓映射出来的那个 IP:端口喵。
 prometheus:
   # 总开关。默认关闭：绝大多数服主没有 Prometheus，开了只会多一个监听端口。
   enabled: false
   # 监听地址。127.0.0.1 = 只听本机（安全；但容器外抓不到，原因见上方"容器里最常见的坑"）；
-  # 容器 / 多机 / 面板服抓取必须改 0.0.0.0（启动会打 WARNING），并建议同时设置 auth-token。
+  # 容器有独立网络命名空间（bridge / 自定义网络）/ 多机 / 面板服抓取要改 0.0.0.0
+  # （启动会打 WARNING），并建议同时设置 auth-token；--network host 与 kubectl port-forward
+  # 两种例外保持 127.0.0.1 即可。
   bind: "127.0.0.1"
   # 监听端口。默认 8940：该端口在 IANA 与 Prometheus 官方 Default-port-allocations wiki 中均未分配
   # （8941-8952 同样空闲），同时避开了 9090(Prometheus) 与 9100(node_exporter)。
@@ -338,6 +350,9 @@ prometheus:
   server-id: ""
   # Bearer 鉴权令牌。留空 = 不鉴权。非空时抓取方需带 Authorization: Bearer <token>。
   # 属凭据：插件日志只会记录端点地址，绝不回显本值。
+  # 注意：设了 token 却忘了在 prometheus.yml 里带请求头时，插件返回 401 + WWW-Authenticate:
+  # Bearer，而 Prometheus 把任何非 200 都记为抓取失败（up == 0）——表现为 target DOWN 且没有
+  # 可读原因，像网络故障；去 Prometheus 的 Targets 页面看 scrape error 才能定位喵。
   auth-token: ""
 
 # 各世界单独设置 (可覆盖全局设置)
