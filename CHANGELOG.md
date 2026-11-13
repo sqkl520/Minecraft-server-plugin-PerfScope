@@ -14,6 +14,38 @@
 
 ---
 
+## [Unreleased]
+
+### Refactored — 测试端反射脚手架收拢为 3 个工具类（纯测试重构，零行为变化）
+
+- **动机**：`sun.misc.Unsafe.allocateInstance` + `setField` 三件套被复制进 11 个测试类，
+  另 3 个测试写了手写变体；`HistoryStore` 的「直写私有 ring」夹具在 4 处重复。
+  同一组踩坑注释（JDK 24 terminal deprecation、`allocateInstance` 不跑字段初始化器）
+  被抄了 11 份，且每份都略有出入，下一任只能靠 grep 猜哪份是权威。
+- 新增 `src/test/java/cn/perfscope/support/TestObjects.java`：全仓唯一的 `Unsafe` 入口
+  （`allocate` / `setField` / `getField` / `getInt` / `getStaticInt` / `invoke`）。
+  类注释钉住三条硬约束：禁用 `objectFieldOffset`/`putObject`（JDK 24 terminal deprecation，
+  `--sun-misc-unsafe-memory-access=deny` 直接抛异常，写 final 实例字段一律 `Field.set`）；
+  `allocateInstance` 只给构造器真的依赖 Bukkit 的 5 个类用（`PerfScope` / `AlertService` /
+  `WebhookNotifier` / `DiagnosticEngine` / `MetricsCollector`），
+  `HistoryStore` / `ConfigManager` / `HistoryFileStore` 的构造器只赋字段、**不需要**它；
+  反射夹具依赖 classpath 构建（无 `module-info.java`），附 `assertReflectionUsable()` 自检。
+- 新增 `HistoryFixtures.java`：`seeded(cm, samples)`（既有 5 处夹具的等价替代，调用方零改动）
+  与 `recorded(cm, snaps)`（走真实 `record()`，只把非 final 的 `lastRecordMs` 归零放行节流——
+  TPS 不可用守卫、GC `-1` 哨兵、乱序重排首次可被真实执行）。
+  `recorded` 的注释警告：`record()` 的 24h 淘汰用**墙钟**，固定 epoch 时间戳会被整体淘汰、
+  `size()==0`，测试"通过"却什么都没测；需要"很久以前"的窗口必须用 `seeded`。
+- 新增 `AlertFixtures.java`：只抽 `initMessages()` / `barePlugin()` / `configManager()` 三块通用装配；
+  `AlertServiceStateMachineFixture` 保留为薄封装（`initMessages()` 改为委托），
+  4 个调用方零改动。该夹具里针对具体状态机场景的构造逻辑（14 个 `final` 容器、
+  时钟种子、`InlineExecutor`）**未**搬动。
+- 13 个文件改用统一工具类，共减少 454 行；新增 3 个工具类 419 行。
+  `mvn test` 前后均为 **329 个用例全过**，逐类用例数与重构前逐字一致。
+- 顺带产出（未修，仅记录）：`DiagnosticEngineContractTest` 原来的 `getField` 是死代码
+  （声明后 0 次调用），已随脚手架一起删除；`HistoryFixtures.recorded` 目前尚无测试调用。
+
+---
+
 ## [1.3.0] — 2026-11-10 — 变更汇总（面向使用者）
 
 > 本节是给使用者看的：只有**改了什么、有什么影响**。过程与过程性记录在上层工作区

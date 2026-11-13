@@ -11,11 +11,11 @@ import cn.perfscope.config.ConfigManager;
 import cn.perfscope.history.HistorySample;
 import cn.perfscope.history.HistoryStore;
 import cn.perfscope.metrics.MetricsSnapshot;
+import cn.perfscope.support.HistoryFixtures;
+import cn.perfscope.support.TestObjects;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.Field;
-import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.List;
 import java.util.logging.Logger;
@@ -37,9 +37,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <p>{@link HistoryStore} 的公开写入路径 {@code record(snap)} 有三道闸：读配置、TPS 模块可用性、
  * 以及<b>按墙钟节流的采样间隔</b>（默认 60 秒）。想造"30 分钟窗口里 12 个样本"就得等 12 分钟，
- * 所以这里不用 {@code record}，而是用 {@code Unsafe.allocateInstance} + 反射直接写它的私有环
- * {@code ring}（{@code ArrayDeque<HistorySample>}）。读路径 {@code since(...)}/{@code samples()}
- * 只要求 {@code configManager.get() != null && cfg.history_enabled}，其余照常走真实代码。</p>
+ * 所以这里不用 {@code record}，而是走 {@link HistoryFixtures#seeded}：普通构造器造 store，
+ * 再用反射直接写它的私有环 {@code ring}（{@code ArrayDeque<HistorySample>}）。
+ * 读路径 {@code since(...)}/{@code samples()} 只要求
+ * {@code configManager.get() != null && cfg.history_enabled}，其余照常走真实代码。</p>
  *
  * <p>{@code HistorySample.timestamp} 是任意 epoch 毫秒，因此"30 分钟前"只是减法——
  * 不需要动系统时钟。</p>
@@ -56,51 +57,15 @@ class MemoryLeakRuleTest {
 
     // ==================== 装配 ====================
 
-    private static Object unsafe() throws Exception {
-        Class<?> c = Class.forName("sun.misc.Unsafe");
-        Field f = c.getDeclaredField("theUnsafe");
-        f.setAccessible(true);
-        return f.get(null);
-    }
-
-    private static Object alloc(Class<?> k) throws Exception {
-        return unsafe().getClass().getMethod("allocateInstance", Class.class).invoke(unsafe(), k);
-    }
-
-    private static void setField(Class<?> cls, Object t, String n, Object v) throws Exception {
-        Class<?> c = cls;
-        while (c != null) {
-            try {
-                Field f = c.getDeclaredField(n);
-                f.setAccessible(true);
-                f.set(t, v);
-                return;
-            } catch (NoSuchFieldException e) {
-                c = c.getSuperclass();
-            }
-        }
-        throw new NoSuchFieldException(n);
-    }
-
-    private static ConfigManager configManager(boolean historyEnabled) throws Exception {
-        ConfigManager cm = (ConfigManager) alloc(ConfigManager.class);
+    private static ConfigManager configManager(boolean historyEnabled) {
+        ConfigManager cm = new ConfigManager(null);
         ConfigManager.ConfigData cfg = new ConfigManager.ConfigData();
         cfg.history_enabled = historyEnabled;
         cfg.history_sampleIntervalSeconds = 60;
         cfg.memory_heapWarningThreshold = WARN_THRESHOLD;
         cfg.memory_heapCriticalThreshold = 95;
-        setField(ConfigManager.class, cm, "config", cfg);
+        TestObjects.setField(ConfigManager.class, cm, "config", cfg);
         return cm;
-    }
-
-    /** 造一个只含指定样本的 HistoryStore（绕过节流，直接写私有环）。 */
-    private static HistoryStore history(ConfigManager cm, List<HistorySample> samples) throws Exception {
-        HistoryStore hs = (HistoryStore) alloc(HistoryStore.class);
-        setField(HistoryStore.class, hs, "configManager", cm);
-        setField(HistoryStore.class, hs, "logger", Logger.getLogger("pscope-memleak-test"));
-        Deque<HistorySample> ring = new ArrayDeque<>(samples);
-        setField(HistoryStore.class, hs, "ring", ring);
-        return hs;
     }
 
     /** 一份内存模块可用、堆占用为 {@code heapPercent} 的快照。 */
@@ -166,7 +131,7 @@ class MemoryLeakRuleTest {
     void steadyRiseMustProduceADiagnosis() throws Exception {
         ConfigManager cm = configManager(true);
         long now = System.currentTimeMillis();
-        HistoryStore hs = history(cm, risingSamples(16, 100_000L, 80, 95, now));
+        HistoryStore hs = HistoryFixtures.seeded(cm, risingSamples(16, 100_000L, 80, 95, now));
         MetricsSnapshot snap = snapshot(95, 4L * 1024 * 1024 * 1024);
 
         Evaluation ev = evaluate(snap, hs, cm);
@@ -186,7 +151,7 @@ class MemoryLeakRuleTest {
     void diagnosisDetailCarriesTheObservedNumbers() throws Exception {
         ConfigManager cm = configManager(true);
         long now = System.currentTimeMillis();
-        HistoryStore hs = history(cm, risingSamples(16, 100_000L, 80, 95, now));
+        HistoryStore hs = HistoryFixtures.seeded(cm, risingSamples(16, 100_000L, 80, 95, now));
 
         Diagnosis d = evaluate(snapshot(95, 4L * 1024 * 1024 * 1024), hs, cm).hit();
         assertNotNull(d);
@@ -204,7 +169,7 @@ class MemoryLeakRuleTest {
     void smallRiseIsCleanNotSkipped() throws Exception {
         ConfigManager cm = configManager(true);
         long now = System.currentTimeMillis();
-        HistoryStore hs = history(cm, risingSamples(16, 100_000L, 88, 93, now));
+        HistoryStore hs = HistoryFixtures.seeded(cm, risingSamples(16, 100_000L, 88, 93, now));
         MetricsSnapshot snap = snapshot(93, 4L * 1024 * 1024 * 1024);
 
         Evaluation ev = evaluate(snap, hs, cm);
@@ -225,7 +190,7 @@ class MemoryLeakRuleTest {
             int pct = i < 8 ? 80 + i * 17 / 7 : 97 - (i - 7) * 37 / 8;
             s.add(new HistorySample(now - (15 - i) * 100_000L, 20.0, 10.0, pct, 5, 100, 500));
         }
-        HistoryStore hs = history(cm, s);
+        HistoryStore hs = HistoryFixtures.seeded(cm, s);
         Evaluation ev = evaluate(snapshot(90, 4L * 1024 * 1024 * 1024), hs, cm);
         assertNull(ev.hit(), "a spike that fell back below the start is normal fluctuation, not a leak");
         assertTrue(ev.isClean(), "it was evaluated and found fine — clean, not skip");
@@ -236,7 +201,7 @@ class MemoryLeakRuleTest {
     void heapBelowThresholdSkipsWithReason() throws Exception {
         ConfigManager cm = configManager(true);
         long now = System.currentTimeMillis();
-        HistoryStore hs = history(cm, risingSamples(16, 100_000L, 40, 60, now));
+        HistoryStore hs = HistoryFixtures.seeded(cm, risingSamples(16, 100_000L, 40, 60, now));
         Evaluation ev = evaluate(snapshot(60, 4L * 1024 * 1024 * 1024), hs, cm);
 
         assertNull(ev.hit());
@@ -250,7 +215,7 @@ class MemoryLeakRuleTest {
     @Test
     void unavailableMemoryModuleSkips() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, risingSamples(16, 100_000L, 80, 95,
+        HistoryStore hs = HistoryFixtures.seeded(cm, risingSamples(16, 100_000L, 80, 95,
             System.currentTimeMillis()));
         MetricsSnapshot snap = snapshot(95, 4L * 1024 * 1024 * 1024);
         snap.unavailable.add(MetricsSnapshot.MODULE_MEMORY);
@@ -266,7 +231,7 @@ class MemoryLeakRuleTest {
     void tooFewSamplesSkips() throws Exception {
         ConfigManager cm = configManager(true);
         long now = System.currentTimeMillis();
-        HistoryStore hs = history(cm, risingSamples(6, 100_000L, 80, 95, now));
+        HistoryStore hs = HistoryFixtures.seeded(cm, risingSamples(6, 100_000L, 80, 95, now));
 
         Evaluation ev = evaluate(snapshot(95, 4L * 1024 * 1024 * 1024), hs, cm);
         assertNull(ev.hit());
@@ -279,7 +244,7 @@ class MemoryLeakRuleTest {
         ConfigManager cm = configManager(true);
         long now = System.currentTimeMillis();
         // 最后一个样本落在 35 分钟前 → since(now-30min) 返回空
-        HistoryStore hs = history(cm, risingSamples(16, 100_000L, 80, 95, now - 35 * 60_000L));
+        HistoryStore hs = HistoryFixtures.seeded(cm, risingSamples(16, 100_000L, 80, 95, now - 35 * 60_000L));
 
         Evaluation ev = evaluate(snapshot(95, 4L * 1024 * 1024 * 1024), hs, cm);
         assertNull(ev.hit(), "a stale window must not be used to claim an active leak");
@@ -291,7 +256,7 @@ class MemoryLeakRuleTest {
     @Test
     void disabledHistorySkipsInsteadOfInventingData() throws Exception {
         ConfigManager cm = configManager(false);
-        HistoryStore hs = history(cm, risingSamples(16, 100_000L, 80, 95,
+        HistoryStore hs = HistoryFixtures.seeded(cm, risingSamples(16, 100_000L, 80, 95,
             System.currentTimeMillis()));
 
         Evaluation ev = evaluate(snapshot(95, 4L * 1024 * 1024 * 1024), hs, cm);
@@ -311,7 +276,7 @@ class MemoryLeakRuleTest {
         java.util.ArrayList<HistorySample> s = new java.util.ArrayList<>(
             risingSamples(16, 100_000L, 80, 95, now));
         s.set(0, new HistorySample(s.get(0).timestamp(), 20.0, 10.0, 0, 5, 100, 500));
-        HistoryStore hs = history(cm, s);
+        HistoryStore hs = HistoryFixtures.seeded(cm, s);
         assertEquals(16, hs.since(now - 30 * 60_000L).size(),
             "precondition: the 0% sample really is inside the window");
 
@@ -342,7 +307,7 @@ class MemoryLeakRuleTest {
             s.add(new HistorySample(now - (long) (percents.length - 1 - i) * 100_000L,
                 20.0, 10.0, percents[i], 5, 100, 500));
         }
-        HistoryStore hs = history(cm, s);
+        HistoryStore hs = HistoryFixtures.seeded(cm, s);
 
         Evaluation ev = evaluate(snapshot(86, 4L * 1024 * 1024 * 1024), hs, cm);
 
@@ -372,7 +337,7 @@ class MemoryLeakRuleTest {
             s.add(new HistorySample(now - (long) (percents.length - 1 - i) * 100_000L,
                 20.0, 10.0, percents[i], 5, 100, 500));
         }
-        HistoryStore hs = history(cm, s);
+        HistoryStore hs = HistoryFixtures.seeded(cm, s);
 
         Evaluation ev = evaluate(snapshot(95, 4L * 1024 * 1024 * 1024), hs, cm);
 
@@ -393,7 +358,7 @@ class MemoryLeakRuleTest {
     void detailStatesHowManySamplesItIsBasedOn() throws Exception {
         ConfigManager cm = configManager(true);
         long now = System.currentTimeMillis();
-        HistoryStore hs = history(cm, risingSamples(16, 100_000L, 80, 95, now));
+        HistoryStore hs = HistoryFixtures.seeded(cm, risingSamples(16, 100_000L, 80, 95, now));
 
         Diagnosis d = evaluate(snapshot(95, 4L * 1024 * 1024 * 1024), hs, cm).hit();
         assertNotNull(d);
@@ -412,7 +377,7 @@ class MemoryLeakRuleTest {
     void evaluationIsPureAndRepeatable() throws Exception {
         ConfigManager cm = configManager(true);
         long now = System.currentTimeMillis();
-        HistoryStore hs = history(cm, risingSamples(16, 100_000L, 80, 95, now));
+        HistoryStore hs = HistoryFixtures.seeded(cm, risingSamples(16, 100_000L, 80, 95, now));
         MetricsSnapshot snap = snapshot(95, 4L * 1024 * 1024 * 1024);
 
         Diagnosis first = evaluate(snap, hs, cm).hit();
@@ -429,22 +394,22 @@ class MemoryLeakRuleTest {
     void engineSurfacesTheRuleHit() throws Exception {
         ConfigManager cm = configManager(true);
         long now = System.currentTimeMillis();
-        setField(ConfigManager.class, cm, "publishedAtMillis", now - 60_000L);
+        TestObjects.setField(ConfigManager.class, cm, "publishedAtMillis", now - 60_000L);
 
-        PerfScope p = (PerfScope) alloc(PerfScope.class);
-        setField(PerfScope.class, p, "logger", Logger.getLogger("pscope-memleak-test"));
-        setField(PerfScope.class, p, "configManager", cm);
+        PerfScope p = TestObjects.allocate(PerfScope.class);
+        TestObjects.setField(PerfScope.class, p, "logger", Logger.getLogger("pscope-memleak-test"));
+        TestObjects.setField(PerfScope.class, p, "configManager", cm);
 
         MetricsSnapshot snap = snapshot(95, 4L * 1024 * 1024 * 1024);
         snap.timestamp = now;
         cn.perfscope.metrics.MetricsCollector mc =
-            (cn.perfscope.metrics.MetricsCollector) alloc(cn.perfscope.metrics.MetricsCollector.class);
+            TestObjects.allocate(cn.perfscope.metrics.MetricsCollector.class);
         Deque<MetricsSnapshot> latest = new java.util.concurrent.ConcurrentLinkedDeque<>();
         latest.addLast(snap);
-        setField(cn.perfscope.metrics.MetricsCollector.class, mc, "history", latest);
-        setField(PerfScope.class, p, "metricsCollector", mc);
+        TestObjects.setField(cn.perfscope.metrics.MetricsCollector.class, mc, "history", latest);
+        TestObjects.setField(PerfScope.class, p, "metricsCollector", mc);
 
-        HistoryStore hs = history(cm, risingSamples(16, 100_000L, 80, 95, now));
+        HistoryStore hs = HistoryFixtures.seeded(cm, risingSamples(16, 100_000L, 80, 95, now));
         DiagnosticEngine engine = new DiagnosticEngine(p, hs);
         DiagnosticEngine.Result r = engine.run();
 

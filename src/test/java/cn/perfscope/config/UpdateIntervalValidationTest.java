@@ -6,11 +6,11 @@
 package cn.perfscope.config;
 
 import cn.perfscope.PerfScope;
+import cn.perfscope.support.AlertFixtures;
+import cn.perfscope.support.TestObjects;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -36,36 +36,8 @@ class UpdateIntervalValidationTest {
             .invoke(null, (Object) null);
     }
 
-    private static Object unsafe() throws Exception {
-        Class<?> c = Class.forName("sun.misc.Unsafe");
-        Field f = c.getDeclaredField("theUnsafe");
-        f.setAccessible(true);
-        return f.get(null);
-    }
-
-    private static Object alloc(Class<?> k) throws Exception {
-        return unsafe().getClass().getMethod("allocateInstance", Class.class).invoke(unsafe(), k);
-    }
-
-    private static void setField(Class<?> cls, Object t, String n, Object v) throws Exception {
-        Class<?> c = cls;
-        while (c != null) {
-            try {
-                Field f = c.getDeclaredField(n);
-                f.setAccessible(true);
-                f.set(t, v);
-                return;
-            } catch (NoSuchFieldException e) {
-                c = c.getSuperclass();
-            }
-        }
-        throw new NoSuchFieldException(n);
-    }
-
-    private static int constInt(String name) throws Exception {
-        Field f = ConfigManager.class.getDeclaredField(name);
-        f.setAccessible(true);
-        return f.getInt(null);
+    private static int constInt(String name) {
+        return TestObjects.getStaticInt(ConfigManager.class, name);
     }
 
     /**
@@ -74,12 +46,9 @@ class UpdateIntervalValidationTest {
      * <p>只需要 {@code plugin}（只为 {@code getLogger()}）——{@code validateThresholds} 的全部
      * 副作用都写在传入的 {@code ConfigData} 上，不读 Bukkit、不写盘。</p>
      */
-    private static ConfigManager manager() throws Exception {
-        PerfScope p = (PerfScope) alloc(PerfScope.class);
-        setField(PerfScope.class, p, "logger", Logger.getLogger("pscope-update-interval-test"));
-        ConfigManager cm = (ConfigManager) alloc(ConfigManager.class);
-        setField(ConfigManager.class, cm, "plugin", p);
-        return cm;
+    private static ConfigManager manager() {
+        PerfScope p = AlertFixtures.barePlugin(Logger.getLogger("pscope-update-interval-test"));
+        return new ConfigManager(p);
     }
 
     /** 一份"其余项全部合法"的配置，保证断言只反映 update_interval 这一项。 */
@@ -116,11 +85,9 @@ class UpdateIntervalValidationTest {
         return c;
     }
 
-    private static void validate(ConfigManager cm, ConfigManager.ConfigData cfg) throws Exception {
-        Method m = ConfigManager.class.getDeclaredMethod("validateThresholds",
-            ConfigManager.ConfigData.class);
-        m.setAccessible(true);
-        m.invoke(cm, cfg);
+    private static void validate(ConfigManager cm, ConfigManager.ConfigData cfg) {
+        TestObjects.invoke(cm, "validateThresholds",
+            new Class<?>[]{ConfigManager.ConfigData.class}, cfg);
     }
 
     /** 低于下限（1 tick = 每 tick 全量采集）→ 必须被写成 20。 */

@@ -5,10 +5,9 @@
  */
 package cn.perfscope.metrics;
 
+import cn.perfscope.support.TestObjects;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.util.Deque;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -29,63 +28,43 @@ class CollectDurationStatsTest {
     private static final long WARN_MS = 50L;   // 与 COLLECT_DURATION_WARN_MS 一致
 
     /** 构造只带 collectDurations / collectDurationsCount 两个字段的对象（绕过需要 Plugin 的构造器）。 */
-    private static Object allocate() throws Exception {
-        Class<?> unsafeClass = Class.forName("sun.misc.Unsafe");
-        Field theUnsafe = unsafeClass.getDeclaredField("theUnsafe");
-        theUnsafe.setAccessible(true);
-        Object unsafe = theUnsafe.get(null);
+    private static Object allocate() {
+        Object collector = TestObjects.allocate(MetricsCollector.class);
 
-        Object collector = unsafeClass.getMethod("allocateInstance", Class.class)
-            .invoke(unsafe, MetricsCollector.class);
-
-        // 用 Field.set 而不是 Unsafe.putObject/objectFieldOffset：后两者自 JDK 24 起被
-        // terminal deprecation（--sun-misc-unsafe-memory-access=deny 立刻抛异常），
-        // 而它们的调用方正是「写 final 实例字段」——Field.set 完全等价且三个 JDK 都支持。
-        Field durationsField = MetricsCollector.class.getDeclaredField("collectDurations");
-        durationsField.setAccessible(true);
-        durationsField.set(collector, new java.util.concurrent.ConcurrentLinkedDeque<>());
-
-        Field countField = MetricsCollector.class.getDeclaredField("collectDurationsCount");
-        countField.setAccessible(true);
-        countField.setInt(collector, 0);
+        TestObjects.setField(MetricsCollector.class, collector, "collectDurations",
+            new java.util.concurrent.ConcurrentLinkedDeque<>());
+        TestObjects.setField(MetricsCollector.class, collector, "collectDurationsCount", 0);
 
         return collector;
     }
 
     /** 按生产逻辑追加一个耗时样本。 */
     @SuppressWarnings("unchecked")
-    private static void push(Object collector, long ms) throws Exception {
-        Field durationsField = MetricsCollector.class.getDeclaredField("collectDurations");
-        durationsField.setAccessible(true);
-        Deque<Long> d = (Deque<Long>) durationsField.get(collector);
-
-        Field countField = MetricsCollector.class.getDeclaredField("collectDurationsCount");
-        countField.setAccessible(true);
-        Field windowField = MetricsCollector.class.getDeclaredField("COLLECT_DURATION_WINDOW");
-        windowField.setAccessible(true);
-        int window = windowField.getInt(null);
+    private static void push(Object collector, long ms) {
+        Deque<Long> d = (Deque<Long>)
+            TestObjects.getField(MetricsCollector.class, collector, "collectDurations");
+        int window = TestObjects.getStaticInt(MetricsCollector.class, "COLLECT_DURATION_WINDOW");
 
         d.addLast(ms);
-        int c = countField.getInt(collector) + 1;
+        int c = (Integer) TestObjects.getField(
+            MetricsCollector.class, collector, "collectDurationsCount") + 1;
         while (c > window) { d.pollFirst(); c--; }
-        countField.setInt(collector, c);
+        TestObjects.setField(MetricsCollector.class, collector, "collectDurationsCount", c);
     }
 
-    private static long[] stats(Object collector) throws Exception {
-        Method m = MetricsCollector.class.getDeclaredMethod("collectDurationStats");
-        m.setAccessible(true);
-        return (long[]) m.invoke(collector);
+    private static long[] stats(Object collector) {
+        return (long[]) TestObjects.invoke(collector, "collectDurationStats", new Class<?>[0]);
     }
 
     @Test
-    void emptyWindowReportsNoSamplesAndNoOvers() throws Exception {
+    void emptyWindowReportsNoSamplesAndNoOvers() {
         long[] s = stats(allocate());
         assertEquals(0L, s[3], "sample count");
         assertEquals(0L, s[4], "over-budget count must be 0 when there are no samples");
     }
 
     @Test
-    void oversAreCountedWithinTheWindowOnly() throws Exception {
+    void oversAreCountedWithinTheWindowOnly() {
         Object c = allocate();
         // 100 个正常周期 + 3 个超阈周期
         for (int i = 0; i < 100; i++) push(c, 10L);
@@ -96,9 +75,9 @@ class CollectDurationStatsTest {
     }
 
     @Test
-    void oldOversSlideOutOfTheWindow() throws Exception {
+    void oldOversSlideOutOfTheWindow() {
         Object c = allocate();
-        int window = 300;
+        int window = TestObjects.getStaticInt(MetricsCollector.class, "COLLECT_DURATION_WINDOW");
 
         // 先塞 10 个超阈周期，再塞 window 个正常周期——那 10 个应当全部滑出窗口。
         for (int i = 0; i < 10; i++) push(c, WARN_MS + 100);
@@ -111,7 +90,7 @@ class CollectDurationStatsTest {
     }
 
     @Test
-    void ratioNeverExceedsOne() throws Exception {
+    void ratioNeverExceedsOne() {
         // 分母同源的直接推论：超阈数不可能大于样本数。
         // 累计计数器版本在这个场景下会给出 10/300 而窗口里只剩 0 个。
         Object c = allocate();

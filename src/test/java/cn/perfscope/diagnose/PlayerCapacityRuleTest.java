@@ -10,16 +10,14 @@ import cn.perfscope.config.ConfigManager;
 import cn.perfscope.history.HistorySample;
 import cn.perfscope.history.HistoryStore;
 import cn.perfscope.metrics.MetricsSnapshot;
+import cn.perfscope.support.HistoryFixtures;
+import cn.perfscope.support.TestObjects;
 import cn.perfscope.util.Messages;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.Field;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Deque;
 import java.util.List;
-import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -31,8 +29,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 诊断规则<b>本体</b>：{@link CoreRules.PlayerCapacityRule}（DIAG-PLAYER-CAP）。
  *
  * <p>准纯函数：判据本身只读 {@link MetricsSnapshot}，但"是不是活动峰值"要看 15 分钟历史窗口，
- * 所以要喂历史。喂法与 {@code MemoryLeakRuleTest} 相同——{@code Unsafe.allocateInstance}
- * 绕过构造器 + 反射直写私有环 {@code ring}，绕开 {@code record(snap)} 的采样节流。</p>
+ * 所以要喂历史。喂法与 {@code MemoryLeakRuleTest} 相同——{@code HistoryFixtures.seeded}
+ * 直写私有环 {@code ring}，绕开 {@code record(snap)} 的采样节流。</p>
  *
  * <h2>本类真正要锁住的东西：0 人在线是真实低谷</h2>
  *
@@ -54,51 +52,15 @@ class PlayerCapacityRuleTest {
 
     // ==================== 装配 ====================
 
-    private static Object unsafe() throws Exception {
-        Class<?> c = Class.forName("sun.misc.Unsafe");
-        Field f = c.getDeclaredField("theUnsafe");
-        f.setAccessible(true);
-        return f.get(null);
-    }
-
-    private static Object alloc(Class<?> k) throws Exception {
-        return unsafe().getClass().getMethod("allocateInstance", Class.class).invoke(unsafe(), k);
-    }
-
-    private static void setField(Class<?> cls, Object t, String n, Object v) throws Exception {
-        Class<?> c = cls;
-        while (c != null) {
-            try {
-                Field f = c.getDeclaredField(n);
-                f.setAccessible(true);
-                f.set(t, v);
-                return;
-            } catch (NoSuchFieldException e) {
-                c = c.getSuperclass();
-            }
-        }
-        throw new NoSuchFieldException(n);
-    }
-
-    private static ConfigManager configManager(boolean historyEnabled) throws Exception {
-        ConfigManager cm = (ConfigManager) alloc(ConfigManager.class);
+    private static ConfigManager configManager(boolean historyEnabled) {
+        ConfigManager cm = new ConfigManager(null);
         ConfigManager.ConfigData cfg = new ConfigManager.ConfigData();
         cfg.history_enabled = historyEnabled;
         cfg.history_sampleIntervalSeconds = 60;
         cfg.players_warningThreshold = WARN_THRESHOLD;
         cfg.players_criticalThreshold = CRITICAL_THRESHOLD;
-        setField(ConfigManager.class, cm, "config", cfg);
+        TestObjects.setField(ConfigManager.class, cm, "config", cfg);
         return cm;
-    }
-
-    /** 造一个只含指定样本的 HistoryStore（绕过节流，直接写私有环）。 */
-    private static HistoryStore history(ConfigManager cm, List<HistorySample> samples) throws Exception {
-        HistoryStore hs = (HistoryStore) alloc(HistoryStore.class);
-        setField(HistoryStore.class, hs, "configManager", cm);
-        setField(HistoryStore.class, hs, "logger", Logger.getLogger("pscope-playercap-test"));
-        Deque<HistorySample> ring = new ArrayDeque<>(samples);
-        setField(HistoryStore.class, hs, "ring", ring);
-        return hs;
     }
 
     private static MetricsSnapshot snapshot(int players, int maxPlayers) {
@@ -140,7 +102,7 @@ class PlayerCapacityRuleTest {
     @Test
     void unavailablePlayerModuleSkips() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, samples(95, 95, 95, 95, 95, 95));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(95, 95, 95, 95, 95, 95));
         MetricsSnapshot snap = snapshot(95, MAX_PLAYERS);
         snap.unavailable.add(MetricsSnapshot.MODULE_PLAYERS);
 
@@ -157,7 +119,7 @@ class PlayerCapacityRuleTest {
     @Test
     void zeroMaxPlayersSkipsWithTheReading() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, samples(0, 0, 0, 0, 0, 0));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(0, 0, 0, 0, 0, 0));
 
         Evaluation ev = evaluate(snapshot(5, 0), hs, cm);
 
@@ -170,7 +132,7 @@ class PlayerCapacityRuleTest {
     @Test
     void negativeMaxPlayersSkips() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, samples(0, 0, 0, 0, 0, 0));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(0, 0, 0, 0, 0, 0));
 
         Evaluation ev = evaluate(snapshot(5, -1), hs, cm);
 
@@ -183,7 +145,7 @@ class PlayerCapacityRuleTest {
     @Test
     void tooFewSamplesSkips() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, samples(95, 95, 95, 95));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(95, 95, 95, 95));
 
         Evaluation ev = evaluate(snapshot(95, MAX_PLAYERS), hs, cm);
 
@@ -197,7 +159,7 @@ class PlayerCapacityRuleTest {
     @Test
     void disabledHistorySkips() throws Exception {
         ConfigManager cm = configManager(false);
-        HistoryStore hs = history(cm, samples(95, 95, 95, 95, 95, 95));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(95, 95, 95, 95, 95, 95));
 
         Evaluation ev = evaluate(snapshot(95, MAX_PLAYERS), hs, cm);
 
@@ -228,7 +190,7 @@ class PlayerCapacityRuleTest {
     @Test
     void justBelowTheWarningLineIsClean() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, samples(89, 89, 89, 89, 89, 89));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(89, 89, 89, 89, 89, 89));
 
         assertTrue(evaluate(snapshot(89, MAX_PLAYERS), hs, cm).isClean());
     }
@@ -245,7 +207,7 @@ class PlayerCapacityRuleTest {
     @Test
     void exactlyAtTheWarningLineIsStillEvaluated() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, samples(90, 92, 93, 94, 95, 95));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(90, 92, 93, 94, 95, 95));
 
         Evaluation ev = evaluate(snapshot(90, MAX_PLAYERS), hs, cm);
 
@@ -263,7 +225,7 @@ class PlayerCapacityRuleTest {
     @Test
     void peakWithAnObviousLowInTheWindowIsClean() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, samples(70, 80, 90, 93, 94, 95));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(70, 80, 90, 93, 94, 95));
 
         Evaluation ev = evaluate(snapshot(95, MAX_PLAYERS), hs, cm);
 
@@ -278,7 +240,7 @@ class PlayerCapacityRuleTest {
     @Test
     void sustainedHighOccupancyProducesADiagnosis() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, samples(90, 92, 93, 94, 95, 95));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(90, 92, 93, 94, 95, 95));
 
         Evaluation ev = evaluate(snapshot(95, MAX_PLAYERS), hs, cm);
 
@@ -294,7 +256,7 @@ class PlayerCapacityRuleTest {
     @Test
     void detailCarriesTheWindowLowAndTheSpan() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, samples(90, 92, 93, 94, 95, 95));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(90, 92, 93, 94, 95, 95));
 
         Diagnosis d = evaluate(snapshot(95, MAX_PLAYERS), hs, cm).hit();
         assertNotNull(d);
@@ -320,7 +282,7 @@ class PlayerCapacityRuleTest {
     @Test
     void historyLowIsReportedAsARawCountNotAFabricatedPercentage() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, samples(45, 46, 47, 48, 48, 48));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(45, 46, 47, 48, 48, 48));
 
         Diagnosis d = evaluate(snapshot(48, 50), hs, cm).hit();
         assertNotNull(d, "48/50 = 96% sustained is a real capacity wall");
@@ -356,7 +318,7 @@ class PlayerCapacityRuleTest {
     @Test
     void grownCapacityMakesTheSameHistoryLookHealthy() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, samples(95, 95, 95, 95, 95, 95));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(95, 95, 95, 95, 95, 95));
 
         // 当前 95/200 = 47.5% < 90 → 提前 clean，不进入历史判定
         Evaluation ev = evaluate(snapshot(95, 200), hs, cm);
@@ -380,7 +342,7 @@ class PlayerCapacityRuleTest {
     @Test
     void zeroWarningThresholdSkipsInsteadOfReportingACritical() throws Exception {
         ConfigManager cm = configManagerZeroPlayersThreshold();
-        HistoryStore hs = history(cm, samples(1, 1, 1, 1, 1, 1));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(1, 1, 1, 1, 1, 1));
 
         Evaluation ev = evaluate(snapshot(1, 200), hs, cm);
 
@@ -396,7 +358,7 @@ class PlayerCapacityRuleTest {
         ConfigManager cm = configManager(true);
         cm.get().players_warningThreshold = -1;
         cm.get().players_criticalThreshold = -1;
-        HistoryStore hs = history(cm, samples(1, 1, 1, 1, 1, 1));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(1, 1, 1, 1, 1, 1));
 
         Evaluation ev = evaluate(snapshot(1, 200), hs, cm);
 
@@ -415,7 +377,7 @@ class PlayerCapacityRuleTest {
     void unusableCriticalThresholdDoesNotEscalateEveryHit() throws Exception {
         ConfigManager cm = configManager(true);
         cm.get().players_criticalThreshold = 0;
-        HistoryStore hs = history(cm, samples(90, 92, 93, 94, 95, 95));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(90, 92, 93, 94, 95, 95));
 
         Diagnosis d = evaluate(snapshot(95, MAX_PLAYERS), hs, cm).hit();
         assertNotNull(d, "the warning threshold is fine, so the hit itself is still valid");
@@ -434,7 +396,7 @@ class PlayerCapacityRuleTest {
     @Test
     void aSaneThresholdIsUnaffectedByTheDefensiveGuard() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, samples(90, 92, 93, 94, 95, 95));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(90, 92, 93, 94, 95, 95));
 
         Diagnosis d = evaluate(snapshot(95, MAX_PLAYERS), hs, cm).hit();
         assertNotNull(d);
@@ -447,7 +409,7 @@ class PlayerCapacityRuleTest {
     @Test
     void atCriticalThresholdIsCritical() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, samples(98, 98, 98, 98, 98, 99));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(98, 98, 98, 98, 98, 99));
 
         Diagnosis d = evaluate(snapshot(99, MAX_PLAYERS), hs, cm).hit();
 
@@ -459,7 +421,7 @@ class PlayerCapacityRuleTest {
     @Test
     void justBelowCriticalThresholdIsAWarning() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, samples(96, 96, 96, 97, 97, 97));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(96, 96, 96, 97, 97, 97));
 
         Diagnosis d = evaluate(snapshot(97, MAX_PLAYERS), hs, cm).hit();
 
@@ -484,7 +446,7 @@ class PlayerCapacityRuleTest {
     @Test
     void zeroPlayerSamplesCountAsTheWindowLow() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, samples(0, 0, 95, 95, 95, 95));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(0, 0, 95, 95, 95, 95));
 
         Evaluation ev = evaluate(snapshot(95, MAX_PLAYERS), hs, cm);
 
@@ -505,7 +467,7 @@ class PlayerCapacityRuleTest {
     @Test
     void zeroPlayerSamplesAreTheOnlyLowInTheWindow() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, samples(0, 95, 96, 97, 96, 95));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(0, 95, 96, 97, 96, 95));
 
         // 前置自检：窗口确实只靠那一个 0 把最低点拉下来
         List<HistorySample> window = hs.since(System.currentTimeMillis() - 15 * 60_000L);
@@ -532,7 +494,7 @@ class PlayerCapacityRuleTest {
     @Test
     void windowLowExactlyAtTheMarginStillHits() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, samples(80, 88, 90, 92, 94, 95));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(80, 88, 90, 92, 94, 95));
 
         Evaluation ev = evaluate(snapshot(95, MAX_PLAYERS), hs, cm);
 
@@ -545,7 +507,7 @@ class PlayerCapacityRuleTest {
     @Test
     void windowLowOnePointBelowTheMarginIsClean() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, samples(79, 88, 90, 92, 94, 95));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(79, 88, 90, 92, 94, 95));
 
         Evaluation ev = evaluate(snapshot(95, MAX_PLAYERS), hs, cm);
 
@@ -559,7 +521,7 @@ class PlayerCapacityRuleTest {
     @Test
     void evaluationIsPureAndRepeatable() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, samples(90, 92, 93, 94, 95, 95));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(90, 92, 93, 94, 95, 95));
         MetricsSnapshot snap = snapshot(95, MAX_PLAYERS);
 
         Diagnosis first = evaluate(snap, hs, cm).hit();

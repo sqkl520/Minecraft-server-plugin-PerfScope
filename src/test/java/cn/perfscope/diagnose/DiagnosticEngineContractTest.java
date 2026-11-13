@@ -9,11 +9,10 @@ import cn.perfscope.PerfScope;
 import cn.perfscope.config.ConfigManager;
 import cn.perfscope.metrics.MetricsCollector;
 import cn.perfscope.metrics.MetricsSnapshot;
+import cn.perfscope.support.TestObjects;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -38,46 +37,6 @@ class DiagnosticEngineContractTest {
             .invoke(null, (Object) null);
     }
 
-    private static Object unsafe() throws Exception {
-        Class<?> c = Class.forName("sun.misc.Unsafe");
-        Field f = c.getDeclaredField("theUnsafe");
-        f.setAccessible(true);
-        return f.get(null);
-    }
-
-    private static Object alloc(Class<?> k) throws Exception {
-        return unsafe().getClass().getMethod("allocateInstance", Class.class).invoke(unsafe(), k);
-    }
-
-    private static void setField(Class<?> cls, Object t, String n, Object v) throws Exception {
-        Class<?> c = cls;
-        while (c != null) {
-            try {
-                Field f = c.getDeclaredField(n);
-                f.setAccessible(true);
-                f.set(t, v);
-                return;
-            } catch (NoSuchFieldException e) {
-                c = c.getSuperclass();
-            }
-        }
-        throw new NoSuchFieldException(n);
-    }
-
-    private static Object getField(Class<?> cls, Object target, String name) throws Exception {
-        Class<?> c = cls;
-        while (c != null) {
-            try {
-                Field f = c.getDeclaredField(name);
-                f.setAccessible(true);
-                return f.get(target);
-            } catch (NoSuchFieldException e) {
-                c = c.getSuperclass();
-            }
-        }
-        throw new NoSuchFieldException(name);
-    }
-
     private static ConfigManager.ConfigData config() {
         ConfigManager.ConfigData c = new ConfigManager.ConfigData();
         c.general_updateInterval = 20;          // 1 秒周期 -> 宽限窗口 = 21 秒，但下限 30 秒
@@ -88,43 +47,43 @@ class DiagnosticEngineContractTest {
     }
 
     /** 装配一个只依赖 plugin/cm/snapshot 的 DiagnosticEngine。 */
-    private static DiagnosticEngine engine(long publishedAt, long snapTimestamp) throws Exception {
-        PerfScope p = (PerfScope) alloc(PerfScope.class);
-        setField(PerfScope.class, p, "logger", Logger.getLogger("diag-contract-test"));
+    private static DiagnosticEngine engine(long publishedAt, long snapTimestamp) {
+        PerfScope p = TestObjects.allocate(PerfScope.class);
+        TestObjects.setField(PerfScope.class, p, "logger", Logger.getLogger("diag-contract-test"));
 
         MetricsSnapshot snap = new MetricsSnapshot();
         snap.timestamp = snapTimestamp;
         snap.unavailable = new java.util.HashSet<>();
         // getLatest() 的实现是 history.peekLast()。history 是 final 字段，
         // Unsafe.allocateInstance 不会初始化它；真实构造器又会触发 ServerCompat 的
-        // Bukkit 静态初始化（单测进程无服务端，必然 NPE）。故用 Unsafe 直接写入 final 字段。
-        MetricsCollector mc = (MetricsCollector) alloc(MetricsCollector.class);
+        // Bukkit 静态初始化（单测进程无服务端，必然 NPE）。故用 Field.set 直接写入 final 字段。
+        MetricsCollector mc = TestObjects.allocate(MetricsCollector.class);
         java.util.Deque<MetricsSnapshot> hist = new java.util.concurrent.ConcurrentLinkedDeque<>();
         hist.addLast(snap);
-        setField(MetricsCollector.class, mc, "history", hist);
-        setField(PerfScope.class, p, "metricsCollector", mc);
+        TestObjects.setField(MetricsCollector.class, mc, "history", hist);
+        TestObjects.setField(PerfScope.class, p, "metricsCollector", mc);
 
-        ConfigManager cm = (ConfigManager) alloc(ConfigManager.class);
-        setField(ConfigManager.class, cm, "config", config());
-        setField(ConfigManager.class, cm, "publishedAtMillis", publishedAt);
-        setField(PerfScope.class, p, "configManager", cm);
+        ConfigManager cm = new ConfigManager(p);
+        TestObjects.setField(ConfigManager.class, cm, "config", config());
+        TestObjects.setField(ConfigManager.class, cm, "publishedAtMillis", publishedAt);
+        TestObjects.setField(PerfScope.class, p, "configManager", cm);
 
-        DiagnosticEngine e = (DiagnosticEngine) alloc(DiagnosticEngine.class);
-        setField(DiagnosticEngine.class, e, "plugin", p);
-        setField(DiagnosticEngine.class, e, "configManager", cm);
+        DiagnosticEngine e = TestObjects.allocate(DiagnosticEngine.class);
+        TestObjects.setField(DiagnosticEngine.class, e, "plugin", p);
+        TestObjects.setField(DiagnosticEngine.class, e, "configManager", cm);
         return e;
     }
 
     @Test
-    void noSnapshotIsZeroTotalAndNotFullyEvaluated() throws Exception {
-        PerfScope p = (PerfScope) alloc(PerfScope.class);
-        setField(PerfScope.class, p, "logger", Logger.getLogger("diag-contract-test"));
-        ConfigManager cm = (ConfigManager) alloc(ConfigManager.class);
-        setField(ConfigManager.class, cm, "config", config());
-        setField(PerfScope.class, p, "configManager", cm);
-        DiagnosticEngine e = (DiagnosticEngine) alloc(DiagnosticEngine.class);
-        setField(DiagnosticEngine.class, e, "plugin", p);
-        setField(DiagnosticEngine.class, e, "configManager", cm);
+    void noSnapshotIsZeroTotalAndNotFullyEvaluated() {
+        PerfScope p = TestObjects.allocate(PerfScope.class);
+        TestObjects.setField(PerfScope.class, p, "logger", Logger.getLogger("diag-contract-test"));
+        ConfigManager cm = new ConfigManager(p);
+        TestObjects.setField(ConfigManager.class, cm, "config", config());
+        TestObjects.setField(PerfScope.class, p, "configManager", cm);
+        DiagnosticEngine e = TestObjects.allocate(DiagnosticEngine.class);
+        TestObjects.setField(DiagnosticEngine.class, e, "plugin", p);
+        TestObjects.setField(DiagnosticEngine.class, e, "configManager", cm);
 
         DiagnosticEngine.Result r = e.run();
         assertEquals(0, r.total(), "no snapshot => no rule ran");
@@ -132,7 +91,7 @@ class DiagnosticEngineContractTest {
     }
 
     @Test
-    void staleConfigInsideGraceWindowSkipsEveryRule() throws Exception {
+    void staleConfigInsideGraceWindowSkipsEveryRule() {
         long now = System.currentTimeMillis();
         DiagnosticEngine.Result r = engine(now, now - 5_000L).run();
         assertTrue(r.total() > 0, "stale-config path must still carry a real evaluation base");
@@ -143,7 +102,7 @@ class DiagnosticEngineContractTest {
     }
 
     @Test
-    void staleConfigBeyondGraceWindowDoesNotSilenceForever() throws Exception {
+    void staleConfigBeyondGraceWindowDoesNotSilenceForever() {
         long now = System.currentTimeMillis();
         // 发布 10 分钟前，快照更早：宽限窗口（30s~5min）已过，必须照常评估
         DiagnosticEngine.Result r = engine(now - 600_000L, now - 610_000L).run();
@@ -153,7 +112,7 @@ class DiagnosticEngineContractTest {
     }
 
     @Test
-    void freshConfigHasNoStaleSkips() throws Exception {
+    void freshConfigHasNoStaleSkips() {
         long now = System.currentTimeMillis();
         DiagnosticEngine.Result r = engine(now - 10_000L, now).run();
         assertFalse(r.skipped().stream()
@@ -162,15 +121,15 @@ class DiagnosticEngineContractTest {
     }
 
     @Test
-    void graceWindowIsBounded() throws Exception {
-        Method m = DiagnosticEngine.class.getDeclaredMethod("reloadGraceMs", ConfigManager.ConfigData.class);
-        m.setAccessible(true);
+    void graceWindowIsBounded() {
         ConfigManager.ConfigData c = config();
-        long normal = (Long) m.invoke(null, c);
+        long normal = (Long) TestObjects.invoke(DiagnosticEngine.class, "reloadGraceMs",
+            new Class<?>[]{ConfigManager.ConfigData.class}, c);
         assertEquals(30_000L, normal, "1s cycle + 20s margin clamps to the 30s floor");
 
         c.general_updateInterval = 20 * 60 * 60;  // 极端值：不能让窗口无限放大
-        long extreme = (Long) m.invoke(null, c);
+        long extreme = (Long) TestObjects.invoke(DiagnosticEngine.class, "reloadGraceMs",
+            new Class<?>[]{ConfigManager.ConfigData.class}, c);
         assertEquals(300_000L, extreme, "grace window must be capped at 5 minutes");
     }
 }

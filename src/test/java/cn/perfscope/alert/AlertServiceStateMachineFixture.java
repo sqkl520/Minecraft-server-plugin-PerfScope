@@ -8,10 +8,11 @@ package cn.perfscope.alert;
 import cn.perfscope.PerfScope;
 import cn.perfscope.config.ConfigManager;
 import cn.perfscope.metrics.MetricsSnapshot;
+import cn.perfscope.support.AlertFixtures;
+import cn.perfscope.support.TestObjects;
 
 import java.io.File;
 import java.lang.reflect.Constructor;
-import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.time.LocalDate;
@@ -85,11 +86,11 @@ public final class AlertServiceStateMachineFixture {
     private AlertServiceStateMachineFixture(Builder b) throws Exception {
         File dataDir = Files.createTempDirectory(TEMP_PREFIX).toFile();
 
-        PerfScope p = (PerfScope) alloc(PerfScope.class);
-        setField(PerfScope.class, p, "logger", Logger.getLogger("perfscope-alert-fixture"));
-        setField(PerfScope.class, p, "dataFolder", dataDir);
+        PerfScope p = TestObjects.allocate(PerfScope.class);
+        TestObjects.setField(PerfScope.class, p, "logger", Logger.getLogger("perfscope-alert-fixture"));
+        TestObjects.setField(PerfScope.class, p, "dataFolder", dataDir);
 
-        ConfigManager cm = (ConfigManager) alloc(ConfigManager.class);
+        ConfigManager cm = new ConfigManager(p);
         ConfigManager.ConfigData cfg = new ConfigManager.ConfigData();
         // 缺省关闭两个聊天通道：投递路径因此纯内存，既不需要 Bukkit 也不需要玩家。
         // 计数器仍会走 emit() 的 counted 分支（pushFailToday++），pushedToday 照常累加。
@@ -104,53 +105,53 @@ public final class AlertServiceStateMachineFixture {
         cfg.memory_heapCriticalThreshold = 95;
         cfg.tps_warningThreshold = 18.0;
         cfg.tps_criticalThreshold = 15.0;
-        setField(ConfigManager.class, cm, "plugin", p);
-        setField(ConfigManager.class, cm, "config", cfg);
-        setField(PerfScope.class, p, "configManager", cm);
+        TestObjects.setField(ConfigManager.class, cm, "plugin", p);
+        TestObjects.setField(ConfigManager.class, cm, "config", cfg);
+        TestObjects.setField(PerfScope.class, p, "configManager", cm);
 
-        AlertService svc = (AlertService) alloc(AlertService.class);
-        setField(AlertService.class, svc, "plugin", p);
-        setField(AlertService.class, svc, "configManager", cm);
-        setField(AlertService.class, svc, "webhookNotifier", null);
+        AlertService svc = TestObjects.allocate(AlertService.class);
+        TestObjects.setField(AlertService.class, svc, "plugin", p);
+        TestObjects.setField(AlertService.class, svc, "configManager", cm);
+        TestObjects.setField(AlertService.class, svc, "webhookNotifier", null);
         // 预置字面量：serverTag() 的缓存命中路径，永不触达 Bukkit.getServer()
-        setField(AlertService.class, svc, "serverTag", b.serverTag);
+        TestObjects.setField(AlertService.class, svc, "serverTag", b.serverTag);
         // 关键：不调用 loadState()，persistState() 因 stateLoaded=false 直接早退
-        setField(AlertService.class, svc, "stateLoaded", false);
-        setField(AlertService.class, svc, "lastConsumedSnapshotTs", -1L);
-        setField(AlertService.class, svc, "options", options(b));
+        TestObjects.setField(AlertService.class, svc, "stateLoaded", false);
+        TestObjects.setField(AlertService.class, svc, "lastConsumedSnapshotTs", -1L);
+        TestObjects.setField(AlertService.class, svc, "options", options(b));
         // 启动抑制窗口关闭：startupSuppressed() 恒 false，免得 tps: 键被静音
-        setField(AlertService.class, svc, "startupSuppressEnabled", false);
-        setField(AlertService.class, svc, "startupSuppressUntilMs", 0L);
-        setField(AlertService.class, svc, "startupSuppressSeconds", 0);
-        setField(AlertService.class, svc, "refireMinIntervalMs", b.refireSeconds * 1000L);
-        setField(AlertService.class, svc, "flapWindowMs", b.flapWindowSeconds * 1000L);
+        TestObjects.setField(AlertService.class, svc, "startupSuppressEnabled", false);
+        TestObjects.setField(AlertService.class, svc, "startupSuppressUntilMs", 0L);
+        TestObjects.setField(AlertService.class, svc, "startupSuppressSeconds", 0);
+        TestObjects.setField(AlertService.class, svc, "refireMinIntervalMs", b.refireSeconds * 1000L);
+        TestObjects.setField(AlertService.class, svc, "flapWindowMs", b.flapWindowSeconds * 1000L);
         // 0 = 关闭"数值变化幅度"这层抑制，让判定只剩冷却一条，用例才可预测
-        setField(AlertService.class, svc, "repushDelta", 0.0d);
-        setField(AlertService.class, svc, "pushedTodayDayEpoch", LocalDate.now().toEpochDay());
+        TestObjects.setField(AlertService.class, svc, "repushDelta", 0.0d);
+        TestObjects.setField(AlertService.class, svc, "pushedTodayDayEpoch", LocalDate.now().toEpochDay());
 
         // ---- allocateInstance 跳过的 final 字段初始化器，逐个补 ----
         ExecutorService writer = new InlineExecutor();
-        setField(AlertService.class, svc, "stateWriter", writer);
+        TestObjects.setField(AlertService.class, svc, "stateWriter", writer);
 
         Map<String, Long> cd = new ConcurrentHashMap<>();
         Map<String, Object> resolved = new ConcurrentHashMap<>();
-        setField(AlertService.class, svc, "cooldowns", cd);
-        setField(AlertService.class, svc, "lastResolvedAt", resolved);
-        setField(AlertService.class, svc, "activeAlerts", new ConcurrentHashMap<>());
-        setField(AlertService.class, svc, "debounceCounts", new ConcurrentHashMap<>());
-        setField(AlertService.class, svc, "recoveryCounts", new ConcurrentHashMap<>());
-        setField(AlertService.class, svc, "flapCounts", new ConcurrentHashMap<>());
-        setField(AlertService.class, svc, "flapHealCycles", new ConcurrentHashMap<>());
-        setField(AlertService.class, svc, "cleanRunStartMs", new ConcurrentHashMap<>());
-        setField(AlertService.class, svc, "recentValues", new ConcurrentHashMap<>());
-        setField(AlertService.class, svc, "suspendedAlerts", new ConcurrentHashMap<>());
-        setField(AlertService.class, svc, "moduleDownSince", new ConcurrentHashMap<>());
+        TestObjects.setField(AlertService.class, svc, "cooldowns", cd);
+        TestObjects.setField(AlertService.class, svc, "lastResolvedAt", resolved);
+        TestObjects.setField(AlertService.class, svc, "activeAlerts", new ConcurrentHashMap<>());
+        TestObjects.setField(AlertService.class, svc, "debounceCounts", new ConcurrentHashMap<>());
+        TestObjects.setField(AlertService.class, svc, "recoveryCounts", new ConcurrentHashMap<>());
+        TestObjects.setField(AlertService.class, svc, "flapCounts", new ConcurrentHashMap<>());
+        TestObjects.setField(AlertService.class, svc, "flapHealCycles", new ConcurrentHashMap<>());
+        TestObjects.setField(AlertService.class, svc, "cleanRunStartMs", new ConcurrentHashMap<>());
+        TestObjects.setField(AlertService.class, svc, "recentValues", new ConcurrentHashMap<>());
+        TestObjects.setField(AlertService.class, svc, "suspendedAlerts", new ConcurrentHashMap<>());
+        TestObjects.setField(AlertService.class, svc, "moduleDownSince", new ConcurrentHashMap<>());
         Set<String> flapSuppressed = ConcurrentHashMap.newKeySet();
-        setField(AlertService.class, svc, "flapSuppressed", flapSuppressed);
+        TestObjects.setField(AlertService.class, svc, "flapSuppressed", flapSuppressed);
         Deque<Object> recent = new ArrayDeque<>();
-        setField(AlertService.class, svc, "recentEvents", recent);
+        TestObjects.setField(AlertService.class, svc, "recentEvents", recent);
         Map<String, LongAdder> counters = new ConcurrentHashMap<>();
-        setField(AlertService.class, svc, "alertEventCounters", counters);
+        TestObjects.setField(AlertService.class, svc, "alertEventCounters", counters);
 
         this.service = svc;
         this.plugin = p;
@@ -169,30 +170,11 @@ public final class AlertServiceStateMachineFixture {
     /**
      * 文案层初始化：与既有测试同一组模块（告警/配置/诊断）。
      *
-     * <p><b>为什么传一个非 null 的 plugin</b>：{@code Messages.load(null)} 走的是"无插件"早退分支，
-     * 直接发布 {@code EN_DEFAULTS} —— 那个表只含基础键，各模块（{@code alert.*}/{@code diag.*}/
-     * {@code config.*}）的表<b>从未被合并</b>，{@code Messages.get} 于是返回键名本身。
-     * 既有测试只断言"键名/令牌"，看不出来；但本夹具的用例要读渲染后的 detail/title，
-     * 拿到 {@code "diag.DIAG-MEM-LEAK.detail"} 就毫无意义了。</p>
-     *
-     * <p>传入一个"只有一个 logger"的裸 plugin，{@code load()} 就会先 {@code touchModules()} +
-     * {@code mergeModules()} 再发布快照，模块键因此到位。末尾的
-     * {@code applyCommandPermissionMessage} 会因为没有 Bukkit 服务端而抛异常——
-     * 那一步在快照发布<b>之后</b>，故整体包在 try 里忽略即可，JSON 不受影响。</p>
+     * <p>实现已搬进 {@link AlertFixtures#initMessages()}（4 个测试类共用同一段逻辑）。
+     * 本方法保留为薄封装，调用点因此零改动。</p>
      */
     public static void initMessages() throws Exception {
-        Class.forName("cn.perfscope.alert.AlertMessages").getMethod("init").invoke(null);
-        Class.forName("cn.perfscope.config.ConfigMessages").getMethod("init").invoke(null);
-        Class.forName("cn.perfscope.diagnose.DiagnoseMessages").getMethod("init").invoke(null);
-        PerfScope bare = (PerfScope) alloc(PerfScope.class);
-        setField(PerfScope.class, bare, "logger", Logger.getLogger("pscope-message-init"));
-        try {
-            Class.forName("cn.perfscope.util.Messages")
-                .getMethod("load", Class.forName("cn.perfscope.PerfScope"))
-                .invoke(null, bare);
-        } catch (java.lang.reflect.InvocationTargetException ignored) {
-            // applyCommandPermissionMessage 需要 Bukkit 服务端；快照在此之前已发布
-        }
+        AlertFixtures.initMessages();
     }
 
     public AlertService service() {
@@ -364,38 +346,12 @@ public final class AlertServiceStateMachineFixture {
         Method d = oc.getDeclaredMethod("defaults");
         d.setAccessible(true);
         Object o = d.invoke(null);
-        setField(oc, o, "recoveryDebounceCycles", b.recoveryCycles);
-        setField(oc, o, "digestMode", b.digestMode);
-        setField(oc, o, "notifyMitigation", b.notifyMitigation);
-        setField(oc, o, "unknownAfterMinutes", b.unknownAfterMinutes);
-        setField(oc, o, "dailyTimezone", "");
+        TestObjects.setField(oc, o, "recoveryDebounceCycles", b.recoveryCycles);
+        TestObjects.setField(oc, o, "digestMode", b.digestMode);
+        TestObjects.setField(oc, o, "notifyMitigation", b.notifyMitigation);
+        TestObjects.setField(oc, o, "unknownAfterMinutes", b.unknownAfterMinutes);
+        TestObjects.setField(oc, o, "dailyTimezone", "");
         return o;
-    }
-
-    private static Object unsafe() throws Exception {
-        Class<?> c = Class.forName("sun.misc.Unsafe");
-        Field f = c.getDeclaredField("theUnsafe");
-        f.setAccessible(true);
-        return f.get(null);
-    }
-
-    private static Object alloc(Class<?> k) throws Exception {
-        return unsafe().getClass().getMethod("allocateInstance", Class.class).invoke(unsafe(), k);
-    }
-
-    private static void setField(Class<?> cls, Object t, String n, Object v) throws Exception {
-        Class<?> c = cls;
-        while (c != null) {
-            try {
-                Field f = c.getDeclaredField(n);
-                f.setAccessible(true);
-                f.set(t, v);
-                return;
-            } catch (NoSuchFieldException e) {
-                c = c.getSuperclass();
-            }
-        }
-        throw new NoSuchFieldException(n);
     }
 
     /**

@@ -5,9 +5,8 @@
  */
 package cn.perfscope.report;
 
+import cn.perfscope.support.TestObjects;
 import org.junit.jupiter.api.Test;
-
-import java.lang.reflect.Method;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -20,25 +19,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class FormatBytesTest {
 
     private static String fmt(long bytes) throws Exception {
-        Method m = ReportGenerator.class.getDeclaredMethod("formatBytes", long.class);
-        m.setAccessible(true);
         // formatBytes 是实例方法，且不触碰任何实例字段 -> 用反射在 null 上调用不安全，
         // 故构造一个最小实例（ReportGenerator 构造器需要 plugin，这里改用 Unsafe 绕过）。
-        Object unsafe = unsafeInstance();
-        Object gen = allocate(ReportGenerator.class);
-        return (String) m.invoke(gen, bytes);
-    }
-
-    private static Object unsafeInstance() throws Exception {
-        Class<?> c = Class.forName("sun.misc.Unsafe");
-        java.lang.reflect.Field f = c.getDeclaredField("theUnsafe");
-        f.setAccessible(true);
-        return f.get(null);
-    }
-
-    private static Object allocate(Class<?> k) throws Exception {
-        return unsafeInstance().getClass()
-            .getMethod("allocateInstance", Class.class).invoke(unsafeInstance(), k);
+        Object gen = TestObjects.allocate(ReportGenerator.class);
+        return (String) TestObjects.invoke(gen, "formatBytes", new Class<?>[]{long.class}, bytes);
     }
 
     @Test

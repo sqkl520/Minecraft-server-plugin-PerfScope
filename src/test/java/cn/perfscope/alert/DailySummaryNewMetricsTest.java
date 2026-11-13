@@ -8,17 +8,14 @@ package cn.perfscope.alert;
 import cn.perfscope.config.ConfigManager;
 import cn.perfscope.history.HistorySample;
 import cn.perfscope.history.HistoryStore;
+import cn.perfscope.support.HistoryFixtures;
 import cn.perfscope.util.Messages;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.Field;
 import java.time.ZoneId;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Deque;
 import java.util.List;
-import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -68,46 +65,9 @@ class DailySummaryNewMetricsTest {
 
     // ==================== 装配（与 MemoryLeakRuleTest 同一路数） ====================
 
-    private static Object unsafe() throws Exception {
-        Class<?> c = Class.forName("sun.misc.Unsafe");
-        Field f = c.getDeclaredField("theUnsafe");
-        f.setAccessible(true);
-        return f.get(null);
-    }
-
-    private static Object alloc(Class<?> k) throws Exception {
-        return unsafe().getClass().getMethod("allocateInstance", Class.class).invoke(unsafe(), k);
-    }
-
-    private static void setField(Class<?> cls, Object t, String n, Object v) throws Exception {
-        Class<?> c = cls;
-        while (c != null) {
-            try {
-                Field f = c.getDeclaredField(n);
-                f.setAccessible(true);
-                f.set(t, v);
-                return;
-            } catch (NoSuchFieldException e) {
-                c = c.getSuperclass();
-            }
-        }
-        throw new NoSuchFieldException(n);
-    }
-
     /** 只含指定样本的 HistoryStore：绕过 record() 的节流，直接写私有环。 */
-    private static HistoryStore history(List<HistorySample> samples) throws Exception {
-        ConfigManager cm = (ConfigManager) alloc(ConfigManager.class);
-        ConfigManager.ConfigData cfg = new ConfigManager.ConfigData();
-        cfg.history_enabled = true;
-        cfg.history_sampleIntervalSeconds = 60;
-        setField(ConfigManager.class, cm, "config", cfg);
-
-        HistoryStore hs = (HistoryStore) alloc(HistoryStore.class);
-        setField(HistoryStore.class, hs, "configManager", cm);
-        setField(HistoryStore.class, hs, "logger", Logger.getLogger("pscope-daily-metrics-test"));
-        Deque<HistorySample> ring = new ArrayDeque<>(samples);
-        setField(HistoryStore.class, hs, "ring", ring);
-        return hs;
+    private static HistoryStore history(List<HistorySample> samples) {
+        return HistoryFixtures.seeded(HistoryFixtures.config(), samples);
     }
 
     /** 12 参数全量构造（7 参数版本会把 5 个新指标一律置 -1，这里要显式控制它们）。 */
@@ -562,16 +522,9 @@ class DailySummaryNewMetricsTest {
     /** history.enabled=false 时全部读取路径为空——盲区必须显式，不能靠环里碰巧还有数据。 */
     @Test
     void disabledHistoryYieldsNoDataFromNewHelpers() throws Exception {
-        ConfigManager cm = (ConfigManager) alloc(ConfigManager.class);
-        ConfigManager.ConfigData cfg = new ConfigManager.ConfigData();
-        cfg.history_enabled = false;
-        setField(ConfigManager.class, cm, "config", cfg);
-
-        HistoryStore hs = (HistoryStore) alloc(HistoryStore.class);
-        setField(HistoryStore.class, hs, "configManager", cm);
-        setField(HistoryStore.class, hs, "logger", Logger.getLogger("pscope-daily-metrics-test"));
-        setField(HistoryStore.class, hs, "ring",
-            new ArrayDeque<>(List.of(sample(NOW, 92.0, 50.0, 40.0, 9, 900))));
+        ConfigManager cm = HistoryFixtures.config(cfg -> cfg.history_enabled = false);
+        HistoryStore hs = HistoryFixtures.seeded(cm,
+            List.of(sample(NOW, 92.0, 50.0, 40.0, 9, 900)));
 
         assertNull(hs.peakMsptSpikeSince(since()));
         assertNull(hs.peakProcessCpuSince(since()));

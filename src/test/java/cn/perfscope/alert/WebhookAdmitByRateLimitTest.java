@@ -5,11 +5,10 @@
  */
 package cn.perfscope.alert;
 
+import cn.perfscope.support.TestObjects;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -46,63 +45,21 @@ class WebhookAdmitByRateLimitTest {
         AlertServiceStateMachineFixture.initMessages();
     }
 
-    private static Object unsafe() throws Exception {
-        Class<?> c = Class.forName("sun.misc.Unsafe");
-        Field f = c.getDeclaredField("theUnsafe");
-        f.setAccessible(true);
-        return f.get(null);
-    }
-
-    private static Object alloc(Class<?> k) throws Exception {
-        return unsafe().getClass().getMethod("allocateInstance", Class.class).invoke(unsafe(), k);
-    }
-
-    private static void setField(Class<?> cls, Object t, String n, Object v) throws Exception {
-        Class<?> c = cls;
-        while (c != null) {
-            try {
-                Field f = c.getDeclaredField(n);
-                f.setAccessible(true);
-                f.set(t, v);
-                return;
-            } catch (NoSuchFieldException e) {
-                c = c.getSuperclass();
-            }
-        }
-        throw new NoSuchFieldException(n);
-    }
-
-    private static Object getField(Class<?> cls, Object t, String n) throws Exception {
-        Class<?> c = cls;
-        while (c != null) {
-            try {
-                Field f = c.getDeclaredField(n);
-                f.setAccessible(true);
-                return f.get(t);
-            } catch (NoSuchFieldException e) {
-                c = c.getSuperclass();
-            }
-        }
-        throw new NoSuchFieldException(n);
-    }
-
     /** 只装配 {@code admitByRateLimit} 需要的那两个字段。 */
-    private static WebhookNotifier notifier(String type) throws Exception {
-        WebhookNotifier n = (WebhookNotifier) alloc(WebhookNotifier.class);
-        setField(WebhookNotifier.class, n, "type", type);
+    private static WebhookNotifier notifier(String type) {
+        WebhookNotifier n = TestObjects.allocate(WebhookNotifier.class);
+        TestObjects.setField(WebhookNotifier.class, n, "type", type);
         // 与真实字段初始化器同值：MIN_VALUE = "从未发送过"
-        setField(WebhookNotifier.class, n, "lastSendAtMs", new AtomicLong(Long.MIN_VALUE));
+        TestObjects.setField(WebhookNotifier.class, n, "lastSendAtMs", new AtomicLong(Long.MIN_VALUE));
         return n;
     }
 
-    private static boolean admit(WebhookNotifier n, long nowMs) throws Exception {
-        Method m = WebhookNotifier.class.getDeclaredMethod("admitByRateLimit", long.class);
-        m.setAccessible(true);
-        return (Boolean) m.invoke(n, nowMs);
+    private static boolean admit(WebhookNotifier n, long nowMs) {
+        return (Boolean) TestObjects.invoke(n, "admitByRateLimit", new Class<?>[]{long.class}, nowMs);
     }
 
-    private static long lastSendAt(WebhookNotifier n) throws Exception {
-        return ((AtomicLong) getField(WebhookNotifier.class, n, "lastSendAtMs")).get();
+    private static long lastSendAt(WebhookNotifier n) {
+        return ((AtomicLong) TestObjects.getField(WebhookNotifier.class, n, "lastSendAtMs")).get();
     }
 
     /**

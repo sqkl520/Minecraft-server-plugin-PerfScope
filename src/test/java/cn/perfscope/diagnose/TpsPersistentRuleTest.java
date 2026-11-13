@@ -11,12 +11,12 @@ import cn.perfscope.config.ConfigManager;
 import cn.perfscope.history.HistorySample;
 import cn.perfscope.history.HistoryStore;
 import cn.perfscope.metrics.MetricsSnapshot;
+import cn.perfscope.support.HistoryFixtures;
+import cn.perfscope.support.TestObjects;
 import cn.perfscope.util.Messages;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.Field;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
@@ -53,7 +53,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <p>与 {@link MemoryLeakRuleTest} 同路数：{@code HistoryStore.record(snap)} 有三道闸
  * （配置、TPS 可用性、<b>按墙钟节流的采样间隔</b>，默认 60 秒），造不出"10 分钟 12 个样本"。
- * 故用 {@code sun.misc.Unsafe.allocateInstance} + 反射直接写它的私有环 {@code ring}，
+ * 故用 {@code HistoryFixtures.seeded} 直接写它的私有环 {@code ring}，
  * 读路径 {@code since(...)} 照常走真实代码。</p>
  *
  * <p><b>为什么不能"顺手"改成用 {@code record()} 喂</b>：{@code record()} 恰好在 TPS 不可用时
@@ -76,51 +76,15 @@ class TpsPersistentRuleTest {
 
     // ==================== 装配 ====================
 
-    private static Object unsafe() throws Exception {
-        Class<?> c = Class.forName("sun.misc.Unsafe");
-        Field f = c.getDeclaredField("theUnsafe");
-        f.setAccessible(true);
-        return f.get(null);
-    }
-
-    private static Object alloc(Class<?> k) throws Exception {
-        return unsafe().getClass().getMethod("allocateInstance", Class.class).invoke(unsafe(), k);
-    }
-
-    private static void setField(Class<?> cls, Object t, String n, Object v) throws Exception {
-        Class<?> c = cls;
-        while (c != null) {
-            try {
-                Field f = c.getDeclaredField(n);
-                f.setAccessible(true);
-                f.set(t, v);
-                return;
-            } catch (NoSuchFieldException e) {
-                c = c.getSuperclass();
-            }
-        }
-        throw new NoSuchFieldException(n);
-    }
-
-    private static ConfigManager configManager(boolean historyEnabled) throws Exception {
-        ConfigManager cm = (ConfigManager) alloc(ConfigManager.class);
+    private static ConfigManager configManager(boolean historyEnabled) {
+        ConfigManager cm = new ConfigManager(null);
         ConfigManager.ConfigData cfg = new ConfigManager.ConfigData();
         cfg.history_enabled = historyEnabled;
         cfg.history_sampleIntervalSeconds = 60;
         cfg.tps_warningThreshold = WARN;
         cfg.tps_criticalThreshold = CRIT;
-        setField(ConfigManager.class, cm, "config", cfg);
+        TestObjects.setField(ConfigManager.class, cm, "config", cfg);
         return cm;
-    }
-
-    /** 造一个只含指定样本的 HistoryStore（绕过节流，直接写私有环）。 */
-    private static HistoryStore history(ConfigManager cm, List<HistorySample> samples) throws Exception {
-        HistoryStore hs = (HistoryStore) alloc(HistoryStore.class);
-        setField(HistoryStore.class, hs, "configManager", cm);
-        setField(HistoryStore.class, hs, "logger", Logger.getLogger("pscope-tpspersist-test"));
-        Deque<HistorySample> ring = new ArrayDeque<>(samples);
-        setField(HistoryStore.class, hs, "ring", ring);
-        return hs;
     }
 
     /** 一份 TPS 模块可用的快照。三个 TPS 值都必须显式写：它们没有 -1 哨兵，默认就是 0.0。 */
@@ -186,7 +150,7 @@ class TpsPersistentRuleTest {
     @Test
     void allZeroTpsWindowMustHitNotSkip() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, flatSamples(12, 45_000L, 0.0));
+        HistoryStore hs = HistoryFixtures.seeded(cm, flatSamples(12, 45_000L, 0.0));
 
         Evaluation ev = evaluate(snapshot(0.0, 0.0, 3.0), hs, cm);
 
@@ -206,7 +170,7 @@ class TpsPersistentRuleTest {
     @Test
     void allZeroWindowHitsEvenWhenFifteenMinuteAverageLooksHealthy() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, flatSamples(12, 45_000L, 0.0));
+        HistoryStore hs = HistoryFixtures.seeded(cm, flatSamples(12, 45_000L, 0.0));
 
         Evaluation ev = evaluate(snapshot(0.0, 18.0, 19.5), hs, cm);
 
@@ -222,7 +186,7 @@ class TpsPersistentRuleTest {
         double[] v = new double[12];
         java.util.Arrays.fill(v, 19.0);
         v[5] = 0.0;
-        HistoryStore hs = history(cm, samples(12, 45_000L, v, System.currentTimeMillis()));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(12, 45_000L, v, System.currentTimeMillis()));
 
         Evaluation ev = evaluate(snapshot(19.0, 19.2, 19.9), hs, cm);
 
@@ -238,7 +202,7 @@ class TpsPersistentRuleTest {
     @Test
     void healthyWindowIsCleanNotSkipped() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, flatSamples(12, 45_000L, 19.0));
+        HistoryStore hs = HistoryFixtures.seeded(cm, flatSamples(12, 45_000L, 19.0));
 
         Evaluation ev = evaluate(snapshot(19.0, 19.2, 19.9), hs, cm);
 
@@ -263,7 +227,7 @@ class TpsPersistentRuleTest {
         for (int i = 5; i < 12; i++) {
             v[i] = 20.0;
         }
-        HistoryStore hs = history(cm, samples(12, 45_000L, v, System.currentTimeMillis()));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(12, 45_000L, v, System.currentTimeMillis()));
 
         Evaluation ev = evaluate(snapshot(20.0, 20.0, 20.0), hs, cm);
 
@@ -280,7 +244,7 @@ class TpsPersistentRuleTest {
             v[i] = 25.0;
         }
         v[11] = 20.0;
-        HistoryStore hs = history(cm, samples(12, 45_000L, v, System.currentTimeMillis()));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(12, 45_000L, v, System.currentTimeMillis()));
 
         Evaluation ev = evaluate(snapshot(3.0, 3.0, 3.0), hs, cm);
 
@@ -301,7 +265,7 @@ class TpsPersistentRuleTest {
     @Test
     void zeroFifteenMinuteTpsIsCriticalNotClean() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, flatSamples(12, 45_000L, 20.0));
+        HistoryStore hs = HistoryFixtures.seeded(cm, flatSamples(12, 45_000L, 20.0));
 
         Evaluation ev = evaluate(snapshot(20.0, 20.0, 0.0), hs, cm);
 
@@ -320,7 +284,7 @@ class TpsPersistentRuleTest {
     @Test
     void detailPresentsTheRealZeroAsAReading() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, flatSamples(12, 45_000L, 20.0));
+        HistoryStore hs = HistoryFixtures.seeded(cm, flatSamples(12, 45_000L, 20.0));
 
         Diagnosis d = evaluate(snapshot(20.0, 20.0, 0.0), hs, cm).hit();
         assertNotNull(d);
@@ -333,7 +297,7 @@ class TpsPersistentRuleTest {
     @Test
     void lowFifteenMinuteAverageAloneTriggersOnAHealthyWindow() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, flatSamples(12, 45_000L, 20.0));
+        HistoryStore hs = HistoryFixtures.seeded(cm, flatSamples(12, 45_000L, 20.0));
 
         Diagnosis d = evaluate(snapshot(20.0, 20.0, 16.0), hs, cm).hit();
         assertNotNull(d, "16.0 < 18 must fire even when the window average is 20.0");
@@ -344,7 +308,7 @@ class TpsPersistentRuleTest {
     @Test
     void criticalLineIsStrictlyBelowTheCriticalThreshold() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, flatSamples(12, 45_000L, 20.0));
+        HistoryStore hs = HistoryFixtures.seeded(cm, flatSamples(12, 45_000L, 20.0));
 
         assertTrue(evaluate(snapshot(20.0, 20.0, 14.99), hs, cm).hit().critical(),
             "14.99 < 15 must be critical");
@@ -361,7 +325,7 @@ class TpsPersistentRuleTest {
     @Test
     void nonFiniteFifteenMinuteValueIsLabelledNotPrintedAsNaN() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, flatSamples(12, 45_000L, 3.0));
+        HistoryStore hs = HistoryFixtures.seeded(cm, flatSamples(12, 45_000L, 3.0));
 
         Diagnosis d = evaluate(snapshot(3.0, 3.0, Double.NaN), hs, cm).hit();
         assertNotNull(d, "the window evidence alone is enough to conclude");
@@ -381,7 +345,7 @@ class TpsPersistentRuleTest {
     @Test
     void negativeFifteenMinuteValueIsTreatedAsNotReported() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, flatSamples(12, 45_000L, 20.0));
+        HistoryStore hs = HistoryFixtures.seeded(cm, flatSamples(12, 45_000L, 20.0));
 
         // 窗口健康，只有 15 分钟那侧异常 -> 若把 -1 当读数，会得到"命中且 critical"的荒谬结论
         Evaluation ev = evaluate(snapshot(20.0, 20.0, -1.0), hs, cm);
@@ -405,10 +369,10 @@ class TpsPersistentRuleTest {
     @Test
     void aboveCeilingFifteenMinuteValueIsAlsoTreatedAsNotReported() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, flatSamples(12, 45_000L, 20.0));
+        HistoryStore hs = HistoryFixtures.seeded(cm, flatSamples(12, 45_000L, 20.0));
 
         // 让规则经由窗口侧命中，从而真的走到 detail 渲染
-        HistoryStore slow = history(cm, flatSamples(12, 45_000L, 3.0));
+        HistoryStore slow = HistoryFixtures.seeded(cm, flatSamples(12, 45_000L, 3.0));
         Diagnosis d = evaluate(snapshot(3.0, 25.0, 25.0), slow, cm).hit();
         assertNotNull(d, "the window evidence alone is enough to conclude");
         assertTrue(d.detail().contains(Messages.get("diag.value.not-reported")),
@@ -423,7 +387,7 @@ class TpsPersistentRuleTest {
     @Test
     void unavailableTpsModuleSkipsWithItsOwnReason() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, flatSamples(12, 45_000L, 0.0));
+        HistoryStore hs = HistoryFixtures.seeded(cm, flatSamples(12, 45_000L, 0.0));
         MetricsSnapshot snap = snapshot(0.0, 0.0, 0.0);
         snap.unavailable.add(MetricsSnapshot.MODULE_TPS);
 
@@ -438,7 +402,7 @@ class TpsPersistentRuleTest {
     @Test
     void tooFewSamplesSkipsWithCoverageReason() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, flatSamples(4, 45_000L, 0.0));
+        HistoryStore hs = HistoryFixtures.seeded(cm, flatSamples(4, 45_000L, 0.0));
 
         Evaluation ev = evaluate(snapshot(0.0, 0.0, 0.0), hs, cm);
 
@@ -450,7 +414,7 @@ class TpsPersistentRuleTest {
     @Test
     void disabledHistorySkipsInsteadOfInventingData() throws Exception {
         ConfigManager cm = configManager(false);
-        HistoryStore hs = history(cm, flatSamples(12, 45_000L, 0.0));
+        HistoryStore hs = HistoryFixtures.seeded(cm, flatSamples(12, 45_000L, 0.0));
 
         Evaluation ev = evaluate(snapshot(0.0, 0.0, 0.0), hs, cm);
 
@@ -462,7 +426,7 @@ class TpsPersistentRuleTest {
     @Test
     void evaluationIsPureAndRepeatable() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, flatSamples(12, 45_000L, 0.0));
+        HistoryStore hs = HistoryFixtures.seeded(cm, flatSamples(12, 45_000L, 0.0));
         MetricsSnapshot snap = snapshot(0.0, 0.0, 3.0);
 
         Diagnosis first = evaluate(snap, hs, cm).hit();
@@ -487,20 +451,20 @@ class TpsPersistentRuleTest {
         ConfigManager cm = configManager(true);
         long now = System.currentTimeMillis();
 
-        PerfScope p = (PerfScope) alloc(PerfScope.class);
-        setField(PerfScope.class, p, "logger", Logger.getLogger("pscope-tpspersist-test"));
-        setField(PerfScope.class, p, "configManager", cm);
+        PerfScope p = TestObjects.allocate(PerfScope.class);
+        TestObjects.setField(PerfScope.class, p, "logger", Logger.getLogger("pscope-tpspersist-test"));
+        TestObjects.setField(PerfScope.class, p, "configManager", cm);
 
         MetricsSnapshot snap = snapshot(0.0, 0.0, 3.0);
         snap.timestamp = now;
         cn.perfscope.metrics.MetricsCollector mc =
-            (cn.perfscope.metrics.MetricsCollector) alloc(cn.perfscope.metrics.MetricsCollector.class);
+            TestObjects.allocate(cn.perfscope.metrics.MetricsCollector.class);
         Deque<MetricsSnapshot> latest = new java.util.concurrent.ConcurrentLinkedDeque<>();
         latest.addLast(snap);
-        setField(cn.perfscope.metrics.MetricsCollector.class, mc, "history", latest);
-        setField(PerfScope.class, p, "metricsCollector", mc);
+        TestObjects.setField(cn.perfscope.metrics.MetricsCollector.class, mc, "history", latest);
+        TestObjects.setField(PerfScope.class, p, "metricsCollector", mc);
 
-        HistoryStore hs = history(cm, flatSamples(12, 45_000L, 0.0));
+        HistoryStore hs = HistoryFixtures.seeded(cm, flatSamples(12, 45_000L, 0.0));
         DiagnosticEngine engine = new DiagnosticEngine(p, hs);
         DiagnosticEngine.Result r = engine.run();
 
@@ -517,7 +481,7 @@ class TpsPersistentRuleTest {
         ConfigManager cm = configManager(true);
         long stale = System.currentTimeMillis() - 25 * 60_000L;   // 全部落在 10 分钟窗之外
         double[] v = new double[12];
-        HistoryStore hs = history(cm, samples(12, 45_000L, v, stale));
+        HistoryStore hs = HistoryFixtures.seeded(cm, samples(12, 45_000L, v, stale));
 
         assertEquals(0, hs.since(System.currentTimeMillis() - WINDOW_MS).size(),
             "precondition: every sample really is outside the window");
@@ -545,7 +509,7 @@ class TpsPersistentRuleTest {
     @Test
     void tpsUnavailableSnapshotNeverEntersTheRing() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, List.of());
+        HistoryStore hs = HistoryFixtures.seeded(cm, List.of());
 
         MetricsSnapshot unavailableSnap = snapshot(0.0, 0.0, 0.0);
         unavailableSnap.unavailable.add(MetricsSnapshot.MODULE_TPS);
@@ -564,7 +528,7 @@ class TpsPersistentRuleTest {
     @Test
     void realZeroTpsSnapshotIsRecorded() throws Exception {
         ConfigManager cm = configManager(true);
-        HistoryStore hs = history(cm, List.of());
+        HistoryStore hs = HistoryFixtures.seeded(cm, List.of());
 
         hs.record(snapshot(0.0, 0.0, 3.0));
 

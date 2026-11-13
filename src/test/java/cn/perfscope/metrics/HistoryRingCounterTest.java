@@ -5,9 +5,9 @@
  */
 package cn.perfscope.metrics;
 
+import cn.perfscope.support.TestObjects;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.Field;
 import java.util.Deque;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -36,39 +36,32 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class HistoryRingCounterTest {
 
-    private static Object collectorField(Object target, String name) throws Exception {
-        Field f = target.getClass().getDeclaredField(name);
-        f.setAccessible(true);
-        return f.get(target);
+    private static Object collectorField(Object target, String name) {
+        return TestObjects.getField(target.getClass(), target, name);
     }
 
-    private static int maxHistory() throws Exception {
-        Field f = MetricsCollector.class.getDeclaredField("MAX_HISTORY");
-        f.setAccessible(true);
-        return f.getInt(null);
+    private static int maxHistory() {
+        return TestObjects.getStaticInt(MetricsCollector.class, "MAX_HISTORY");
     }
 
     /** 模拟一次 collectSync 的收尾：addLast + 计数 + 溢出裁剪。 */
     @SuppressWarnings("unchecked")
-    private static void appendLikeCollector(Object collector) throws Exception {
+    private static void appendLikeCollector(Object collector) {
         Deque<MetricsSnapshot> history =
             (Deque<MetricsSnapshot>) collectorField(collector, "history");
-        Field countField = collector.getClass().getDeclaredField("historyCount");
-        countField.setAccessible(true);
         int max = maxHistory();
 
         history.addLast(new MetricsSnapshot());
-        countField.setInt(collector, countField.getInt(collector) + 1);
-        int count = countField.getInt(collector);
+        int count = (Integer) collectorField(collector, "historyCount") + 1;
         while (count > max) {
             history.pollFirst();
             count--;
         }
-        countField.setInt(collector, count);
+        TestObjects.setField(collector.getClass(), collector, "historyCount", count);
     }
 
     @Test
-    void counterMatchesDequeLengthWhileFilling() throws Exception {
+    void counterMatchesDequeLengthWhileFilling() {
         Object collector = allocateCollectorLike();
         @SuppressWarnings("unchecked")
         Deque<MetricsSnapshot> history =
@@ -83,7 +76,7 @@ class HistoryRingCounterTest {
     }
 
     @Test
-    void ringStopsGrowingAtMaxHistory() throws Exception {
+    void ringStopsGrowingAtMaxHistory() {
         Object collector = allocateCollectorLike();
         @SuppressWarnings("unchecked")
         Deque<MetricsSnapshot> history =
@@ -99,7 +92,7 @@ class HistoryRingCounterTest {
     }
 
     @Test
-    void counterNeverDriftsOverManyAppends() throws Exception {
+    void counterNeverDriftsOverManyAppends() {
         // 长跑不变量：计数器漂移在短测试里看不出来，跑 3 倍环长才能暴露 off-by-one。
         Object collector = allocateCollectorLike();
         @SuppressWarnings("unchecked")
@@ -117,28 +110,14 @@ class HistoryRingCounterTest {
 
     /**
      * 不经过 Bukkit 构造 MetricsCollector——它的构造器要 Plugin/HistoryStore。
-     * 用 Unsafe 之外最朴素的办法：反射拿构造器不行，所以这里造一个"最小可测对象"，
-     * 只初始化本测试需要的那两个字段。
+     * 这里造一个"最小可测对象"，只初始化本测试需要的那两个字段。
      */
-    private static Object allocateCollectorLike() throws Exception {
-        // sun.misc.Unsafe 在 JDK 17 上可用（--add-opens 不适用于它自己的类）。
-        Class<?> unsafeClass = Class.forName("sun.misc.Unsafe");
-        Field theUnsafe = unsafeClass.getDeclaredField("theUnsafe");
-        theUnsafe.setAccessible(true);
-        Object unsafe = theUnsafe.get(null);
-        var allocate = unsafeClass.getMethod("allocateInstance", Class.class);
-        Object collector = allocate.invoke(unsafe, MetricsCollector.class);
+    private static Object allocateCollectorLike() {
+        Object collector = TestObjects.allocate(MetricsCollector.class);
 
-        // 用 Field.set 而不是 Unsafe.putObject/objectFieldOffset：后两者自 JDK 24 起被
-        // terminal deprecation（--sun-misc-unsafe-memory-access=deny 立刻抛异常），
-        // 而它们的调用方正是「写 final 实例字段」——Field.set 完全等价且三个 JDK 都支持。
-        Field historyField = MetricsCollector.class.getDeclaredField("history");
-        historyField.setAccessible(true);
-        historyField.set(collector, new java.util.concurrent.ConcurrentLinkedDeque<>());
-
-        Field countField = MetricsCollector.class.getDeclaredField("historyCount");
-        countField.setAccessible(true);
-        countField.setInt(collector, 0);
+        TestObjects.setField(MetricsCollector.class, collector, "history",
+            new java.util.concurrent.ConcurrentLinkedDeque<>());
+        TestObjects.setField(MetricsCollector.class, collector, "historyCount", 0);
 
         return collector;
     }

@@ -6,11 +6,11 @@
 package cn.perfscope.config;
 
 import cn.perfscope.PerfScope;
+import cn.perfscope.support.AlertFixtures;
+import cn.perfscope.support.TestObjects;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.logging.Handler;
@@ -54,42 +54,13 @@ class ThresholdPairZeroValidationTest {
         cn.perfscope.alert.AlertServiceStateMachineFixture.initMessages();
     }
 
-    private static Object unsafe() throws Exception {
-        Class<?> c = Class.forName("sun.misc.Unsafe");
-        Field f = c.getDeclaredField("theUnsafe");
-        f.setAccessible(true);
-        return f.get(null);
-    }
-
-    private static Object alloc(Class<?> k) throws Exception {
-        return unsafe().getClass().getMethod("allocateInstance", Class.class).invoke(unsafe(), k);
-    }
-
-    private static void setField(Class<?> cls, Object t, String n, Object v) throws Exception {
-        Class<?> c = cls;
-        while (c != null) {
-            try {
-                Field f = c.getDeclaredField(n);
-                f.setAccessible(true);
-                f.set(t, v);
-                return;
-            } catch (NoSuchFieldException e) {
-                c = c.getSuperclass();
-            }
-        }
-        throw new NoSuchFieldException(n);
-    }
-
     /** 只装 {@code plugin}（validateThresholds 只用它取 logger），不启动 Bukkit。 */
-    private static ConfigManager manager(Logger logger) throws Exception {
-        PerfScope p = (PerfScope) alloc(PerfScope.class);
-        setField(PerfScope.class, p, "logger", logger);
-        ConfigManager cm = (ConfigManager) alloc(ConfigManager.class);
-        setField(ConfigManager.class, cm, "plugin", p);
-        return cm;
+    private static ConfigManager manager(Logger logger) {
+        PerfScope p = AlertFixtures.barePlugin(logger);
+        return new ConfigManager(p);
     }
 
-    private static ConfigManager manager() throws Exception {
+    private static ConfigManager manager() {
         return manager(Logger.getLogger("pscope-threshold-zero-test"));
     }
 
@@ -127,11 +98,9 @@ class ThresholdPairZeroValidationTest {
         return c;
     }
 
-    private static void validate(ConfigManager cm, ConfigManager.ConfigData cfg) throws Exception {
-        Method m = ConfigManager.class.getDeclaredMethod("validateThresholds",
-            ConfigManager.ConfigData.class);
-        m.setAccessible(true);
-        m.invoke(cm, cfg);
+    private static void validate(ConfigManager cm, ConfigManager.ConfigData cfg) {
+        TestObjects.invoke(cm, "validateThresholds",
+            new Class<?>[]{ConfigManager.ConfigData.class}, cfg);
     }
 
     private static ConfigManager.ConfigData validated(ConfigManager.ConfigData cfg) throws Exception {

@@ -7,12 +7,12 @@ package cn.perfscope.alert;
 
 import cn.perfscope.PerfScope;
 import cn.perfscope.config.ConfigManager;
+import cn.perfscope.support.AlertFixtures;
+import cn.perfscope.support.TestObjects;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.io.File;
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.time.LocalDate;
@@ -44,101 +44,51 @@ class DailyCounterRolloverTest {
             .invoke(null, (Object) null);
     }
 
-    private static Object unsafe() throws Exception {
-        Class<?> c = Class.forName("sun.misc.Unsafe");
-        Field f = c.getDeclaredField("theUnsafe");
-        f.setAccessible(true);
-        return f.get(null);
-    }
-
-    private static Object alloc(Class<?> k) throws Exception {
-        return unsafe().getClass().getMethod("allocateInstance", Class.class).invoke(unsafe(), k);
-    }
-
-    private static void setField(Class<?> cls, Object t, String n, Object v) throws Exception {
-        Class<?> c = cls;
-        while (c != null) {
-            try {
-                Field f = c.getDeclaredField(n);
-                f.setAccessible(true);
-                f.set(t, v);
-                return;
-            } catch (NoSuchFieldException e) {
-                c = c.getSuperclass();
-            }
-        }
-        throw new NoSuchFieldException(n);
-    }
-
-    private static int getInt(Class<?> cls, Object t, String n) throws Exception {
-        Class<?> c = cls;
-        while (c != null) {
-            try {
-                Field f = c.getDeclaredField(n);
-                f.setAccessible(true);
-                return f.getInt(t);
-            } catch (NoSuchFieldException e) {
-                c = c.getSuperclass();
-            }
-        }
-        throw new NoSuchFieldException(n);
-    }
-
     /** 造一个 AlertService：昨天已推 7 条，时间已跨到今天，尚未发生任何 rollDay。 */
     private static AlertService serviceWithYesterdayCounters() throws Exception {
         File df = Files.createTempDirectory("pscope-rollover").toFile();
         Files.write(new File(df, "config.yml").toPath(),
             "alerts:\n  daily-summary:\n    timezone: \"\"\n".getBytes(StandardCharsets.UTF_8));
 
-        PerfScope p = (PerfScope) alloc(PerfScope.class);
-        setField(PerfScope.class, p, "logger", Logger.getLogger("rollover-test"));
-        setField(PerfScope.class, p, "dataFolder", df);
+        PerfScope p = AlertFixtures.barePlugin(Logger.getLogger("rollover-test"));
+        TestObjects.setField(PerfScope.class, p, "dataFolder", df);
 
-        ConfigManager cm = (ConfigManager) alloc(ConfigManager.class);
-        ConfigManager.ConfigData cfg = new ConfigManager.ConfigData();
-        cfg.alerts_enabled = true;
-        cfg.alerts_debounceCycles = 3;
-        cfg.general_updateInterval = 20;
-        cfg.alerts_cooldownSeconds = 300;
-        setField(ConfigManager.class, cm, "plugin", p);
-        setField(ConfigManager.class, cm, "config", cfg);
-        setField(PerfScope.class, p, "configManager", cm);
+        ConfigManager cm = AlertFixtures.configManager(p, cfg -> {
+            cfg.alerts_enabled = true;
+            cfg.alerts_debounceCycles = 3;
+            cfg.general_updateInterval = 20;
+            cfg.alerts_cooldownSeconds = 300;
+        });
 
-        AlertService svc = (AlertService) alloc(AlertService.class);
-        setField(AlertService.class, svc, "plugin", p);
-        setField(AlertService.class, svc, "configManager", cm);
-        setField(AlertService.class, svc, "options", defaultOptions());
+        AlertService svc = TestObjects.allocate(AlertService.class);
+        TestObjects.setField(AlertService.class, svc, "plugin", p);
+        TestObjects.setField(AlertService.class, svc, "configManager", cm);
+        TestObjects.setField(AlertService.class, svc, "options", defaultOptions());
 
         long today = LocalDate.now(SYS).toEpochDay();
-        setField(AlertService.class, svc, "pushedTodayDayEpoch", today - 1);
-        setField(AlertService.class, svc, "pushedToday", 7);
-        setField(AlertService.class, svc, "pushOkToday", 5);
-        setField(AlertService.class, svc, "pushFailToday", 2);
-        setField(AlertService.class, svc, "webhookQueuedToday", 4);
+        TestObjects.setField(AlertService.class, svc, "pushedTodayDayEpoch", today - 1);
+        TestObjects.setField(AlertService.class, svc, "pushedToday", 7);
+        TestObjects.setField(AlertService.class, svc, "pushOkToday", 5);
+        TestObjects.setField(AlertService.class, svc, "pushFailToday", 2);
+        TestObjects.setField(AlertService.class, svc, "webhookQueuedToday", 4);
         return svc;
     }
 
     private static Object defaultOptions() throws Exception {
         Class<?> oc = Class.forName("cn.perfscope.alert.AlertService$Options");
-        Method d = oc.getDeclaredMethod("defaults");
-        d.setAccessible(true);
-        Object o = d.invoke(null);
-        setField(oc, o, "digestMode", false);
-        setField(oc, o, "recoveryDebounceCycles", 3);
-        setField(oc, o, "dailyTimezone", "");
+        Object o = TestObjects.invoke(oc, "defaults", new Class<?>[0]);
+        TestObjects.setField(oc, o, "digestMode", false);
+        TestObjects.setField(oc, o, "recoveryDebounceCycles", 3);
+        TestObjects.setField(oc, o, "dailyTimezone", "");
         return o;
     }
 
-    private static void invokeLoadOptions(AlertService svc) throws Exception {
-        Method m = AlertService.class.getDeclaredMethod("loadOptions");
-        m.setAccessible(true);
-        m.invoke(svc);
+    private static void invokeLoadOptions(AlertService svc) {
+        TestObjects.invoke(svc, "loadOptions", new Class<?>[0]);
     }
 
-    private static void invokeCountPushed(AlertService svc) throws Exception {
-        Method m = AlertService.class.getDeclaredMethod("countPushed");
-        m.setAccessible(true);
-        m.invoke(svc);
+    private static void invokeCountPushed(AlertService svc) {
+        TestObjects.invoke(svc, "countPushed", new Class<?>[0]);
     }
 
     @Test
@@ -147,7 +97,7 @@ class DailyCounterRolloverTest {
         // reload（时区规格未变：仍是空串 = 跟随系统时区）
         invokeLoadOptions(svc);
         invokeCountPushed(svc);
-        assertEquals(1, getInt(AlertService.class, svc, "pushedToday"),
+        assertEquals(1, TestObjects.getInt(AlertService.class, svc, "pushedToday"),
             "cross-midnight reload must not swallow the day rollover (old bug yielded 8)");
     }
 
@@ -158,7 +108,7 @@ class DailyCounterRolloverTest {
         invokeLoadOptions(svc);
         invokeLoadOptions(svc);
         invokeCountPushed(svc);
-        assertEquals(1, getInt(AlertService.class, svc, "pushedToday"),
+        assertEquals(1, TestObjects.getInt(AlertService.class, svc, "pushedToday"),
             "repeated reloads must be idempotent w.r.t. the day baseline");
     }
 
@@ -166,11 +116,11 @@ class DailyCounterRolloverTest {
     void reloadWithoutDayChangeKeepsAccumulating() throws Exception {
         AlertService svc = serviceWithYesterdayCounters();
         long today = LocalDate.now(SYS).toEpochDay();
-        setField(AlertService.class, svc, "pushedTodayDayEpoch", today);
-        setField(AlertService.class, svc, "pushedToday", 2);
+        TestObjects.setField(AlertService.class, svc, "pushedTodayDayEpoch", today);
+        TestObjects.setField(AlertService.class, svc, "pushedToday", 2);
         invokeLoadOptions(svc);
         invokeCountPushed(svc);
-        assertEquals(3, getInt(AlertService.class, svc, "pushedToday"),
+        assertEquals(3, TestObjects.getInt(AlertService.class, svc, "pushedToday"),
             "same-day reload must not reset the counter");
     }
 
@@ -182,17 +132,17 @@ class DailyCounterRolloverTest {
 
         AlertService svc = serviceWithYesterdayCounters();
         long today = LocalDate.now(SYS).toEpochDay();
-        setField(AlertService.class, svc, "pushedTodayDayEpoch", today);
-        setField(AlertService.class, svc, "pushedToday", 3);
+        TestObjects.setField(AlertService.class, svc, "pushedTodayDayEpoch", today);
+        TestObjects.setField(AlertService.class, svc, "pushedToday", 3);
         // 把配置时区改成「此刻不在同一天」的时区 → 基线重算，但计数器不得清零
         Object opts = defaultOptions();
-        setField(opts.getClass(), opts, "dailyTimezone", far.getId());
-        setField(AlertService.class, svc, "options", opts);
+        TestObjects.setField(opts.getClass(), opts, "dailyTimezone", far.getId());
+        TestObjects.setField(AlertService.class, svc, "options", opts);
 
         invokeLoadOptions(svc);
         invokeCountPushed(svc);
         // 计数器保留 3（未被清零），本次推送 +1 -> 4。若被误判为跨天，结果会是 1。
-        assertEquals(4, getInt(AlertService.class, svc, "pushedToday"),
+        assertEquals(4, TestObjects.getInt(AlertService.class, svc, "pushedToday"),
             "a timezone switch is not a day rollover; counters must be preserved (3 -> 4, not reset to 1)");
     }
 
