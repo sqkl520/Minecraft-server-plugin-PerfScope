@@ -26,7 +26,7 @@ A comprehensive performance monitoring plugin for Minecraft servers, focused on 
 - **Auto Report Generation** —— Configurable interval, async generation without blocking main thread, auto cleanup by retention days
 - **Per-World Independent Alerts** —— Override entity alert thresholds per world
 - **Threshold Alert Push** (new in v1.1, converged in v1.2) —— When an alert fires, pushes to the console + online players holding the `perfscope.alert` permission; by default an alert must stay over-threshold for 3 consecutive collection cycles before the first push (debounce, configurable); the same alert has a default 300-second cooldown to prevent spam; level upgrades (warning→critical) send a single " (level escalated)" message bypassing the cooldown; a recovery notice is sent when the issue clears; configurable in the `alerts` section of `config.yml`
-- **Webhook Push** (new in v1.2, extended in v1.4) —— Alerts / recoveries / daily summaries can be pushed to Discord and QQ OneBot; from v1.4 also to **WeCom / Feishu / DingTalk** group robots (those three channels are unreleased — see below). Sent fully asynchronously, failures are logged without blocking
+- **Webhook Push** (new in v1.2, extended in v1.4) —— Alerts / recoveries / daily summaries can be pushed to Discord and QQ OneBot; from v1.4 also to **WeCom / Feishu / DingTalk** group robots (Feishu and DingTalk support an optional signature secret). Sent fully asynchronously, failures are logged without blocking
 - **Daily Summary** (new in v1.2, extended in v1.4) —— A digest at a fixed time each day; if the server happens to be down at the configured time, one catch-up summary is sent after startup. From v1.4 it grows from 3 lines to 5:
   - lowest TPS (with time) / p95 TPS / time spent below the threshold / peak entities / peak heap / alert statistics (all present since v1.2.1);
   - **MSPT spike** (with its time) — a single 500 ms stall is averaged away by `msptAvg` over a 60-second window; the spike is what players actually felt;
@@ -94,8 +94,6 @@ Aliases: `/pscope`, `/perf`; `alerts` also answers to `/perfscope alarm`
 
 ### Webhook self-check (v1.4)
 
-> **v1.4 unreleased**: `/perfscope webhook` is in no v1.3.0 artifact — build from source if you need it.
-
 WeCom / Feishu / DingTalk **return HTTP 200 even when the message is rejected**; the error code lives in the response body (`errcode` / `code` / `retcode`). A wrong URL, a bad signature, or a robot removed from the group all look like "success" at the HTTP layer — and the owner's only observable channel is "the group has been silent", which is indistinguishable from "the server is healthy so there is nothing to report". That is exactly why `test` exists: it turns "can this reach the platform?" from *wait for a real incident* into *ask any time*.
 
 - `status` makes no network request at all, it only reports the last result; `test` really posts a message to the group (one per sender every 10 seconds; the result is also written to the console, because an RCON session may already be gone).
@@ -139,9 +137,9 @@ This is the `zh` output. With the shipped default `general.language: en` the sam
 
 ## Installation
 
-> **Download**: [GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest) (latest stable **v1.3.0**, `PerfScope-1.3.0.jar`)
+> **Download**: [GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest) (latest stable **v1.4.0**, `PerfScope-1.4.0.jar`)
 
-> **Version note**: this document also describes **not-yet-released v1.4** work (the Prometheus metrics endpoint, `/perfscope webhook status|test`, and the WeCom / Feishu / DingTalk webhook channels). None of it is in **any v1.3.0 artifact** — build from source if you need it. The relevant sections are marked individually.
+> **Version note**: this document describes **v1.4.0** behaviour — the Prometheus metrics endpoint, `/perfscope webhook status|test`, and the WeCom / Feishu / DingTalk webhook channels all ship in the 1.4.0 artifact. The `alerts.enabled` default and the `entities` / `chunks` default thresholds changed in this release, so **read "Upgrade notes" below before upgrading**.
 
 1. Download the latest JAR file
 2. Place it in your server's `plugins/` directory
@@ -157,11 +155,22 @@ This is the `zh` output. With the shipped default `general.language: en` the sam
 >
 > **Neither layer uploads**: player names, world names, coordinates, chat content, plugin lists, config file contents, alert text, or server addresses. It can be disabled in `plugins/bStats/config.yml` or via `general.bstats-enabled: false` in this plugin's config.yml.
 
+## Upgrade notes (1.3.0 → 1.4.0)
+
+Going from 1.3.0 to 1.4.0, **only one default flip changes your behaviour**:
+
+- **`alerts.enabled` ships as `false` instead of `true`.** Alert push (console / in-game / webhook) moves from "on by default" to "opt-in". Collection, `/perfscope` full diagnostics, reports, history and the Prometheus endpoint are unaffected.
+  - **Your existing config is never rewritten**: the key is read from your `config.yml` and only falls back to the default when **missing** — it is never merged with the shipped defaults. Servers that wrote `enabled: true` keep alerting.
+  - **Who can be affected**: servers that deleted `config.yml` to let it regenerate, and fresh installs that stayed on the defaults.
+  - **How to check**: the startup log prints `[PerfScope] Alerts are OFF by default...`, or `/perfscope status` shows the push line as disabled.
+  - Enabling steps are in "Alerting is off by default" below.
+- **Shipped default thresholds were re-standardised** (defaults and newly generated configs only — never your file): `entities` `2000/3000` → `20000/30000`; `chunks` `1500/2500` → `10000/15000`; the three example worlds in `worlds` become `12000/18000`, `5000/7500`, `3000/4500` (the missing `total_critical_threshold` is now present — without it a world's critical silently fell back to the global threshold). The old defaults assumed a small server, so a normal-sized server fired criticals seconds after startup.
+- **The history CSV grows from 7 to 12 columns** (MSPT peak / process CPU / system CPU / GC count / GC time appended). Readers map by column name; columns missing from old files read as "not collected" rather than 0, so the day-of-upgrade data stays readable.
+- **Four diagnostic conclusions changed** (same data, different verdict): memory-leak verdicts on windows with missing samples go from CLEAN/HIT to SKIP; the hotspot severity line now follows the warning line you configured; MSPT severity takes the union of "peak" and "average"; servers with invalid thresholds go from "permanently critical" to "skip and state the reason".
+
 ## Configuration
 
-> **v1.4 unreleased**: the `alerts.webhook.secret` key and the `type: wecom | feishu | dingtalk` channels below are v1.4 work and are in no v1.3.0 artifact; v1.3.0 supports only `discord` / `onebot`. Build from source if you need them.
->
-> **Three default values also changed in v1.4**: `alerts.enabled` from `true` to `false`; `entities` thresholds from `2000/3000` to `20000/30000`; `chunks` thresholds from `1500/2500` to `10000/15000`. **If you are still on a v1.3.0 artifact, your `config.yml` holds the old values** — config is read from your file and never merged with the shipped defaults.
+> **Note**: the `alerts.webhook.secret` key, the `type: wecom | feishu | dingtalk` channels and the `prometheus:` block below are all provided as of v1.4.0.
 
 Key configuration options (`config.yml`). The values below are the **shipped defaults** — byte-for-byte the same as the `config.yml` packaged into the jar, so copying them changes nothing:
 
@@ -343,8 +352,6 @@ general:
 > Note (process CPU on Windows): the Windows implementation of `getProcessCpuLoad()` enumerates every process name on each call, measured at **p50 171 ms / p90 257 ms / max 332 ms** of blocking, and it runs on Bukkit's **shared** async pool where it competes with other plugins' async tasks. PerfScope therefore **does not collect process CPU on Windows** — that metric shows "unknown" and `cpu.process_warning_threshold` never fires; system CPU and every other metric work as normal. On Linux / macOS the value comes from `/proc` or an equivalent interface at microsecond cost, so process CPU is collected normally there.
 
 ### Wiring up Prometheus / Grafana
-
-> **v1.4 unreleased**: everything in this section (the `prometheus.*` config, the metrics endpoint, per-alert metrics such as `perfscope_alert`) is in **no v1.3.0 artifact** — the archived v1.3.0 jar's `config.yml` has no `prometheus:` block and exports none of these metrics. Build from source (`mvn clean package`) if you need it.
 
 With `prometheus.enabled: true` the plugin exposes Prometheus text format (0.0.4) metrics on
 `127.0.0.1:8940/metrics`, with no third-party dependencies. Add a scrape job:

@@ -3,7 +3,7 @@
 本项目：**PerfScope** —— Minecraft 服务器性能监测插件（Paper 1.20.4+ / Purpur / Pufferfish / Folia / Leaves，Java 17）。
 后台定时采集性能快照 → 游戏内 17 个子命令一屏诊断 → HTML/TXT/JSON 报告导出 → ActionBar 实时监测 → 阈值告警。
 
-> **仓库**：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope> ｜ **版本**：`1.3.0`（当前正式版；最新 tag 与 `versions/PerfScope-1.3.0.jar` 均为 1.3.0；`[Unreleased]` 累积 v1.4 未发布改动）
+> **仓库**：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope> ｜ **版本**：`1.4.0`（当前正式版）｜ **上一个正式版**：`1.3.0`（`versions/PerfScope-1.3.0.jar`）｜ `[Unreleased]` 当前为空（v1.4 改动已全部归入 `[1.4.0]`）
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/)。v1.2「找得到」开发周期已收尾，各段以 **Wave（开发波次）** 划分并标注对应提交哈希。
 
@@ -16,55 +16,184 @@
 
 ## [Unreleased]
 
-### Refactored — 测试端反射脚手架收拢为 3 个工具类（纯测试重构，零行为变化）
+> v1.4.0 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
 
-- **动机**：`sun.misc.Unsafe.allocateInstance` + `setField` 三件套被复制进 11 个测试类，
-  另 3 个测试写了手写变体；`HistoryStore` 的「直写私有 ring」夹具在 4 处重复。
-  同一组踩坑注释（JDK 24 terminal deprecation、`allocateInstance` 不跑字段初始化器）
-  被抄了 11 份，且每份都略有出入，下一任只能靠 grep 猜哪份是权威。
-- 新增 `src/test/java/cn/perfscope/support/TestObjects.java`：全仓唯一的 `Unsafe` 入口
-  （`allocate` / `setField` / `getField` / `getInt` / `getStaticInt` / `invoke`）。
-  类注释钉住三条硬约束：禁用 `objectFieldOffset`/`putObject`（JDK 24 terminal deprecation，
-  `--sun-misc-unsafe-memory-access=deny` 直接抛异常，写 final 实例字段一律 `Field.set`）；
-  `allocateInstance` 只给构造器真的依赖 Bukkit 的 5 个类用（`PerfScope` / `AlertService` /
-  `WebhookNotifier` / `DiagnosticEngine` / `MetricsCollector`），
-  `HistoryStore` / `ConfigManager` / `HistoryFileStore` 的构造器只赋字段、**不需要**它；
-  反射夹具依赖 classpath 构建（无 `module-info.java`），附 `assertReflectionUsable()` 自检。
-- 新增 `HistoryFixtures.java`：`seeded(cm, samples)`（既有 5 处夹具的等价替代，调用方零改动）
-  与 `recorded(cm, snaps)`（走真实 `record()`，只把非 final 的 `lastRecordMs` 归零放行节流——
-  TPS 不可用守卫、GC `-1` 哨兵、乱序重排首次可被真实执行）。
-  `recorded` 的注释警告：`record()` 的 24h 淘汰用**墙钟**，固定 epoch 时间戳会被整体淘汰、
-  `size()==0`，测试"通过"却什么都没测；需要"很久以前"的窗口必须用 `seeded`。
-- 新增 `AlertFixtures.java`：只抽 `initMessages()` / `barePlugin()` / `configManager()` 三块通用装配；
-  `AlertServiceStateMachineFixture` 保留为薄封装（`initMessages()` 改为委托），
-  4 个调用方零改动。该夹具里针对具体状态机场景的构造逻辑（14 个 `final` 容器、
-  时钟种子、`InlineExecutor`）**未**搬动。
-- 13 个文件改用统一工具类，共减少 454 行；新增 3 个工具类 419 行。
-  `mvn test` 前后均为 **329 个用例全过**，逐类用例数与重构前逐字一致。
-- 顺带产出（未修，仅记录）：`DiagnosticEngineContractTest` 原来的 `getField` 是死代码
-  （声明后 0 次调用），已随脚手架一起删除；`HistoryFixtures.recorded` 目前尚无测试调用。
+---
 
-### Added — `HistoryStore` 三个访问器补测试（此前零覆盖）
+## [1.4.0] — 2026-11-14 — 变更汇总（面向使用者）
 
-- **`capacity()` / `windowMs()` / `gaps()` 此前没有任何测试**。验证方式不是"读代码觉得没测"，
-  而是把 `gaps()` 的阈值算法改烂（`threshold` 恒为 `1`）后跑全量：**329 个用例一个都没红**。
-  那段代码坏了不会有任何信号。
-- 新增 `HistoryStoreAccessorsTest`（11 个用例），锁住四处边界：
-  - **容量 1440 与采样间隔解耦**。断言具体数字而非 `> 0`——这个数字是契约：
-    `CAPACITY` 曾由 `86400 / intervalSec` 反推，"把间隔调大"会连带把容量改小
-  - **缺口判据是严格大于 2× 期望间隔**。恰好 2× 不算缺口：采集抖动会让间隔偶尔略超，
-    用 `>=` 会把每次轻微抖动都报成缺口
-  - **期望间隔乘 2 溢出不得变成负阈值**。超出 `Long.MAX_VALUE / 2` 时钳到
-    `Long.MAX_VALUE`（永不报缺口），否则阈值翻负、每个相邻对都被报成缺口
-  - **`Gap.durationMs()` 不返回负数**。`Gap` 是公开 record，可被任意构造；
-    乱序时间戳（NTP 回拨）能造出 `end < start`，没有 `Math.max(0,…)` 兜底就会污染下游求和
-- 变异验证（本人实测）：`CAPACITY` 1440→720、`>`→`>=`、去掉溢出保护、去掉
-  `durationMs` 下限，**四个变异全部被杀**。
-- **记录一处「写了没接线」的能力（未修）**：`gaps()` 的 javadoc 说它用于
-  「`/perfscope trend` 输出数据缺口 N 处」，但 `trend` 命令的当前实现并没有调用它，
-  `messages.yml` 里也没有任何缺口相关文案键。这套能力自 v1.2.1（`33f2e95`）引入起
-  一直没接过线。补测试的价值不在"证明它现在对"，而在于把它锁住：将来谁要接线，
-  改坏了会立刻知道；谁要判断"该删还是该接"，也有行为依据可看。
+> 本节是给使用者看的：只有**改了什么、有什么影响**。过程性记录在上层工作区 `docs/`，不在本仓库。
+> 相对 1.3.0 的差异集中在三块：**对外的可观测性接口**（Prometheus 端点 + 逐告警指标）、
+> **告警送达**（企业微信 / 飞书 / 钉钉，加自检与限流）、**诊断规则的正确性**（规则给出了它没有证据支持的结论）。
+
+> **⚠️ 升级提示 — 1.3.0 → 1.4.0（含一项默认值翻转）**
+>
+> **`alerts.enabled` 的随包默认值由 `true` 改为 `false`**：告警从"默认开启"改为"选择加入"。
+> 采集、`/perfscope` 全量诊断、报告、历史、Prometheus 端点全部照常工作，只有**推送**这一层
+> （控制台 / 游戏内 / webhook）需要你显式打开。原因是旧默认值配合旧阈值，会让首装用户在开服
+> 几秒内就被一轮与自己服务器规模无关的 critical 淹没。
+>
+> **你已有的配置不会被改写**：`alerts.enabled` 从你的 `config.yml` 读取，只在**缺键**时取默认值，
+> 不与随包默认合并——升级前写了 `enabled: true` 的服继续告警。实际会受影响的是：删过 `config.yml`
+> 让它重新生成的服，以及新装后直接沿用默认值的服。判定方法：启动日志出现
+> `[PerfScope] Alerts are OFF by default...`，或 `/perfscope status` 的推送行显示未启用。
+> 开启步骤见 README「告警默认关闭」。
+>
+> **随包默认阈值同步重标定**（只影响默认值与新生成的配置，不改你文件里的值）：`entities`
+> `2000/3000` → `20000/30000`；`chunks` `1500/2500` → `10000/15000`；`worlds` 段新增
+> `total_critical_threshold`（缺这一行时该世界的 critical 会静默回退成全服阈值）。旧默认按小服
+> 假设，正常规模的服开服几秒即报 critical。
+>
+> **诊断结论有 4 处口径变更**（不是崩溃修复，是"同一份数据得出的结论变了"）：缺采窗口下的内存
+> 泄漏判定由 CLEAN/HIT 改为 SKIP；热点区块严重线改为跟随你配置的命中线；MSPT 严重度取「尖峰」与
+> 「均值」的并集；阈值非法的服由"永久 critical"改为"跳过并说明原因"。理由与代价见各 Fixed 节末尾
+> 的**行为变更**。
+
+### Added — Prometheus 指标端点
+
+- **Prometheus 指标端点**（`prometheus.*`，默认关闭）。用 JDK 自带的
+  `com.sun.net.httpserver` 实现，**零第三方依赖**、不增加 jar 体积，让指标脱离游戏内命令
+  进入你已有的监控栈（Prometheus 抓取 → Grafana 看板）。
+  - 默认 `127.0.0.1:8940/metrics`：只听回环。改成 `0.0.0.0` 时启动会打 WARNING，
+    因为端点会暴露在线玩家数、世界名与插件数量。
+  - 可选 `auth-token`：非空时要求 `Authorization: Bearer <token>`，错误令牌返回 401
+    且响应体不含任何版本信息。
+  - 除 TPS/MSPT/内存/实体/区块等基础指标外，还导出**本插件独有的诊断信号**：
+    `perfscope_module_available`（哪个采集模块坏了）、`perfscope_alerts_active`、
+    `perfscope_alerts_suspended`、`perfscope_collector_degraded`、
+    `perfscope_snapshot_age_seconds`（区分"服务器死了"和"指标冻住了"）。
+  - 未采集的指标**整行不输出**，不输出 `-1`——缺行让 Grafana 显示 gap，
+    比画一条贴底的假线诚实。
+  - Folia 上 `perfscope_build_info` 带 `tps_scope="global_region"` 标签，
+    明示那里的 TPS 只是 global region 的局部值。
+  - 端口被占、`jdk.httpserver` 被裁剪、绑定权限不足——一律只记一条 warning 并跳过，
+    **绝不影响插件本体启动**。
+
+### Added — 逐告警 Prometheus 指标（`perfscope_alert{key,module}`）
+
+- **`perfscope_alert{key,module}`**：每条可判定的告警键一条序列，
+  值 `0` 正常 / `1` 警告 / `2` 严重。
+  - **级别走值不走标签**。这是刻意的：若做成 `{severity="warning"}`，级别升级时
+    Prometheus 看到的是「一条序列 stale、另一条全新」，`ALERTS_FOR_STATE` 归零——
+    运维写的 `for: 5m` 每次级别翻转都重新计时，插件那套抖动治理在指标层被完全抵消。
+    做成值则序列恒定，升级只是 `1 → 2`。
+  - **健康也输出 `0`**。否则恢复时序列直接消失，既收不到 `resolved` 通知，
+    也无法用 `absent()` 区分"没告警"与"采集挂了"。
+  - **不可判定的维度不发 0**（模块被禁用 / 平台不支持 / 哨兵值 `-1`）。
+    给没测的维度发 0 等于宣称它健康；这类盲区由既有的
+    `perfscope_module_available{module} 0` 表达。
+  - 有了它，运维可以直接写 `perfscope_alert > 0` 把告警接进自己的
+    Alertmanager / Grafana，不需要本插件再造一套 Alertmanager 语义。
+- 默认 Prometheus 端口在 v1.4 开发期内由 **9940 改为 8940**（9940 从未出现在任何发布包里）。
+  9940 在 Prometheus 官方端口分配表里已分配给 `minecraft-prometheus-exporter`
+  （`papermc_prometheus_exporter` 也占用它），而 9941/9942/9943 同样已被占用；
+  8940 在 IANA 与 Prometheus 两张表中均未分配。
+  端口被占时日志会直接点名冲突对象并给出替代值。
+
+### Added — 企业微信 / 飞书 / 钉钉群机器人
+
+- **支持企业微信 / 飞书 / 钉钉群机器人**（`alerts.webhook.type` 新增 `wecom` / `feishu` / `dingtalk`）。
+  飞书与钉钉支持可选的 `alerts.webhook.secret` 加签。
+  - 三种平台各自的请求格式与判据：企业微信 `msgtype`+`text.content`（2048 **字节**）、
+    飞书 `msg_type`+`content.text`（签名为反直觉的"key=待签名串、数据为空"构造，时间戳用**秒**）、
+    钉钉 `msgtype`+`text.content`（签名拼在 URL query，时间戳用**毫秒**）。
+  - 老配置零改动可用：`type: discord` / `type: onebot` 行为不变，缺 `secret` 键走默认空串。
+
+### Fixed — webhook 投递判定 / 自检 / 限流 / 计数口径
+
+- **webhook 投递失败却显示成功**（本批最重要的修复）。企业微信 / 飞书 / 钉钉在**业务失败时也返回
+  HTTP 200**，错误码在响应体里；而旧实现用 `BodyHandlers.discarding()` 丢掉响应体、只看
+  `statusCode >= 300`，于是这三家的每一次失败都被当成成功。
+  - **这个 bug 在 OneBot 上早已存在**：OneBot v11 的 `/send_private_msg` 恒定返回 HTTP 200，
+    成败写在 `retcode` 里。也就是说配错 OneBot token 的用户从 v1.2 起就没收到过任何告警，
+    也没有任何日志提示。
+  - 现在按平台读取业务码：`errcode == 0`（企业微信/钉钉）、`code == 0`（飞书）、
+    `retcode == 0` 或 `status == ok/async`（OneBot）。
+  - **解析不出内容一律判失败**，不再"看不懂就当成功"——反向代理返回 HTTP 200 的 HTML 登录页
+    会让投递永久显示正常，这正是要避免的。
+- **OneBot 侧缺少 CQ 码注入防护**。Discord 早就加了 `allowed_mentions.parse = []` 防空 `@everyone`，
+  但 OneBot 分支没有对应措施：实现会把字符串 `message` 当 CQ 码解析，告警正文里的世界名/MOTD
+  若含 `[CQ:at,qq=all]` 就会 **@ 全体成员**。现已加 `auto_escape: true`。
+- **续读响应体会放大内存**。改用读取响应体后补了 4 KB 上限——旧实现的 `discarding()` 顺带保证了
+  不会因远端返回巨大响应而 OOM，改成读取后这个保护必须显式补回。
+
+#### webhook 自检与限流
+
+- **`/perfscope webhook status | test`**。三个国内平台的失败模式全是静默的（HTTP 200 + 业务码），
+  服主唯一的观测渠道是"告警群一直没消息"，而"服务器健康所以没告警"和"告警根本没送到"看起来一样。
+  - `status` 展示通道类型、是否加签、最近一次投递结果、以及被限流丢弃的条数。
+  - `test` 真的发一条探测消息（正文带 `test message - safe to ignore` 标记），
+    并回报 HTTP 状态 + 平台业务码 + **可执行的处置建议**（不是只报错误码）。
+  - 结果同时写控制台日志：RCON 会话执行完命令就断开，之后 `sendMessage` 不会送达——
+    只发消息会让这个命令在 RCON 下表现为"没反应"，而那正是它要消灭的东西。
+- **客户端限流**。企业微信与钉钉都是 20 条/分钟，**钉钉超限还会封禁 10 分钟**——
+  一次告警风暴会让服主在最需要告警的时候静默 10 分钟。
+  - 间隔取值：企业微信/钉钉 4000ms（15 条/分）、飞书 700ms（约 85 条/分）、Discord 2000ms、
+    OneBot 不限。
+  - **不做突发容量**：钉钉的限额是"任意 60 秒窗口 ≤ 20 条"，容量 C、间隔 T 的最坏窗口是
+    `C + floor(60000/T)`。实测 3000ms + 容量 2 就是 22 条，会触发封禁；4000ms 才留出余量。
+  - 被丢弃的条数在 `/perfscope webhook status` 可见——这是服主发现自己告警被节流的唯一信号。
+
+#### webhook 计数口径
+
+- **`webhookQueuedToday` 把没发出去的消息也记成"已排队"**。旧代码用
+  `webhookQueued = wn.isReady()` 判断，而 `isReady()` 只回答"配置齐了没有"——
+  被限流丢弃、序列化失败、URL 构建失败时它仍为 true。现在改用 `send()` 的返回值。
+- **一条 digest 会把计数加 N**。`webhookQueuedToday++` 原先在按告警条数循环的循环体内，
+  一次 HTTP 请求覆盖 8 条告警就加 8。计数单位应是"发出的消息条数"，已移出循环。
+  （`pushOkToday` 仍按告警条数计——两者刻意不同：一个统计"处理了多少条告警"，
+  一个统计"发出了多少条消息"。）
+
+### Changed — 告警改为"选择加入"（`alerts.enabled` 默认 `false`）
+
+- **`alerts.enabled` 的随包默认值由 `true` 改为 `false`**（`ConfigManager.load()` 的 `readBool`
+  第二参数）。采集、全量诊断、报告、历史、Prometheus 端点不受影响，只有推送层需要显式开启。
+  理由与影响面见本节开头的**升级提示**。
+- **配套的首装引导**：关闭状态下启动会打一行 `core.banner.alerts-off-by-default`，给出
+  「先用 `/perfscope entities` 与 `/perfscope chunks` 看真实规模 → 按规模改阈值 → 再把
+  `{0}` 设为 `true`」三步。只在真的关闭时打，且不塞进 `general.verbose_startup` 门控
+  （`verbose_startup: false` 的服主更需要这条）。键名由 `ConfigManager.ALERTS_ENABLED_KEY`
+  注入，不写死字面量。
+- **随包默认阈值同步重标定**：`entities` `2000/3000` → `20000/30000`、`chunks`
+  `1500/2500` → `10000/15000`，`worlds` 三个示例世界补上 `total_critical_threshold`
+  （12000/18000、5000/7500、3000/4500）。取值依据写在 `config.yml` 注释里并明确标注
+  **是规模调研区间而非本机实测**。旧默认按小服假设，正常规模的服开服几秒即报 critical，
+  这是首装告警墙的主要来源。
+- **修掉由此暴露的双重计数**：全局实体告警原先在世界级告警之外再发一条，一次负载最多四条
+  实体告警。现在全局告警只在级别**严格高于**各世界时发出。注意不能只抑制消息——
+  那样 `AlertService` 会把该周期当成干净周期并推一条伪造的「已恢复正常」，
+  故恢复循环改为查 `snap.alertLevels`，只阻止假恢复。
+
+### Changed — 每日摘要接入新增 5 指标（MSPT 尖峰 / CPU / GC）
+
+- **日报只看得到 3 个指标**。`HistorySample` 在 v1.4 从 7 列扩到 12 列（`msptMax` /
+  `cpuProcess` / `cpuSystem` / `gcCount` / `gcTime`），但 `DailySummaryService` 仍只读
+  `tps1m` / `totalEntities` / `heapUsagePercent`——新采的数据一条都没进日报，服主每天收到的
+  还是那份"看不出昨晚卡过"的三行。现在日报增加两行：
+  - `MSPT 尖峰: 1200.00 ms（03:14）` —— `msptAvg` 会把一次 500ms 的卡顿在 60 秒窗口里摊薄
+    到几乎不动，尖峰才是玩家实际感受到的东西；
+  - `进程 CPU 峰值: 61.5% | 系统 CPU 峰值: 33.0% | GC: 7 次，1.7 秒`。
+  - 新行插在**告警统计行之前**：`末行含 告警统计:` 是 harness 依赖的稳定锚点，不能挪。
+- **`-1` 哨兵绝不渲染成数值**。此前若照直格式化，会打出 `-1.00 ms`——用户会以为"有史以来
+  最快的一次 tick 是负数"。现在整个窗口没有该指标时写 **`本窗口未采集`**。
+- **"未采集"与"健康"在文案层强制分开**（三态，任何一种都不退化成 0）：
+  | 情形 | 输出 |
+  |---|---|
+  | 窗口内全是 `-1`（旧 CSV / 模块被禁用） | `本窗口未采集` |
+  | 有样本但凑不出可比的一对（1 条 / 相邻对全是重启） | `样本不足，无法统计增量` |
+  | 可测且增量确实为 0 | `本窗口未发生 GC` |
+  给没测的维度发 0 等于宣称它健康，是本项目写在 README 里的硬原则。
+- **GC 报窗口增量，不是最大值**。`gcCount`/`gcTime` 是进程内累计计数器，取最大值等于报
+  "开机以来一共 GC 了多少次"。增量按**相邻样本逐对累加**，而不是"末值减首值"——
+  后者在窗口跨进程重启时会把重启前那段丢掉，甚至算出负数（500 次 → 重启后 3 次 = -497）。
+  检测到计数器回退（任一字段变小）即跳过该对、把基线更新到新值，之后照常累加；
+  重启前的增量因此不丢。日报会在增量后追加 `（计数器归零 N 次…）`，让服主知道这个数字
+  没有被重启吞掉。
+- **CPU 的 `0.0` 不当哨兵**。`peakProcessCpuSince` / `peakSystemCpuSince` 只排除 `< 0`；
+  沿用堆/实体那套 `<= 0` 口径会让一台空载服务器的 CPU 永远显示"未采集"——
+  那是把健康说成盲区，与"把盲区说成健康"同样是错误结论。
+- **两个 CPU 各自判断未采集**。进程 CPU 与系统 CPU 是两个独立指标，一边有一边无
+  （如 Windows 上 `getProcessCpuLoad` 被跳过）时不共用一个结论，否则有数据的那边也被标成盲区。
 
 ### Added — `/perfscope trend` 接上数据缺口（把"没卡"与"没数"分开）
 
@@ -86,68 +215,17 @@
 - 测试：新增 4 个用例，其中一条专门钉住「`gapsOf` 与 `gaps()` 结果必须一致」。
   变异验证：把静态版的 `>` 改成 `>=` → 2 个用例失败。
 
----
+### Added — 新配置键（相对 1.3.0）
 
-## [1.3.0] — 2026-11-10 — 变更汇总（面向使用者）
+以下键在 1.3.0 的 `config.yml` 里不存在，缺失即取默认值，旧配置文件不需要改动。
 
-> 本节是给使用者看的：只有**改了什么、有什么影响**。过程与过程性记录在上层工作区
-> `docs/reports/`，不在本仓库。按影响面从大到小排列。
->
-> **⚠️ 本节混装了已发布与未发布内容**。标了「v1.4 未发布」的小节**不在** `v1.3.0`
-> 的任何发布包中（既不在 git tag `v1.3.0`，也不在 `versions/PerfScope-1.3.0.jar`）——
-> 它们对应 `pom.xml` 的 `1.3.0` 之后、`[Unreleased]` 区段累积的 v1.4 改动，目前的
-> `1.3.0` 归档 JAR 里查不到 Prometheus 端点、`/perfscope webhook` 子命令与
-> 企业微信 / 飞书 / 钉钉通道。要用这些功能只能自己从源码构建。
+- `prometheus.enabled`（默认 `false`）/ `bind`（`127.0.0.1`）/ `port`（`8940`）/
+  `path`（`/metrics`）/ `server-id`（空 = 自动派生）/ `auth-token`（空 = 不鉴权）。
+- `alerts.webhook.secret`（默认空串）：仅飞书 / 钉钉用于加签；纯数字密钥必须加引号。
+- `worlds.<world>.entities.total_critical_threshold`（`world` 18000 / `world_nether` 7500 /
+  `world_the_end` 4500）。
 
-### Fixed — 两份 README 的配置示例全部过期（照抄即被误报淹没）
-
-- **阈值差 10 倍**：`entities` 示例写 `2000/3000`、`chunks` 写 `1500/2500`，而随包默认已是
-  `20000/30000` 与 `10000/15000`（v1.4 重标定）。`worlds` 段三段示例同样停留在旧值。
-- **告警开关反了**：`alerts.enabled` 示例写 `true`，随包默认自 v1.4 起是 `false`——读者以为告警
-  开着，其实关着；反之照抄示例又会被首装告警墙淹没。
-- 处理方式：配置示例改为**随包默认值的逐字副本**，并在示例上方点明这一点；同时新增
-  「`entities` / `chunks` 默认值是中服假设、小服必须下调」的说明，`worlds` 段显式标注为示例。
-- 同时补齐两份文档都缺的 `alerts.daily-summary.timezone`（v1.3.0 已发布的键，容器默认 UTC 会让
-  `08:00` 变成北京时间 16:00）与 `general.update_interval` 的 5–1200 合法区间。
-
-### Fixed — Pterodactyl 流程漏了 `prometheus.port`，面板服用户抓一个没人监听的端口
-
-- 原四步只写「加分配 → 改 bind → 抓 `<节点IP>:<端口>`」，没有一步说要改 `prometheus.port`。
-  实际监听端口由该键决定，而 Wings 只转发「分配里记录的那个端口」；两者不一致时外部表现为
-  `connection refused`，而进容器 `curl 127.0.0.1:8940` 又是通的——最难排查的那种组合。
-- 中英两份流程都补上「把 `prometheus.port` 改成分配到的端口」，并注明分配端口恰好是 8940 时不用改。
-
-### Added — 补齐 README 缺失的功能入口
-
-- **`perfscope_alert{key,module}` 指标**：`MetricsTextRenderer` 早已输出，指标表却没有。补进表格，
-  并解释三条反直觉设计——级别走值不走标签（否则 `ALERTS_FOR_STATE` 归零、`for: 5m` 永不触发）、
-  健康也输出 0（否则收不到 `resolved`，也无法用 `absent()` 区分没告警与采集挂了）、不可判定的维度
-  不发 0（给没测的维度发 0 等于宣称它健康）。附一条 `absent()` 规则示例。
-- **`/perfscope webhook [status|test]`**：命令表补入，并说明失败判定口径（三个国内平台业务失败时
-  也返回 HTTP 200，错误码在响应体里，所以「HTTP 200」≠ 成功——这正是 `test` 存在的理由）与
-  各通道的客户端限流间隔。
-- **`/perfscope alerts [N]`**：v1.3.0 起就漏在命令表外的已发布命令，补入。
-- **Prometheus 端点**：加进「功能特性」与「可监测的全部性能指标」两张清单。
-
-### Fixed — 全量诊断示例与代码不符
-
-- 缺 `服务端: <名称>` 行；`实体总数:` 实际是 `总实体数:`；`2天 6时 35分 22秒` 实际最多三级
-  （`2 天 6 时 35 分`）；MSPT 数值与单位间有空格（`15.23 ms`）。
-
-### Fixed — 其他文档错误
-
-- `README-EN.md` 末尾一段「Reproduce: `tools/perfscope-jfr-overhead.ps1`」**出现两遍**（一份带
-  6.46% 数据、一份是更旧的短版），属坏合并残留，已删掉旧的那份。
-- `README-EN.md` 英文界面里引用了中文运行时字符串：`"（级别升级）"` → `" (level escalated)"`、
-  `"配置校验：…设置倒置，已回退默认值"` → 对应英文文案（`AlertMessages` / `ConfigMessages`）。
-- 「每日摘要 v1.2 已有的指标」标注错：p95 TPS 与低于阈值累计时长实为 **v1.2.1** 引入，
-  最低 TPS 三项从 v1.2.0 起（对照 `DailySummaryService` 的 v1.2.0 / v1.2.1 两版）。
-- 补 `alerts.webhook.secret` 的空白陷阱（插件刻意不 trim，两端空格导致验签失败，平台只回
-  「签名不匹配」）。
-
-### v1.4 未发布 — Fixed：阈值对取 0 能通过校验，导致规则永久告警
-
-> **v1.4 未发布**：本小节不在 v1.3.0 的任何发布包中，需自行从源码构建。
+### Fixed — 阈值对取 0 能通过校验，导致规则永久告警
 
 - **症状**：`players.warning_threshold: 0` + `players.critical_threshold: 0` 能通过加载期校验
   （非负、且 `0 <= 0`）。后果是 `DIAG-PLAYER-CAP` 永久 critical——1 人在线 / 200 上限也报
@@ -183,9 +261,7 @@
 - **兼容性**：6 个已发布 jar 的 `config.yml` 阈值（80/95、2000/3000、1500/2500、12000/18000 等）
   全部落在合法区间内，`tools/check-config-compat.mjs` 仍 9/9 PASS，无既有配置被误伤。
 
-### v1.4 未发布 — Fixed：`CoreRules` 五条诊断规则的错误结论（F-1 / F-2 / F-5 / F-6 / F-7 / F-8）
-
-> **v1.4 未发布**：本小节不在 v1.3.0 的任何发布包中，需自行从源码构建。
+### Fixed — `CoreRules` 五条诊断规则的错误结论（F-1 / F-2 / F-5 / F-6 / F-7 / F-8）
 
 独立审查在 `CoreRules.java` 里找到 6 条缺陷，逐条判定后 **5 条修、1 条只改措辞**，
 另 1 条（F-8 的 schema 缺口）按成本明确不修。共同主题是**规则给出了它没有证据支持的结论**。
@@ -259,64 +335,7 @@
   `ABSOLUTE_FLOOR`；MSPT 去掉均值分支 / 去掉阈值可用性守卫 / 两种严重度共用一条文案 /
   把 `>` 写成 `>=`；玩家容量去掉 warning 守卫 / 去掉 critical 守卫；窗口低谷改回百分比。
 
-### v1.4 未发布 — 逐告警 Prometheus 指标
-
-> **v1.4 未发布**：本小节不在 v1.3.0 的任何发布包中，需自行从源码构建。
-
-- **`perfscope_alert{key,module}`**：每条可判定的告警键一条序列，
-  值 `0` 正常 / `1` 警告 / `2` 严重。
-  - **级别走值不走标签**。这是刻意的：若做成 `{severity="warning"}`，级别升级时
-    Prometheus 看到的是「一条序列 stale、另一条全新」，`ALERTS_FOR_STATE` 归零——
-    运维写的 `for: 5m` 每次级别翻转都重新计时，插件那套抖动治理在指标层被完全抵消。
-    做成值则序列恒定，升级只是 `1 → 2`。
-  - **健康也输出 `0`**。否则恢复时序列直接消失，既收不到 `resolved` 通知，
-    也无法用 `absent()` 区分"没告警"与"采集挂了"。
-  - **不可判定的维度不发 0**（模块被禁用 / 平台不支持 / 哨兵值 `-1`）。
-    给没测的维度发 0 等于宣称它健康；这类盲区由既有的
-    `perfscope_module_available{module} 0` 表达。
-  - 有了它，运维可以直接写 `perfscope_alert > 0` 把告警接进自己的
-    Alertmanager / Grafana，不需要本插件再造一套 Alertmanager 语义。
-- 默认 Prometheus 端口 **9940 → 8940**。9940 在 Prometheus 官方端口分配表里已分配给
-  `minecraft-prometheus-exporter`（`papermc_prometheus_exporter` 也占用它），
-  而 9941/9942/9943 同样已被占用；8940 在 IANA 与 Prometheus 两张表中均未分配。
-  端口被占时日志会直接点名冲突对象并给出替代值。
-
-### v1.4 未发布 — 每日摘要接入新增 5 指标（MSPT 尖峰 / CPU / GC）
-
-> **v1.4 未发布**：本小节不在 v1.3.0 的任何发布包中，需自行从源码构建。
-
-- **日报只看得到 3 个指标**。`HistorySample` 在 v1.4 从 7 列扩到 12 列（`msptMax` /
-  `cpuProcess` / `cpuSystem` / `gcCount` / `gcTime`），但 `DailySummaryService` 仍只读
-  `tps1m` / `totalEntities` / `heapUsagePercent`——新采的数据一条都没进日报，服主每天收到的
-  还是那份"看不出昨晚卡过"的三行。现在日报增加两行：
-  - `MSPT 尖峰: 1200.00 ms（03:14）` —— `msptAvg` 会把一次 500ms 的卡顿在 60 秒窗口里摊薄
-    到几乎不动，尖峰才是玩家实际感受到的东西；
-  - `进程 CPU 峰值: 61.5% | 系统 CPU 峰值: 33.0% | GC: 7 次，1.7 秒`。
-  - 新行插在**告警统计行之前**：`末行含 告警统计:` 是 harness 依赖的稳定锚点，不能挪。
-- **`-1` 哨兵绝不渲染成数值**。此前若照直格式化，会打出 `-1.00 ms`——用户会以为"有史以来
-  最快的一次 tick 是负数"。现在整个窗口没有该指标时写 **`本窗口未采集`**。
-- **"未采集"与"健康"在文案层强制分开**（三态，任何一种都不退化成 0）：
-  | 情形 | 输出 |
-  |---|---|
-  | 窗口内全是 `-1`（旧 CSV / 模块被禁用） | `本窗口未采集` |
-  | 有样本但凑不出可比的一对（1 条 / 相邻对全是重启） | `样本不足，无法统计增量` |
-  | 可测且增量确实为 0 | `本窗口未发生 GC` |
-  给没测的维度发 0 等于宣称它健康，是本项目写在 README 里的硬原则。
-- **GC 报窗口增量，不是最大值**。`gcCount`/`gcTime` 是进程内累计计数器，取最大值等于报
-  "开机以来一共 GC 了多少次"。增量按**相邻样本逐对累加**，而不是"末值减首值"——
-  后者在窗口跨进程重启时会把重启前那段丢掉，甚至算出负数（500 次 → 重启后 3 次 = -497）。
-  检测到计数器回退（任一字段变小）即跳过该对、把基线更新到新值，之后照常累加；
-  重启前的增量因此不丢。日报会在增量后追加 `（计数器归零 N 次…）`，让服主知道这个数字
-  没有被重启吞掉。
-- **CPU 的 `0.0` 不当哨兵**。`peakProcessCpuSince` / `peakSystemCpuSince` 只排除 `< 0`；
-  沿用堆/实体那套 `<= 0` 口径会让一台空载服务器的 CPU 永远显示"未采集"——
-  那是把健康说成盲区，与"把盲区说成健康"同样是错误结论。
-- **两个 CPU 各自判断未采集**。进程 CPU 与系统 CPU 是两个独立指标，一边有一边无
-  （如 Windows 上 `getProcessCpuLoad` 被跳过）时不共用一个结论，否则有数据的那边也被标成盲区。
-
 ### Fixed — 诊断规则 `DIAG-TPS-PERSIST` 在两个最该报警的场景失声（F-3 / F-4）
-
-> **v1.4 未发布**：本小节不在 v1.3.0 的任何发布包中，需自行从源码构建。
 
 - **F-3：`tps15m == 0` 被当成"未知"，而 0 是最坏读数**。规则的 15 分钟判据写成
   `snap.tps15m > 0 && snap.tps15m < 阈值`，但 `MetricsSnapshot` 的 `tps1m/tps5m/tps15m`
@@ -355,6 +374,29 @@
   `tpsUnavailableSnapshotNeverEntersTheRing` 与 `realZeroTpsSnapshotIsRecorded` 一正一反
   把这条约定钉在同一个测试类里，越界改动的第一现场就会有信号。
 
+### Fixed — 告警状态加载顺序
+
+- **关掉告警功能的服务器会永久虚报告警**。`AlertService.start()` 原先先 `loadState()`
+  再从磁盘回灌上次运行的告警，**之后**才检查 `alerts.enabled`——于是关掉告警的服会把
+  旧告警装进内存表，而 `onSnapshot` 入口就早退，这些告警**既不会更新也不会被解决**，
+  永久污染 `/metrics` 与 `/perfscope status` 的告警计数。
+  现在先判开关再加载；磁盘上的 `alerts.state` 不会丢（`persistState()` 以
+  `stateLoaded` 为写盘前提，跳过读取即跳过写盘）。
+
+### Fixed — 主线程 IO 与 webhook 探测超时
+
+- **告警事件落盘原先在主线程做同步文件 IO**。`AlertService.appendEventLine()` 的 9 个调用点
+  全在 `onSnapshot`（即主线程）里，写的是 `Files.write` + 原子 `Files.move`；而它的兄弟路径
+  `persistState()` 早已改为投递到单写者守护线程。事件文件没跟上，是同一类问题漏改的一处。
+  现在复用同一条写线程，关闭时同步兜底。
+- **`WebhookNotifier.probe(Duration)` 的 `timeout` 参数完全没生效**。旧实现无条件用
+  `REQUEST_TIMEOUT`（5 秒），而调用方（`/perfscope webhook test`）传的是 10 秒，于是命令
+  提示的等待上限与实际不符。现在参数真正生效，`null` / 非正数才退回默认值。
+- **同一次探测里 `url` / `secret` 是 live 读的**。`reload()` 会改写这两个 volatile，
+  若恰好落在本次探测构造请求的窗口里，就会出现"载荷用旧密钥签名、目标 URL 带新密钥"的混搭
+  （飞书/钉钉必然验签失败，报出来却是 `BAD_BODY`，指向错误方向）。现在与 `sendWithResult`
+  同一处置：整条请求链只认一次性快照。
+
 ### Added — 新测试类 `DailySummaryNewMetricsTest`（22 个用例）
 
 - 守住上面每一条的**反命题**：全 `-1` 窗口不出 `-1`/`null`/`0`、混杂窗口的最大值来自真实读数
@@ -365,8 +407,6 @@
   被改坏的地方，走反射能测但重构时会静默失效，编译不过才是想要的那个信号。
 
 ### Added — 新测试类：三条零覆盖诊断规则的直接驱动测试（45 个用例）
-
-> **v1.4 未发布**：本小节不在 v1.3.0 的任何发布包中，需自行从源码构建。
 
 `CoreRules` 的 5 条规则里，`MemoryLeakRule` 已有 12 个用例，而 `EntityHotspotRule` /
 `PlayerCapacityRule` / `MsptSpikeRule` 在 `src/test` 下**零引用**——16 个针对性变异体全部存活。
@@ -385,26 +425,201 @@
   与正确实现**结论相反**，因而具备区分力而非碰巧通过。另有 `warning - 10` 余量的等号边界
   （恰好 80% 仍命中，79% 才 clean）。
 
-### Notes — 两条记录在案、未修的行为（测试里以「已知缺陷/已知假设」标注）
+### Refactored — 测试端反射脚手架收拢为 3 个工具类（纯测试重构，零行为变化）
 
-- `hotspots.chunk-warning-threshold` 被调到 1000 时，一个恰好 1000 实体的区块仍被判
-  `critical=true`：严重线 `CHUNK_CRITICAL=500` 与命中线量纲不联动，严重度与服主自己的阈值判断相反。
-  用例 `knownDefectChunkAtTheRaisedThresholdIsCritical` **刻意断言缺陷存在**，作为「当前行为」快照；
-  修掉它时该用例会变红，届时改成断言 `!critical` 并在此段补一条 Fixed。
-- `EntityHotspotRule` 只读 `topEntityChunks.get(0)`，不自己求最大值——「列表已降序」是采集层的承诺。
-  用例 `onlyTheFirstEntryIsInspected` 喂入乱序列表（索引 0 为 150、索引 1 为 5000）得到 clean，
-  锁住这个耦合：若采集层哪天不再排序，规则会静默漏报，且不会有任何测试变红。
+- **动机**：`sun.misc.Unsafe.allocateInstance` + `setField` 三件套被复制进 11 个测试类，
+  另 3 个测试写了手写变体；`HistoryStore` 的「直写私有 ring」夹具在 4 处重复。
+  同一组踩坑注释（JDK 24 terminal deprecation、`allocateInstance` 不跑字段初始化器）
+  被抄了 11 份，且每份都略有出入，下一任只能靠 grep 猜哪份是权威。
+- 新增 `src/test/java/cn/perfscope/support/TestObjects.java`：全仓唯一的 `Unsafe` 入口
+  （`allocate` / `setField` / `getField` / `getInt` / `getStaticInt` / `invoke`）。
+  类注释钉住三条硬约束：禁用 `objectFieldOffset`/`putObject`（JDK 24 terminal deprecation，
+  `--sun-misc-unsafe-memory-access=deny` 直接抛异常，写 final 实例字段一律 `Field.set`）；
+  `allocateInstance` 只给构造器真的依赖 Bukkit 的 5 个类用（`PerfScope` / `AlertService` /
+  `WebhookNotifier` / `DiagnosticEngine` / `MetricsCollector`），
+  `HistoryStore` / `ConfigManager` / `HistoryFileStore` 的构造器只赋字段、**不需要**它；
+  反射夹具依赖 classpath 构建（无 `module-info.java`），附 `assertReflectionUsable()` 自检。
+- 新增 `HistoryFixtures.java`：`seeded(cm, samples)`（既有 5 处夹具的等价替代，调用方零改动）
+  与 `recorded(cm, snaps)`（走真实 `record()`，只把非 final 的 `lastRecordMs` 归零放行节流——
+  TPS 不可用守卫、GC `-1` 哨兵、乱序重排首次可被真实执行）。
+  `recorded` 的注释警告：`record()` 的 24h 淘汰用**墙钟**，固定 epoch 时间戳会被整体淘汰、
+  `size()==0`，测试"通过"却什么都没测；需要"很久以前"的窗口必须用 `seeded`。
+- 新增 `AlertFixtures.java`：只抽 `initMessages()` / `barePlugin()` / `configManager()` 三块通用装配；
+  `AlertServiceStateMachineFixture` 保留为薄封装（`initMessages()` 改为委托），
+  4 个调用方零改动。该夹具里针对具体状态机场景的构造逻辑（14 个 `final` 容器、
+  时钟种子、`InlineExecutor`）**未**搬动。
+- 13 个文件改用统一工具类，共减少 454 行；新增 3 个工具类 419 行。
+  `mvn test` 前后均为 **329 个用例全过**，逐类用例数与重构前逐字一致。
+- 顺带产出（未修，仅记录）：`DiagnosticEngineContractTest` 原来的 `getField` 是死代码
+  （声明后 0 次调用），已随脚手架一起删除；`HistoryFixtures.recorded` 目前尚无测试调用。
 
-### v1.4 未发布 — 告警状态加载顺序
+### Added — `HistoryStore` 三个访问器补测试（此前零覆盖）
 
-> **v1.4 未发布**：本小节不在 v1.3.0 的任何发布包中，需自行从源码构建。
+- **`capacity()` / `windowMs()` / `gaps()` 此前没有任何测试**。验证方式不是"读代码觉得没测"，
+  而是把 `gaps()` 的阈值算法改烂（`threshold` 恒为 `1`）后跑全量：**329 个用例一个都没红**。
+  那段代码坏了不会有任何信号。
+- 新增 `HistoryStoreAccessorsTest`（11 个用例），锁住四处边界：
+  - **容量 1440 与采样间隔解耦**。断言具体数字而非 `> 0`——这个数字是契约：
+    `CAPACITY` 曾由 `86400 / intervalSec` 反推，"把间隔调大"会连带把容量改小
+  - **缺口判据是严格大于 2× 期望间隔**。恰好 2× 不算缺口：采集抖动会让间隔偶尔略超，
+    用 `>=` 会把每次轻微抖动都报成缺口
+  - **期望间隔乘 2 溢出不得变成负阈值**。超出 `Long.MAX_VALUE / 2` 时钳到
+    `Long.MAX_VALUE`（永不报缺口），否则阈值翻负、每个相邻对都被报成缺口
+  - **`Gap.durationMs()` 不返回负数**。`Gap` 是公开 record，可被任意构造；
+    乱序时间戳（NTP 回拨）能造出 `end < start`，没有 `Math.max(0,…)` 兜底就会污染下游求和
+- 变异验证（本人实测）：`CAPACITY` 1440→720、`>`→`>=`、去掉溢出保护、去掉
+  `durationMs` 下限，**四个变异全部被杀**。
+- **记录一处当时「写了没接线」的能力**：`gaps()` 的 javadoc 说它用于
+  「`/perfscope trend` 输出数据缺口 N 处」，但补测试时 `trend` 命令并没有调用它，
+  `messages.yml` 里也没有任何缺口相关文案键。这套能力自 v1.2.1（`33f2e95`）引入起
+  一直没接过线。补测试的价值不在"证明它现在对"，而在于把它锁住：将来谁要接线，
+  改坏了会立刻知道。**本版随后把它接上了**（见上面「`/perfscope trend` 接上数据缺口」一节）。
 
-- **关掉告警功能的服务器会永久虚报告警**。`AlertService.start()` 原先先 `loadState()`
-  再从磁盘回灌上次运行的告警，**之后**才检查 `alerts.enabled`——于是关掉告警的服会把
-  旧告警装进内存表，而 `onSnapshot` 入口就早退，这些告警**既不会更新也不会被解决**，
-  永久污染 `/metrics` 与 `/perfscope status` 的告警计数。
-  现在先判开关再加载；磁盘上的 `alerts.state` 不会丢（`persistState()` 以
-  `stateLoaded` 为写盘前提，跳过读取即跳过写盘）。
+### Notes — 两条记录在案的行为（一条已修，一条仍是前提）
+
+- **F-5 的旧行为快照（已修）**：`hotspots.chunk-warning-threshold` 被调到 1000 时，一个恰好
+  1000 实体的区块曾被判 `critical=true`（严重线写死 `CHUNK_CRITICAL=500`，与命中线量纲不联动）。
+  当时的用例 `knownDefectChunkAtTheRaisedThresholdIsCritical` **刻意断言缺陷存在**，作为
+  「当前行为」快照。本版按约定把它改名为 `chunkAtTheRaisedThresholdIsNoLongerCritical`
+  并断言 `!critical`，补测试时留下的这条记录至此闭合。
+- **仍然成立的前提**：`EntityHotspotRule` 只读 `topEntityChunks.get(0)`，不自己求最大值——
+  「列表已降序」是采集层的承诺。用例 `onlyTheFirstEntryIsInspected` 喂入乱序列表
+  （索引 0 为 150、索引 1 为 5000）得到 clean，锁住这个耦合：若采集层哪天不再排序，
+  规则会静默漏报，且不会有任何测试变红。本版**没有**改这个耦合。
+
+### Notes — 本文件的句末语气词已清理
+
+- **本文件的句末语气词已清理**（v1.4，319 处）。产品文案不带语气词这条规则此前只覆盖
+  README / FAQ / SECURITY，CHANGELOG 一直是例外。现按可判定的机械规则处理：
+  仅删除处于 `。` 与 `：` 之前的语气词，其余 12 处属于**被引述的内容**而非作者口癖
+  （控制台回放、被修掉的消息串原文、i18n 可配置化决策），全部保留 —— 删掉它们会伪造历史。
+  验证：行数 2892 不变，字节差 967（= 319×3 + 10 个尾随空格），剥离语气词与空白后
+  与前一版逐行比对**差异 0 行**，代码围栏/标题/表格结构不变量全部不变。
+
+### Docs — 两份 README 的配置示例全部过期（照抄即被误报淹没）
+
+- **阈值差 10 倍**：`entities` 示例写 `2000/3000`、`chunks` 写 `1500/2500`，而随包默认已是
+  `20000/30000` 与 `10000/15000`（v1.4 重标定）。`worlds` 段三段示例同样停留在旧值。
+- **告警开关反了**：`alerts.enabled` 示例写 `true`，随包默认自 v1.4 起是 `false`——读者以为告警
+  开着，其实关着；反之照抄示例又会被首装告警墙淹没。
+- 处理方式：配置示例改为**随包默认值的逐字副本**，并在示例上方点明这一点；同时新增
+  「`entities` / `chunks` 默认值是中服假设、小服必须下调」的说明，`worlds` 段显式标注为示例。
+- 同时补齐两份文档都缺的 `alerts.daily-summary.timezone`（v1.3.0 已发布的键，容器默认 UTC 会让
+  `08:00` 变成北京时间 16:00）与 `general.update_interval` 的 5–1200 合法区间。
+
+### Docs — Pterodactyl 流程漏了 `prometheus.port`，面板服用户抓一个没人监听的端口
+
+- 原四步只写「加分配 → 改 bind → 抓 `<节点IP>:<端口>`」，没有一步说要改 `prometheus.port`。
+  实际监听端口由该键决定，而 Wings 只转发「分配里记录的那个端口」；两者不一致时外部表现为
+  `connection refused`，而进容器 `curl 127.0.0.1:8940` 又是通的——最难排查的那种组合。
+- 中英两份流程都补上「把 `prometheus.port` 改成分配到的端口」，并注明分配端口恰好是 8940 时不用改。
+
+### Docs — 补齐 README 缺失的功能入口
+
+- **`perfscope_alert{key,module}` 指标**：`MetricsTextRenderer` 早已输出，指标表却没有。补进表格，
+  并解释三条反直觉设计——级别走值不走标签（否则 `ALERTS_FOR_STATE` 归零、`for: 5m` 永不触发）、
+  健康也输出 0（否则收不到 `resolved`，也无法用 `absent()` 区分没告警与采集挂了）、不可判定的维度
+  不发 0（给没测的维度发 0 等于宣称它健康）。附一条 `absent()` 规则示例。
+- **`/perfscope webhook [status|test]`**：命令表补入，并说明失败判定口径（三个国内平台业务失败时
+  也返回 HTTP 200，错误码在响应体里，所以「HTTP 200」≠ 成功——这正是 `test` 存在的理由）与
+  各通道的客户端限流间隔。
+- **`/perfscope alerts [N]`**：v1.3.0 起就漏在命令表外的已发布命令，补入。
+- **Prometheus 端点**：加进「功能特性」与「可监测的全部性能指标」两张清单。
+
+### Docs — 全量诊断示例与代码不符
+
+- 缺 `服务端: <名称>` 行；`实体总数:` 实际是 `总实体数:`；`2天 6时 35分 22秒` 实际最多三级
+  （`2 天 6 时 35 分`）；MSPT 数值与单位间有空格（`15.23 ms`）。
+
+### Docs — 其他文档错误
+
+- `README-EN.md` 末尾一段「Reproduce: `tools/perfscope-jfr-overhead.ps1`」**出现两遍**（一份带
+  6.46% 数据、一份是更旧的短版），属坏合并残留，已删掉旧的那份。
+- `README-EN.md` 英文界面里引用了中文运行时字符串：`"（级别升级）"` → `" (level escalated)"`、
+  `"配置校验：…设置倒置，已回退默认值"` → 对应英文文案（`AlertMessages` / `ConfigMessages`）。
+- 「每日摘要 v1.2 已有的指标」标注错：p95 TPS 与低于阈值累计时长实为 **v1.2.1** 引入，
+  最低 TPS 三项从 v1.2.0 起（对照 `DailySummaryService` 的 v1.2.0 / v1.2.1 两版）。
+- 补 `alerts.webhook.secret` 的空白陷阱（插件刻意不 trim，两端空格导致验签失败，平台只回
+  「签名不匹配」）。
+
+### Docs — 容器 / 面板服的抓取说明
+
+- **删掉一句错的配置注释**。原 `config.yml` 写着「面板服（MCSManager / Pterodactyl）
+  常无法开放入站端口，那种环境用 push 模式更合适」——这句话是错的，而且指向一个
+  不存在的功能。
+  - **前提是错的**：Pterodactyl/Wings 通过 Docker `HostConfig.PortBindings` 真的发布
+    allocation 端口（源码 `environment/docker/container.go`），`DockerBindings()` 还会把
+    `127.0.0.1` 的绑定改写到 `pterodactyl0` 网桥（默认 `172.18.0.1`）。加端口是管理面板里
+    约三次点击。MCSManager 同样发布端口；AMP 实例通常以原生进程运行、根本没有容器网络。
+    抽样 93 份服务商文档，写死「不支持额外端口」的约 2%。
+  - **push 模式不存在**，也没有加入计划。
+- **新增「容器 / 面板服：先把 bind 改掉」小节**（README 中英双语）。真正的头号故障是
+  **绑错地址**，不是「开不了端口」：容器里 `bind: 127.0.0.1` 指的是容器自己的回环，
+  容器外的 Prometheus 永远连不上。上游同类插件的三个 issue（#36 / #123 / #275）
+  **全是这一个原因**。
+  - 给出判定方法（外面 `connection refused`、容器内 `curl 127.0.0.1` 却 200，这个反差就是证据）、
+    按部署方式的对照表、Pterodactyl 的三步操作、以及两个反直觉点
+    （`allocation_limit` 为 `NULL` 时客户端看不到按钮；抬高上限后还需面板全局开启
+    「Automatic Allocation Creation」，该项默认关闭；Wings 绑的是分配项里记录的那个 IP
+    ——可能是具体地址也可能是 `0.0.0.0`，记的是具体非回环地址时宿主机自己的 `localhost`
+    反而可能不通）。
+  - 同时写明「设了 token 却忘了带 `Authorization: Bearer` 头」的症状：插件返回 401，
+    而 Prometheus 把任何非 200 都记成抓取失败，表现为 target 显示 DOWN、无可读原因，
+    看着像网络故障。另有 `--network host` 与 `kubectl port-forward` 两个例外，
+    这两种情况 `127.0.0.1` 就够用，不必放大 bind 白白丢掉回环保护。
+  - 对确实无法开端口的那约 2%，明确写「本插件没有 push 模式，也没有计划」，
+    并指向已有的 webhook 告警作为替代——告警由服务器主动发出，不需要入站端口。
+
+### Docs — 版本口径修正（README / CHANGELOG / versions）
+
+> 起因：README / CHANGELOG 一边把「最新正式版」写成 `1.2.1`，一边用大段篇幅描述
+> Prometheus 端点、`/perfscope webhook` 与企业微信 / 飞书 / 钉钉——而这些**不在任何
+> 已发布的包里**（tag `v1.3.0` 与 `versions/PerfScope-1.3.0.jar` 都没有）。同时 README
+> 没写「最新正式版是 1.3.0」。对一个监测插件来说，文档承诺了下载不到的软件就是信任问题，
+> 本次把这些口径全部对齐。
+
+- **README 安装段（中英双语）**：`> **下载**` 行的「最新正式版 v1.2.1」改为 **v1.3.0**
+  （`PerfScope-1.3.0.jar`），并在其下加一行「本文档同时描述了尚未发布内容」的总说明。
+- **README 的 v1.4 功能小节**：Prometheus / Grafana 接入节、配置段的 `webhook.secret` /
+  `wecom|feishu|dingtalk` 通道、功能列表的 Webhook 推送条目，当时均加「未发布」标记，
+  写明不在 1.3.0 任何发布包中、需自行从源码构建。
+- **CHANGELOG 头部**：`1.2.1（当前正式版）` 改为 `1.3.0（当前正式版）`，并注明最新 tag 与
+  `versions/` 归档均为 1.3.0。
+- **CHANGELOG 的 1.3.0 汇总节**：把混装的 v1.4 小节（逐告警 Prometheus 指标、企业微信 /
+  飞书 / 钉钉通道、webhook 自检 / 限流 / 计数口径 / 投递判定、容器抓取文档）显式标为
+  未发布，与已发布内容区分；顶部加总说明。
+- **`versions/README.md`**：修正了三处与归档 JAR 实际内容不符之处。
+  - 1.3.0 条目写着「11k 区块实测 p95 54→29ms、超 tick 周期 7.6%→0%」——这组数字在仓库
+    任何实测记录里都找不到。真实 A/B（`docs/06-tasks/research/v140-01-hotspot-sharding.md`
+    §4.2，11,047 区块空闲服、同一 JAR 只改 `scan-shards`）是 **p95 33→30ms（噪声内）、
+    max 78→41ms、超 1 tick 周期 2/300→0/300**。已改为实测值。
+  - 键数写成 **724**，但 `check-i18n.mjs` 对 tag `v1.3.0` 源码实测是 **725**（`docs/…/
+    v130-07-release-materials.md:34` 也记 724，属同源笔误）。已改为 725 并标注来源。
+  - 表格每行的 GitHub Releases 链接单独占一行且无 `|`，markdown 会把它渲染在表格外。
+    已合并进同一单元格。
+  - 补上「1.3.0 归档早于 v1.4 的 Prometheus 工作」与「为什么 `target/` 里也有一个同名
+    1.3.0 但内容不同」两节；英文段此前仍推荐 1.2.0，一并更新为 1.3.0。
+
+- **发布时收尾（已完成）**：上面几条在 1.4.0 发布时全部反过来——README 各节的「未发布」提示
+  已移除，下载段改为 `PerfScope-1.4.0.jar`；CHANGELOG 里那些混装小节已从 `[1.3.0]` 汇总段
+  移出，独立成 `[1.4.0]` 段。1.3.0 的历史记录本身未改动。
+
+### Notes — 兼容性（1.3.0 → 1.4.0）
+
+- **历史 CSV 从 7 列扩到 12 列**（追加 `msptMax` / `cpuProcess` / `cpuSystem` / `gcCount` / `gcTime`）。
+  读取端按**列名**映射，只要求 7 个锚列齐全；旧文件缺的列一律返回 `-1` 哨兵而不是 0，
+  所以升级当天的旧表头 + 新行也能正确读出。写入端表头为 `# v3`，旧文件不会被改写。
+- 所有新增配置键均为**追加**，旧 `config.yml` 可直接使用，缺失键走默认值。
+- `plugin.yml` 版本号由 Maven filtering 从 `pom.xml` 注入，无需手工同步。
+- 1.3.0 的行为变更（平台守卫、`update_interval` 钳制 5–1200、`messages.yml` 生成方式、
+  默认语言 en、LICENSE/NOTICE 进 jar）在 1.4.0 中保持不变。
+
+---
+
+## [1.3.0] — 2026-11-10 — 变更汇总（面向使用者）
+
+> 本节是 1.3.0 这一版**自身**的变更汇总，内容与其发布包一致，按影响面从大到小排列。
+> 过程性记录在上层工作区 `docs/`，不在本仓库。发表于 tag `v1.3.0`，此后累积的改动见上方 `[1.4.0]`。
 
 ### Fixed — 会让用户看到错误结论的问题
 
@@ -461,89 +676,8 @@
   与界面语言不一致。现在全部改走消息键表（新增 36 个键），`language: en` 下控制台
   零中文；`language: zh` 的输出与改造前逐字一致。
 
-### v1.4 未发布 — 企业微信 / 飞书 / 钉钉群机器人
-
-> **v1.4 未发布**：本小节不在 v1.3.0 的任何发布包中（归档 JAR 的 `config.yml` 里
-> `alerts.webhook.type` 只有 `discord | onebot`，没有 `secret` 键），需自行从源码构建。
-
-- **支持企业微信 / 飞书 / 钉钉群机器人**（`alerts.webhook.type` 新增 `wecom` / `feishu` / `dingtalk`）。
-  飞书与钉钉支持可选的 `alerts.webhook.secret` 加签。
-  - 三种平台各自的请求格式与判据：企业微信 `msgtype`+`text.content`（2048 **字节**）、
-    飞书 `msg_type`+`content.text`（签名为反直觉的"key=待签名串、数据为空"构造，时间戳用**秒**）、
-    钉钉 `msgtype`+`text.content`（签名拼在 URL query，时间戳用**毫秒**）。
-  - 老配置零改动可用：`type: discord` / `type: onebot` 行为不变，缺 `secret` 键走默认空串。
-
-### v1.4 未发布 — webhook 投递结果判定 / 自检 / 限流
-
-> **v1.4 未发布**：本小节不在 v1.3.0 的任何发布包中，需自行从源码构建。
-
-- **webhook 投递失败却显示成功**（本批最重要的修复）。企业微信 / 飞书 / 钉钉在**业务失败时也返回
-  HTTP 200**，错误码在响应体里；而旧实现用 `BodyHandlers.discarding()` 丢掉响应体、只看
-  `statusCode >= 300`，于是这三家的每一次失败都被当成成功。
-  - **这个 bug 在 OneBot 上早已存在**：OneBot v11 的 `/send_private_msg` 恒定返回 HTTP 200，
-    成败写在 `retcode` 里。也就是说配错 OneBot token 的用户从 v1.2 起就没收到过任何告警，
-    也没有任何日志提示。
-  - 现在按平台读取业务码：`errcode == 0`（企业微信/钉钉）、`code == 0`（飞书）、
-    `retcode == 0` 或 `status == ok/async`（OneBot）。
-  - **解析不出内容一律判失败**，不再"看不懂就当成功"——反向代理返回 HTTP 200 的 HTML 登录页
-    会让投递永久显示正常，这正是要避免的。
-- **OneBot 侧缺少 CQ 码注入防护**。Discord 早就加了 `allowed_mentions.parse = []` 防空 `@everyone`，
-  但 OneBot 分支没有对应措施：实现会把字符串 `message` 当 CQ 码解析，告警正文里的世界名/MOTD
-  若含 `[CQ:at,qq=all]` 就会 **@ 全体成员**。现已加 `auto_escape: true`。
-- **续读响应体会放大内存**。改用读取响应体后补了 4 KB 上限——旧实现的 `discarding()` 顺带保证了
-  不会因远端返回巨大响应而 OOM，改成读取后这个保护必须显式补回。
-
-#### webhook 自检与限流
-
-- **`/perfscope webhook status | test`**。三个国内平台的失败模式全是静默的（HTTP 200 + 业务码），
-  服主唯一的观测渠道是"告警群一直没消息"，而"服务器健康所以没告警"和"告警根本没送到"看起来一样。
-  - `status` 展示通道类型、是否加签、最近一次投递结果、以及被限流丢弃的条数。
-  - `test` 真的发一条探测消息（正文带 `test message - safe to ignore` 标记），
-    并回报 HTTP 状态 + 平台业务码 + **可执行的处置建议**（不是只报错误码）。
-  - 结果同时写控制台日志：RCON 会话执行完命令就断开，之后 `sendMessage` 不会送达——
-    只发消息会让这个命令在 RCON 下表现为"没反应"，而那正是它要消灭的东西。
-- **客户端限流**。企业微信与钉钉都是 20 条/分钟，**钉钉超限还会封禁 10 分钟**——
-  一次告警风暴会让服主在最需要告警的时候静默 10 分钟。
-  - 间隔取值：企业微信/钉钉 4000ms（15 条/分）、飞书 700ms（约 85 条/分）、Discord 2000ms、
-    OneBot 不限。
-  - **不做突发容量**：钉钉的限额是"任意 60 秒窗口 ≤ 20 条"，容量 C、间隔 T 的最坏窗口是
-    `C + floor(60000/T)`。实测 3000ms + 容量 2 就是 22 条，会触发封禁；4000ms 才留出余量。
-  - 被丢弃的条数在 `/perfscope webhook status` 可见——这是服主发现自己告警被节流的唯一信号。
-
-#### webhook 计数口径
-
-- **`webhookQueuedToday` 把没发出去的消息也记成"已排队"**。旧代码用
-  `webhookQueued = wn.isReady()` 判断，而 `isReady()` 只回答"配置齐了没有"——
-  被限流丢弃、序列化失败、URL 构建失败时它仍为 true。现在改用 `send()` 的返回值。
-- **一条 digest 会把计数加 N**。`webhookQueuedToday++` 原先在按告警条数循环的循环体内，
-  一次 HTTP 请求覆盖 8 条告警就加 8。计数单位应是"发出的消息条数"，已移出循环。
-  （`pushOkToday` 仍按告警条数计——两者刻意不同：一个统计"处理了多少条告警"，
-  一个统计"发出了多少条消息"。）
-
-### v1.4 未发布 — Prometheus 指标端点
-
-- **Prometheus 指标端点**（`prometheus.*`，默认关闭）。用 JDK 自带的
-  `com.sun.net.httpserver` 实现，**零第三方依赖**、不增加 jar 体积，让指标脱离游戏内命令
-  进入你已有的监控栈（Prometheus 抓取 → Grafana 看板）。
-  - 默认 `127.0.0.1:9940/metrics`：只听回环。改成 `0.0.0.0` 时启动会打 WARNING，
-    因为端点会暴露在线玩家数、世界名与插件数量。
-  - 可选 `auth-token`：非空时要求 `Authorization: Bearer <token>`，错误令牌返回 401
-    且响应体不含任何版本信息。
-  - 除 TPS/MSPT/内存/实体/区块等基础指标外，还导出**本插件独有的诊断信号**：
-    `perfscope_module_available`（哪个采集模块坏了）、`perfscope_alerts_active`、
-    `perfscope_alerts_suspended`、`perfscope_collector_degraded`、
-    `perfscope_snapshot_age_seconds`（区分"服务器死了"和"指标冻住了"）。
-  - 未采集的指标**整行不输出**，不输出 `-1`——缺行让 Grafana 显示 gap，
-    比画一条贴底的假线诚实。
-  - Folia 上 `perfscope_build_info` 带 `tps_scope="global_region"` 标签，
-    明示那里的 TPS 只是 global region 的局部值。
-  - 端口被占、`jdk.httpserver` 被裁剪、绑定权限不足——一律只记一条 warning 并跳过，
-    **绝不影响插件本体启动**。
-
 ### Added — 新配置键
 
-- `prometheus.enabled` / `bind` / `port` / `path` / `server-id` / `auth-token`（默认全关、
-  `127.0.0.1:9940/metrics`、无鉴权；**v1.4 未发布**，不在 v1.3.0 发布包中）。
 - `alerts.refire-min-interval-seconds`（默认 60）：复燃识别窗口，`0` = 关闭复燃识别。
 - `hotspots.scan-shards`（默认 10）：热点分区增量扫描的分片数，`1` = 关闭分片（旧的一次性全遍历）。
 - `general.language`、`cpu.hysteresis_margin`、`alerts.flap-window-seconds`、`alerts.repush-delta`
@@ -579,12 +713,6 @@
 
 ### Notes — 兼容性
 
-- **本文件的句末语气词已清理**（v1.4，319 处）。产品文案不带语气词这条规则此前只覆盖
-  README / FAQ / SECURITY，CHANGELOG 一直是例外。现按可判定的机械规则处理：
-  仅删除处于 `。` 与 `：` 之前的语气词，其余 12 处属于**被引述的内容**而非作者口癖
-  （控制台回放、被修掉的消息串原文、i18n 可配置化决策），全部保留 —— 删掉它们会伪造历史。
-  验证：行数 2892 不变，字节差 967（= 319×3 + 10 个尾随空格），剥离语气词与空白后
-  与前一版逐行比对**差异 0 行**，代码围栏/标题/表格结构不变量全部不变。
 - 所有新增配置键均为**追加**，旧 `config.yml` 可直接使用；缺失键走默认值。
 - `plugin.yml` 版本号由 Maven filtering 从 `pom.xml` 注入，无需手工同步。
 - bStats 匿名统计项目 ID 已注册（35061），**数据已实际上报**；上报内容为聚合分布，
@@ -592,68 +720,6 @@
 - **Windows 上进程 CPU 不再可用**（见上方 Changed）。判定与实测理由集中在
   `ServerCompat.isProcessCpuReliable()`；Linux / macOS 不受影响。
 - 本次性能结论与完整证据链见 `docs/06-tasks/research/v140-01-cpu-async-blocking.md`。
-
-### v1.4 未发布 — 文档：容器 / 面板服的抓取说明
-
-> **v1.4 未发布**：本节描述的是 v1.4 的 Prometheus 部署文档（README 中英双语），
-> 同样不在 v1.3.0 的任何发布包中。
-
-- **删掉一句错的配置注释**。原 `config.yml` 写着「面板服（MCSManager / Pterodactyl）
-  常无法开放入站端口，那种环境用 push 模式更合适」——这句话是错的，而且指向一个
-  不存在的功能。
-  - **前提是错的**：Pterodactyl/Wings 通过 Docker `HostConfig.PortBindings` 真的发布
-    allocation 端口（源码 `environment/docker/container.go`），`DockerBindings()` 还会把
-    `127.0.0.1` 的绑定改写到 `pterodactyl0` 网桥（默认 `172.18.0.1`）。加端口是管理面板里
-    约三次点击。MCSManager 同样发布端口；AMP 实例通常以原生进程运行、根本没有容器网络。
-    抽样 93 份服务商文档，写死「不支持额外端口」的约 2%。
-  - **push 模式不存在**，也没有加入计划。
-- **新增「容器 / 面板服：先把 bind 改掉」小节**（README 中英双语）。真正的头号故障是
-  **绑错地址**，不是「开不了端口」：容器里 `bind: 127.0.0.1` 指的是容器自己的回环，
-  容器外的 Prometheus 永远连不上。上游同类插件的三个 issue（#36 / #123 / #275）
-  **全是这一个原因**。
-  - 给出判定方法（外面 `connection refused`、容器内 `curl 127.0.0.1` 却 200，这个反差就是证据）、
-    按部署方式的对照表、Pterodactyl 的三步操作、以及两个反直觉点
-    （`allocation_limit` 为 `NULL` 时客户端看不到按钮；抬高上限后还需面板全局开启
-    「Automatic Allocation Creation」，该项默认关闭；Wings 绑的是分配项里记录的那个 IP
-    ——可能是具体地址也可能是 `0.0.0.0`，记的是具体非回环地址时宿主机自己的 `localhost`
-    反而可能不通）。
-  - 同时写明「设了 token 却忘了带 `Authorization: Bearer` 头」的症状：插件返回 401，
-    而 Prometheus 把任何非 200 都记成抓取失败，表现为 target 显示 DOWN、无可读原因，
-    看着像网络故障。另有 `--network host` 与 `kubectl port-forward` 两个例外，
-    这两种情况 `127.0.0.1` 就够用，不必放大 bind 白白丢掉回环保护。
-  - 对确实无法开端口的那约 2%，明确写「本插件没有 push 模式，也没有计划」，
-    并指向已有的 webhook 告警作为替代——告警由服务器主动发出，不需要入站端口。
-
-### v1.4 未发布 — 文档：版本口径修正（README / CHANGELOG / versions）
-
-> 起因：README / CHANGELOG 一边把「最新正式版」写成 `1.2.1`，一边用大段篇幅描述
-> Prometheus 端点、`/perfscope webhook` 与企业微信 / 飞书 / 钉钉——而这些**不在任何
-> 已发布的包里**（tag `v1.3.0` 与 `versions/PerfScope-1.3.0.jar` 都没有）。同时 README
-> 没写「最新正式版是 1.3.0」。对一个监测插件来说，文档承诺了下载不到的软件就是信任问题，
-> 本次把这些口径全部对齐。
-
-- **README 安装段（中英双语）**：`> **下载**` 行的「最新正式版 v1.2.1」改为 **v1.3.0**
-  （`PerfScope-1.3.0.jar`），并在其下加一行「本文档同时描述了尚未发布的 v1.4 内容」的
-  总说明。
-- **README 的 v1.4 功能小节**：Prometheus / Grafana 接入节、配置段的 `webhook.secret` /
-  `wecom|feishu|dingtalk` 通道、功能列表的 Webhook 推送条目，均加「**v1.4 未发布**」
-  标记，写明不在 v1.3.0 任何发布包中、需自行从源码构建。
-- **CHANGELOG 头部**：`1.2.1（当前正式版）` 改为 `1.3.0（当前正式版）`，并注明最新 tag 与
-  `versions/` 归档均为 1.3.0。
-- **CHANGELOG 的 1.3.0 汇总节**：把混装的 v1.4 小节（逐告警 Prometheus 指标、企业微信 /
-  飞书 / 钉钉通道、webhook 自检 / 限流 / 计数口径 / 投递判定、容器抓取文档）显式标为
-  「v1.4 未发布」，与已发布内容区分；顶部加总说明。
-- **`versions/README.md`**：修正了三处与归档 JAR 实际内容不符之处。
-  - 1.3.0 条目写着「11k 区块实测 p95 54→29ms、超 tick 周期 7.6%→0%」——这组数字在仓库
-    任何实测记录里都找不到。真实 A/B（`docs/06-tasks/research/v140-01-hotspot-sharding.md`
-    §4.2，11,047 区块空闲服、同一 JAR 只改 `scan-shards`）是 **p95 33→30ms（噪声内）、
-    max 78→41ms、超 1 tick 周期 2/300→0/300**。已改为实测值。
-  - 键数写成 **724**，但 `check-i18n.mjs` 对 tag `v1.3.0` 源码实测是 **725**（`docs/…/
-    v130-07-release-materials.md:34` 也记 724，属同源笔误）。已改为 725 并标注来源。
-  - 表格每行的 GitHub Releases 链接单独占一行且无 `|`，markdown 会把它渲染在表格外。
-    已合并进同一单元格。
-  - 补上「1.3.0 归档早于 v1.4 的 Prometheus 工作」与「为什么 `target/` 里也有一个同名
-    1.3.0 但内容不同」两节；英文段此前仍推荐 1.2.0，一并更新为 1.3.0。
 
 ### 升级注意 — 从 1.2.x 升到 1.3.0
 
@@ -677,7 +743,6 @@
 ---
 
 ## 1.3.0 流水账索引（按时间倒序）
-
 
 > 上一节是**面向使用者的汇总**。下面 13 节是**开发流水账**（按 Keep a Changelog 的硬规则保留，
 > 供追溯"改了什么、为什么改、验证到哪一步"）。它们原挂在 `[Unreleased]` 下，随 v1.3.0
@@ -1811,7 +1876,6 @@ TPS/MSPT——比不显示更误导，运维看不到掉线信号。
   `共 N 条（旧→新）；当前活跃 A 条，模块不可用转 unknown B 条` →
   `N entries (oldest first); A currently active, B suspended because their module is unavailable`；
   ActionBar 的 6 段由 `" | 玩家: "` 硬拼接改为 `cmd.actionbar.segment` + `cmd.unit.*` 组合。
-
 
 ---
 

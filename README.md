@@ -27,7 +27,7 @@
 - **按世界独立告警** —— 各世界可覆盖实体告警阈值
 - **阈值告警主动推送**（v1.1 新增，v1.2 收敛） —— 告警触发时推送控制台 + 在线持有 `perfscope.alert` 权限的玩家；默认需连续 3 个采集周期超标才首次推送（防抖，可配）；同一告警默认 300 秒冷却防刷屏；级别升级（警告→严重）只推一条"（级别升级）"消息、不受冷却限制；故障恢复时发送恢复通知；可在 `config.yml` 的 `alerts` 段配置
 - **Webhook 推送**（v1.2 新增，v1.4 扩展） —— 告警 / 恢复 / 每日摘要可推送到 Discord、
-  QQ OneBot；v1.4 起再支持**企业微信 / 飞书 / 钉钉**群机器人（该三通道未发布，见下）。全异步发送，失败只记日志不阻塞。
+  QQ OneBot；v1.4 起再支持**企业微信 / 飞书 / 钉钉**群机器人（飞书与钉钉支持加签）。全异步发送，失败只记日志不阻塞。
 - **每日摘要**（v1.2 新增，v1.4 扩展） —— 每天固定时刻推送概况；若配置时刻服务端恰好停机，启动后会自动补发当天一次。v1.4 起从 3 行扩到 5 行：
   - 最低 TPS（含时刻）/ p95 TPS / 低于阈值累计时长 / 峰值实体 / 峰值内存 / 告警统计（v1.2.1 已有）；
   - **MSPT 尖峰**（含时刻）—— 一次 500ms 的卡顿在 `msptAvg` 里会被 60 秒窗口摊薄到几乎不动，尖峰才是玩家实际感受到的东西；
@@ -103,8 +103,6 @@ PerfScope 自 v1.1 起专注 **Paper 系**服务端，深度依赖 Paper 原生 
 
 ### Webhook 自检（v1.4）
 
-> **v1.4 未发布**：`/perfscope webhook` 不在 v1.3.0 的任何发布包中，需自行从源码构建。
-
 企业微信 / 飞书 / 钉钉**在业务失败时同样返回 HTTP 200**，错误码放在响应体里（`errcode` / `code` / `retcode`）。配置写错、签名错、机器人被移出群，从 HTTP 层看全是"成功"——服主唯一的观测渠道是"群里一直没消息"，而"没有告警因为服务器很健康"和"告警根本没送到"看起来完全一样。这就是 `test` 子命令存在的理由：它把"能不能通"从"等一次真实故障"变成随时可查。
 
 - `status` 不发起任何网络请求，只看上次结果；`test` 会真的往群里发一条消息（同一发送者 10 秒内只能发一次，结果同时写控制台——RCON 会话可能已断开）。
@@ -148,9 +146,9 @@ GC: 42 次 / 5.23 秒
 
 ## 安装
 
-> **下载**：[GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest)（最新正式版 **v1.3.0**，`PerfScope-1.3.0.jar`）
+> **下载**：[GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest)（最新正式版 **v1.4.0**，`PerfScope-1.4.0.jar`）
 
-> **版本注意**：本文档同时描述了尚未发布的 **v1.4** 内容（Prometheus 指标端点、`/perfscope webhook status|test`、企业微信 / 飞书 / 钉钉 webhook 通道）。这些**不在 v1.3.0 的任何发布包中**，要用需自行从源码构建；相关小节另有标注。
+> **版本注意**：本文档描述的就是 **v1.4.0** 的行为——Prometheus 指标端点、`/perfscope webhook status|test`、企业微信 / 飞书 / 钉钉 webhook 通道均在 1.4.0 发布包内。`alerts.enabled` 默认值与 `entities` / `chunks` 默认阈值在本版有变更，**升级前请先读下方「升级注意」**。
 
 1. 下载最新版本的 JAR 文件
 2. 放入服务器的 `plugins/` 目录
@@ -166,11 +164,22 @@ GC: 42 次 / 5.23 秒
 >
 > **两层都不会上传**：玩家名、世界名、坐标、聊天内容、插件列表、配置文件内容、告警文本、服务器地址。可在 `plugins/bStats/config.yml` 或本插件 config.yml 的 `general.bstats-enabled: false` 关闭。
 
+## 升级注意（1.3.0 → 1.4.0）
+
+从 1.3.0 升级到 1.4.0 时，**只有一项默认值翻转会影响到你的行为**：
+
+- **`alerts.enabled` 的随包默认值由 `true` 改为 `false`**。告警推送（控制台 / 游戏内 / webhook）从"默认开启"改为"选择加入"。采集、`/perfscope` 全量诊断、报告、历史、Prometheus 端点不受影响。
+  - **你已有的配置不会被改写**：该键从你的 `config.yml` 读取，只在**缺键**时取默认值，不与随包默认合并。升级前写过 `enabled: true` 的服继续告警。
+  - **可能受影响的情况**：删过 `config.yml` 让它重新生成的服；新装后直接沿用默认值的服。
+  - **怎么确认**：启动日志出现 `[PerfScope] Alerts are OFF by default...`，或 `/perfscope status` 的推送行显示未启用。
+  - 开启步骤见下方「告警默认关闭」小节。
+- **随包默认阈值同步重标定**（只影响默认值与新生成的配置，不改你文件里的值）：`entities` `2000/3000` → `20000/30000`；`chunks` `1500/2500` → `10000/15000`；`worlds` 三个示例世界改为 `12000/18000`、`5000/7500`、`3000/4500`（同时补上此前缺失的 `total_critical_threshold`，缺这一行时该世界的 critical 会静默回退成全服阈值）。旧默认按小服假设，正常规模的服开服几秒即报 critical。
+- **历史 CSV 从 7 列扩到 12 列**（追加 MSPT 尖峰 / 进程 CPU / 系统 CPU / GC 次数 / GC 耗时）。读取端按列名映射，旧文件缺的列显示"未采集"而不是 0，升级当天的旧数据照常可读。
+- **诊断结论有 4 处口径变更**（同一份数据得出的结论变了）：缺采窗口下的内存泄漏判定由 CLEAN/HIT 改为 SKIP；热点区块严重线改为跟随你配置的命中线；MSPT 严重度取「尖峰」与「均值」的并集；阈值非法的服由"永久 critical"改为"跳过并说明原因"。
+
 ## 配置
 
-> **v1.4 未发布**：下面的 `alerts.webhook.secret` 与 `type: wecom | feishu | dingtalk` 三个通道属于 v1.4，不在 v1.3.0 的任何发布包中；v1.3.0 只支持 `discord` / `onebot`。需自行从源码构建。
->
-> **同样属于 v1.4 的还有三处默认值变更**：`alerts.enabled` 由 `true` 改为 `false`；`entities` 阈值由 `2000/3000` 改为 `20000/30000`；`chunks` 阈值由 `1500/2500` 改为 `10000/15000`。**仍在用 v1.3.0 发布包的话，你的 `config.yml` 里是旧值**——配置从你的文件读，不会与随包默认合并。
+> **说明**：下面的 `alerts.webhook.secret` 与 `type: wecom | feishu | dingtalk` 三个通道、以及 `prometheus:` 段，都是 v1.4.0 起提供的。
 
 主要配置项（`config.yml`）。下面的取值就是**随包默认值**，与构建时打进 JAR 的 `config.yml` 逐字一致——照抄不会改变任何行为：
 
@@ -351,8 +360,6 @@ general:
 > 注（Windows 上的进程 CPU）：`getProcessCpuLoad()` 的 Windows 实现每次调用都要枚举全部进程名，实测单次阻塞 **p50 171 ms / p90 257 ms / max 332 ms**，而它跑在 Bukkit 的**共享**异步池上，会挤占其他插件的异步任务。因此**在 Windows 上本插件不采集进程 CPU**，该指标显示「未知」，`cpu.process_warning_threshold` 不会触发；系统 CPU 与其余全部指标照常工作。Linux / macOS 读 `/proc` 或等价接口，是微秒级，进程 CPU 正常采集。
 
 ### 接入 Prometheus / Grafana
-
-> **v1.4 未发布**：本节内容（`prometheus.*` 配置、指标端点、`perfscope_alert` 等逐告警指标）不在 v1.3.0 的任何发布包中——v1.3.0 归档 JAR 的 `config.yml` 里没有 `prometheus:` 段，也没有导出这些指标。需自行从源码构建（`mvn clean package`）。
 
 `prometheus.enabled: true` 后，插件在 `127.0.0.1:8940/metrics` 暴露 Prometheus 文本格式
 （0.0.4）的指标，零第三方依赖。在 `prometheus.yml` 里加一段即可：
