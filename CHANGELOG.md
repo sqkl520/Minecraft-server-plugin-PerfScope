@@ -18,6 +18,32 @@
 
 > v1.4.0 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
 
+### Added — 测试：`HistoryFileStore` 写入路径
+
+- 新增 `src/test/java/cn/perfscope/history/HistoryFileStoreWriteTest.java`，21 个用例，补上
+  `HistoryFileStore`（唯一碰磁盘的组件）**写入侧**的覆盖。此前该文件只有 `CsvLayoutTest`
+  覆盖读解析；实测把 `append()` 的丢弃计数改烂（`if (false)` 替掉 `if (!queue.offer(sample))`）
+  全量 344 个用例一个都不红，队列满丢弃、写线程健康度、shutdown 不丢批次、落盘时机都无信号。
+- 覆盖范围：`append()` 五个守卫（`sample == null` / `!running` / `configManager == null` /
+  `cfg == null` / `!history_persistEnabled`）、落盘与读回一致性、单条样本不等 5s flush 节拍、
+  队列满丢弃计数与非阻塞、`shutdown()` 不丢批次与幂等、`shutdown()` 释放长效写句柄、
+  健康度访问器、目录不存在（会被重建）与路径不可用、写失败后自愈、`droppedSamples()` 与 `skippedLines()` 语义区分、
+  `runRetention()` 日历窗口与不误删、`invalidateCache()` 缓存失效、
+  写线程被 `Error` 击穿后的有界重建（`MAX_WRITER_RESTARTS`）。
+- 异步等待一律用**可观测同步点**轮询（落盘内容 / `lastSuccessAtMs()` / `consecutiveFailures()` /
+  `writerRunning()`），没有一处固定 `sleep` 等待写线程；单类连跑 25 轮全绿。
+- 变异验证（每次改一处 `src/main` 后跑该测试类，各 3 轮，全部 3/3 KILLED）：
+  `append()` 去 `!running`；去 `!history_persistEnabled`；丢弃不计数；`shutdown()` 跳过
+  `drainAndClose()`；`isHealthy()` 恒 true；`writerRunning()` 恒 true；不写数据行；
+  `append()` 不入队；`drainAndClose()` 不 drain。
+
+### Notes — 写线程内部状态不可观测
+
+- `writerRestarts`、`currentFileDate`、`writer` 句柄、写线程手里当前这一批，均无对外出口。
+  "写线程被 Error 击穿"只能靠注入一个 `poll()` 抛 `Error` 的队列构造；`shutdown()` 跳过收尾
+  的唯一外部可观测后果是长效 `BufferedWriter` 句柄未释放（队列为空时什么也丢不了）。
+  生产代码未为本轮测试增加任何 getter。
+
 ---
 
 ## [1.4.0] — 2026-11-14 — 变更汇总（面向使用者）
