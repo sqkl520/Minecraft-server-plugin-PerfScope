@@ -29,12 +29,13 @@
 - **Webhook 推送**（v1.2 新增，v1.4 扩展） —— 告警 / 恢复 / 每日摘要可推送到 Discord、
   QQ OneBot；v1.4 起再支持**企业微信 / 飞书 / 钉钉**群机器人（该三通道未发布，见下）。全异步发送，失败只记日志不阻塞。
 - **每日摘要**（v1.2 新增，v1.4 扩展） —— 每天固定时刻推送概况；若配置时刻服务端恰好停机，启动后会自动补发当天一次。v1.4 起从 3 行扩到 5 行：
-  - 最低 TPS（含时刻）/ p95 TPS / 低于阈值累计时长 / 峰值实体 / 峰值内存 / 告警统计（v1.2 已有）；
+  - 最低 TPS（含时刻）/ p95 TPS / 低于阈值累计时长 / 峰值实体 / 峰值内存 / 告警统计（v1.2.1 已有）；
   - **MSPT 尖峰**（含时刻）—— 一次 500ms 的卡顿在 `msptAvg` 里会被 60 秒窗口摊薄到几乎不动，尖峰才是玩家实际感受到的东西；
   - **进程 CPU 峰值 / 系统 CPU 峰值 / 窗口内 GC 增量**（次数 + 耗时）。
   - 三个新增指标一律区分「**本窗口未采集**」（旧 CSV、模块被禁用、平台不支持）与「确实健康」：没采集的维度写"未采集"而**不写 0**，避免把盲区读成健康。窗口内跨过 JVM 重启时，GC 增量按相邻样本分别累计并在行内标注重启次数，不会算出负数。
 - **历史摘要**（v1.2 新增） —— `/perfscope history` 查看近 24 小时概况：覆盖时长、最低 TPS 与发生时刻、峰值实体、峰值内存，回答"什么时候开始变差的"
 - **热点区块定位**（v1.2 新增） —— `/perfscope hotspot` 列出全服实体密度 Top3 区块与坐标（含主导类型占比），把"实体多"下钻到"去哪个坐标看看"；坐标可点击复制
+- **Prometheus 指标端点**（v1.4 新增） —— 零第三方依赖的 `/metrics` 文本端点，把指标接进已有的监控栈（Prometheus 抓取 → Grafana 看板）。除 TPS/MSPT/内存/实体/区块外，还导出本插件独有的可信度信号（快照年龄、采集降级、模块可用性、逐告警状态），用于区分"服务端死了"与"指标冻住了"。默认只听 `127.0.0.1:8940`。见下方「接入 Prometheus / Grafana」
 - **彩色 UI 面板** —— 使用 Paper Adventure API 渲染，关键指标按 `config.yml` 告警阈值分级着色（绿/黄/红）；阈值来源与告警**同配置、同判定入口**，改配置 reload 后颜色立即跟随。注意：显示用闭区间（达到阈值即变色），部分指标告警用严格大于，因此**恰好等于阈值的那一瞬颜色会先变、告警随后到达**（有意的早预警语义）
 
 ## 目标平台与兼容性
@@ -93,10 +94,22 @@ PerfScope 自 v1.1 起专注 **Paper 系**服务端，深度依赖 Paper 原生 
 | `/perfscope report [格式]` | 导出性能报告（html/txt/json） |
 | `/perfscope monitor` | 切换 ActionBar 实时监测（采集停摆时改为提示"已 N 无数据"而不是继续显示旧数值） |
 | `/perfscope status` | 插件自身状态（采集是否存活/模块三态/历史/告警/**采集耗时分布**）。最近的采集异常只显示脱敏摘要（异常类型 + 首句，绝对路径替换为 `<path>`），完整原文在控制台日志 |
+| `/perfscope alerts [N]` | 告警历史（最近 N 条，默认 20，上限 500）。每条给出时刻、事件类型（`open` / `upgrade` / `downgrade` / `resolve` / `refire` / `restore` / `suspend` / `resolved_by_disable`）、告警键与描述，末行汇总条数 / 当前活跃 / 挂起 |
+| `/perfscope webhook [status\|test]` | Webhook 自检（v1.4，需 `perfscope.admin` 或 `perfscope.reload`）。`status` 展示通道类型、是否加签、最近一次投递结果、被限流丢弃的条数；`test` 真发一条探测消息并回报平台判定结果。见下方「Webhook 自检」 |
 | `/perfscope reload` | 重载配置文件 |
 | `/perfscope help` | 查看命令帮助 |
 
-别名: `/pscope`, `/perf`
+别名: `/pscope`, `/perf`；`alerts` 另有别名 `/perfscope alarm`
+
+### Webhook 自检（v1.4）
+
+> **v1.4 未发布**：`/perfscope webhook` 不在 v1.3.0 的任何发布包中，需自行从源码构建。
+
+企业微信 / 飞书 / 钉钉**在业务失败时同样返回 HTTP 200**，错误码放在响应体里（`errcode` / `code` / `retcode`）。配置写错、签名错、机器人被移出群，从 HTTP 层看全是"成功"——服主唯一的观测渠道是"群里一直没消息"，而"没有告警因为服务器很健康"和"告警根本没送到"看起来完全一样。这就是 `test` 子命令存在的理由：它把"能不能通"从"等一次真实故障"变成随时可查。
+
+- `status` 不发起任何网络请求，只看上次结果；`test` 会真的往群里发一条消息（同一发送者 10 秒内只能发一次，结果同时写控制台——RCON 会话可能已断开）。
+- **失败判定口径**：只有「HTTP 2xx **且** 响应体不含平台错误码」才算送达，输出 `送达成功：HTTP {0}，平台确认成功`；HTTP 非 2xx 报 `未送达：HTTP {0}`；2xx 但业务码非成功报 `平台拒绝了这条消息，code {0}`，并附可执行处置建议。
+- **客户端限流**：企业微信 / 钉钉 4000ms、飞书 700ms、Discord 2000ms、OneBot 不限。两次发送间隔小于该值时消息被**直接丢弃**并计入 `dropped`（`status` 会单列这个数字——这是你发现"告警被节流了"的唯一信号）。钉钉的限额是"任意 60 秒内 ≤ 20 条"，超限封禁 10 分钟，因此内置了 25% 余量。
 
 ## 全量诊断输出示例
 
@@ -104,11 +117,12 @@ PerfScope 自 v1.1 起专注 **Paper 系**服务端，深度依赖 Paper 原生 
 
 ```
 === PerfScope 诊断 ===
+服务端: Paper (Paper)
 采集时间: 14:35:22
 TPS (1m/5m/15m): 20.0 / 19.8 / 19.5
-MSPT (avg/min/max): 15.23ms / 8.10ms / 28.50ms
+MSPT (avg/min/max): 15.23 ms / 8.10 ms / 28.50 ms
 在线玩家: 3 / 20
-实体总数: 847
+总实体数: 847
 加载区块: 632 (强加载: 4)
 --- 服务器级诊断 ---
   世界: world | 实体: 520 | 区块: 380 | 强加载: 4 | 方块实体: 72
@@ -116,9 +130,11 @@ MSPT (avg/min/max): 15.23ms / 8.10ms / 28.50ms
   世界: world_the_end | 实体: 112 | 区块: 72 | 强加载: 0 | 方块实体: 18
 内存: 2048MB / 8192MB (25%)
 CPU: 进程 12.3% / 系统 35.8%
-运行时间: 2天 6时 35分 22秒 | 线程: 48 | 插件: 15 | 世界: 3
+运行时间: 2 天 6 时 35 分 | 线程: 48 | 插件: 15 | 世界: 3
 GC: 42 次 / 5.23 秒
 ```
+
+`服务端:` 行在 Paper 上显示 `Bukkit.getServer().getName()` 加服务端类型（如 `Paper (Paper)`、`Purpur (Paper)`）；Folia 上还会追加 `[TPS=global region 局部值]` 口径说明。运行时间最多显示三级（天 / 时 / 分）。
 
 ## 权限
 
@@ -153,14 +169,18 @@ GC: 42 次 / 5.23 秒
 ## 配置
 
 > **v1.4 未发布**：下面的 `alerts.webhook.secret` 与 `type: wecom | feishu | dingtalk` 三个通道属于 v1.4，不在 v1.3.0 的任何发布包中；v1.3.0 只支持 `discord` / `onebot`。需自行从源码构建。
+>
+> **同样属于 v1.4 的还有三处默认值变更**：`alerts.enabled` 由 `true` 改为 `false`；`entities` 阈值由 `2000/3000` 改为 `20000/30000`；`chunks` 阈值由 `1500/2500` 改为 `10000/15000`。**仍在用 v1.3.0 发布包的话，你的 `config.yml` 里是旧值**——配置从你的文件读，不会与随包默认合并。
 
-主要配置项（`config.yml`）：
+主要配置项（`config.yml`）。下面的取值就是**随包默认值**，与构建时打进 JAR 的 `config.yml` 逐字一致——照抄不会改变任何行为：
 
 ```yaml
 general:
-  update_interval: 20       # 数据采集间隔 (tick)
+  update_interval: 20       # 数据采集间隔 (tick)，合法区间 5-1200，越界回退 20
+  verbose_startup: true     # 启动时打印详细信息
   debug: false
   language: en              # 界面语言: en（默认）/ zh；改后 /perfscope reload 生效
+  bstats-enabled: true      # bStats 匿名统计，详见上方「数据披露」
 
 tps:
   enabled: true
@@ -179,13 +199,13 @@ players:
 
 entities:
   enabled: true
-  total_warning_threshold: 2000
-  total_critical_threshold: 3000
+  total_warning_threshold: 20000    # 全服实体总数
+  total_critical_threshold: 30000
 
 chunks:
   enabled: true
-  loaded_warning_threshold: 1500
-  loaded_critical_threshold: 2500
+  loaded_warning_threshold: 10000   # 每世界加载区块数（不是全服合计）
+  loaded_critical_threshold: 15000
 
 memory:
   enabled: true
@@ -205,18 +225,23 @@ report:
   retention_days: 7         # 报告保留天数
 
 alerts:
-  enabled: true             # 总开关 (false = 完全不做告警检查与推送)
+  enabled: false            # 总开关。v1.4 起默认 false（告警是选择加入，见下方「告警默认关闭」）
   console: true             # 控制台推送
   in-game: true             # 游戏内推送 (在线且持有 perfscope.alert 权限的玩家)
   cooldown-seconds: 300     # 同一告警的冷却秒数 (0 = 无冷却，仍受采集周期节流)
   notify-recovery: true     # 恢复通知 (告警消失时推送恢复消息)
+  notify-mitigation: true   # 降级通知：critical 掉到 warning 时推一条「已缓解」（问题仍在，不是恢复）
   debounce-cycles: 3        # 防抖：连续 N 个采集周期超标才首次推送 (1 = 首次出现即推)
+  recovery-debounce-cycles: 3  # 恢复防抖：需连续 N 个干净周期才宣布恢复；1 = 一个干净周期即宣布（旧行为）
+  digest-mode: false        # 摘要模式：同一检查周期内的多条新增告警合并成一条（升级/复燃仍即时单独发）
+  unknown-after-minutes: 5  # 模块连续不可用超过 N 分钟后，其告警转入 unknown（不再算"活跃"）
   flap-window-seconds: 180  # 抖动窗口：该窗口内的「恢复→再越界」视为同一次事故，不重复通知
   repush-delta: 8           # 同级别重推的数值变化阈值：变化小于它时不重推（只作用于 cpu:system）
   refire-min-interval-seconds: 60  # 复燃最短间隔：恢复后只有在该窗口内再次越界才算「复燃」（0 = 关闭复燃识别，再次越界按普通新告警处理，仍受 cooldown-seconds 约束）
   daily-summary:
     enabled: false          # 每日摘要开关
-    time: "08:00"           # 每日摘要时刻 (本地时区 HH:mm)
+    time: "08:00"           # 每日摘要时刻 (HH:mm)
+    timezone: ""            # IANA 时区（如 Asia/Shanghai）。留空 = 跟随 JVM 系统时区
   webhook:
     enabled: false          # webhook 推送开关 (告警/恢复/日摘要)
     type: discord           # discord | onebot | wecom | feishu | dingtalk
@@ -233,16 +258,50 @@ hotspots:
   enabled: true
   sample-every-cycles: 30       # 热点区块刷新节流 (每 N 个采集周期完成一轮完整扫描 ≈ 30 秒)
   scan-shards: 10               # 分区增量扫描分片数（1 = 关闭；越大单拍越省、刷新越慢）
+  chunk-warning-threshold: 200  # 单区块实体数告警阈值（与 entities 段的全服总数不是同一口径）
 
-# 各世界独立设置
+prometheus:                     # v1.4，见「接入 Prometheus / Grafana」
+  enabled: false
+  bind: "127.0.0.1"             # 容器 / 面板服需改 "0.0.0.0"，否则容器外抓不到
+  port: 8940
+  path: "/metrics"
+  server-id: ""                 # 跨服身份标签；留空 = 自动派生（首个世界名，回退为端口）
+  auth-token: ""                # 绑 0.0.0.0 且对公网开放时务必设置
+
+# 按世界覆盖实体阈值。这一段是**示例**不是推荐值：三个世界之和恰好等于上面的全服阈值，
+# 按「主世界 60% / 下界 25% / 末地 15%」摊算。请按自己服的世界名与真实占比改写，或整段删掉。
 worlds:
   world:
     entities:
-      total_warning_threshold: 2500
+      total_warning_threshold: 12000
+      total_critical_threshold: 18000
   world_nether:
     entities:
-      total_warning_threshold: 2000
+      total_warning_threshold: 5000
+      total_critical_threshold: 7500
+  world_the_end:
+    entities:
+      total_warning_threshold: 3000
+      total_critical_threshold: 4500
 ```
+
+> **`entities` / `chunks` 的默认值是"中服"假设，不是通用值**：两者都按 60 人在线的正常 Paper 服上界再留余量取整（全服实体 5,000-15,000 → 取 20,000；单世界区块 3,000-8,000 → 取 10,000）。**小服必须下调**——开服后先跑 `/perfscope entities` 与 `/perfscope chunks` 看自己的真实数字，把阈值定在"正常高峰值 × 1.3"左右。
+
+> **注（`alerts.webhook.secret` 的空白陷阱）**：两端**不要**留空格或换行。空白是签名载荷的一部分，插件刻意**不对它 trim**——多一个空格就验签失败，而平台只会回「签名不匹配」，不会告诉你是空白问题。另外，纯数字的密钥必须加引号（`secret: "123456"`），否则 YAML 会把它解析成数字而丢弃。`url` 与 `type` 则会正常 trim。
+
+> **注（`alerts.daily-summary.timezone`）**：填 IANA 名称（如 `Asia/Shanghai`、`UTC`），留空 = 跟随 JVM 系统时区。**容器 / 云主机常是 UTC**，此时 `time: "08:00"` 实际是北京时间 16:00——请显式设置。与系统时区不同时，插件启动日志会点名提示。
+
+### 告警默认关闭（v1.4 起）
+
+`alerts.enabled` 随包默认是 **false**。采集、`/perfscope` 全量诊断、报告、历史、Prometheus 端点全部照常工作，只有**推送**这一层需要你先点头——因为任何一套随包阈值都不可能同时适合小服与超大服，默认开启只会让首装用户先被一轮与自己无关的 critical 刷屏。
+
+开启只需三步：
+
+1. 启动一次服务器，记下自己服的真实数字：`/perfscope entities`（全服总数 + 按世界分布）、`/perfscope chunks`（每世界区块数）、`/perfscope`（TPS / MSPT / 内存常态读数）；
+2. 按"正常高峰值 × 1.3"改写 `entities` / `chunks` / `memory` / `tps` 段的阈值；
+3. 把 `alerts.enabled` 改成 `true`，执行 `/perfscope reload`。
+
+> 旧版本配置里已经写了 `enabled: true` 的服主**不受影响**：配置从你的文件读，不与随包默认合并。
 
 完整配置说明请参考 `plugins/PerfScope/config.yml`。
 
@@ -285,6 +344,7 @@ general:
 | GC | GC 次数/耗时/各收集器详情 | 垃圾回收统计 |
 | Tile Entity | 总数/按世界分布 | 方块实体负载 |
 | 服务器 | uptime/线程数/插件数/世界数/JVM | 服务器基本信息 |
+| Prometheus | `/metrics` 文本端点（v1.4） | 快照年龄/采集降级/模块可用性/逐告警状态，见下方「接入 Prometheus / Grafana」 |
 
 > 注：**红石活动**与**网络吞吐量**监测已于 v1.1 下线（红石为空实现、网络为硬编码假数据），相关指标与功能不再提供；`/perfscope redstone` 子命令保留入口但仅返回下线提示。
 
@@ -313,7 +373,24 @@ scrape_configs:
 | `perfscope_collector_degraded` | 采集是否已过期（0/1） |
 | `perfscope_module_available{module}` | 11 个采集模块各自是否可用——曲线断了先看这里 |
 | `perfscope_alerts_active` / `perfscope_alerts_suspended` | 告警状态机的当前状态 |
+| `perfscope_alert{key,module}` | 逐告警状态：`0` = 健康、`1` = warning、`2` = critical。详见下方 |
 | `perfscope_tps{period}` / `perfscope_tick_duration_seconds{stat}` | 注意单位：tick 时长是**秒**，Grafana 里乘 1000 显示为 MSPT |
+
+#### `perfscope_alert` 的三条反直觉设计
+
+这三条都不是"顺手这么写"，看图之前值得知道：
+
+1. **级别走值，不走标签。** 若写成 `perfscope_alert{severity="warning"}`，warning→critical 的升级在 Prometheus 看来就是"一条序列 stale、另一条全新开始"，`ALERTS_FOR_STATE` 归零——运维精心写的 `for: 5m` 每次级别翻转都重新计时，在抖动治理做得再好的环境里也永不触发。做成值之后序列恒定不变，升级只是 `1 → 2`。
+2. **健康的告警也输出 0，不是省略。** 健康是一种可观测事实。不输出这一行，恢复时序列直接消失：既收不到 `resolved` 通知，也无法用 `absent()` 区分"当前没有告警"与"采集挂了"。
+3. **不可判定的维度不发 0。** 键全集由采集层定义（`MetricsSnapshot.alertLevels`）。不在其中的键 = 该维度当前不可判定（模块被禁用 / 平台不支持 / 尚无数据），**刻意不输出**——给没测的维度发 0 等于宣称它健康。
+
+由此可直接写出的告警规则：
+
+```yaml
+- alert: PerfScopeTrackingLost
+  expr: absent(perfscope_alert{key="tps:global"})
+  for: 5m
+```
 
 #### 容器 / 面板服：先把 `bind` 改掉
 
@@ -359,12 +436,16 @@ Prometheus 无论怎么抓都连不上，哪怕它和 MC 服务端在同一台�
   `mc:8940`（连端口都不用发布）。
 
 **Pterodactyl（Pelican 属同一面板谱系，同理）** —— 面板把宿主端口以「分配（allocation）」
-的形式发给服务器。管理员做前两步，你自己做后两步：
+的形式发给服务器。管理员做前两步，其余由你完成：
 
 1. 端口池在 `Admin → Nodes → Allocation` 里按端口段创建；
 2. 给该服务器加分配：`Admin → Servers → [服务器] → Build Configuration → Assign Additional Ports`；
 3. `config.yml` 里把 `bind` 改成 `"0.0.0.0"`——只加分配不改 bind，外部照样进不来；
-4. Prometheus 抓 `http://<节点IP>:<分配到的端口>/metrics`。
+4. **把 `prometheus.port` 改成第 2 步分配到的那个端口**——插件实际监听的端口由这一项决定，
+   而 Wings 只会把「分配里记录的那个端口」映射到容器。**分配未必是 8940**（它来自节点端口池里
+   的既有条目，不是随手填的数字）。两者不一致时，Wings 转发的是一个没人监听的端口，外部表现为
+   `connection refused`，而进容器 `curl 127.0.0.1:8940` 又是通的——**分配端口恰好是 8940 时不用改**；
+5. Prometheus 抓 `http://<节点IP>:<分配到的端口>/metrics`。
 
 > **为什么看不到「Create Allocation」按钮**：客户端那个按钮只在服务器的 `allocation_limit`
 > 大于 0 时才出现，而面板上的初始值可能是 `NULL`。也就是说，在管理员抬高上限之前，普通用户

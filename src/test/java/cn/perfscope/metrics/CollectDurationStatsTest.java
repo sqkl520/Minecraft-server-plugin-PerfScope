@@ -38,14 +38,12 @@ class CollectDurationStatsTest {
         Object collector = unsafeClass.getMethod("allocateInstance", Class.class)
             .invoke(unsafe, MetricsCollector.class);
 
-        var objectFieldOffset = unsafeClass.getMethod("objectFieldOffset", Field.class);
-        var putObject = unsafeClass.getMethod("putObject", Object.class, long.class, Object.class);
-
+        // 用 Field.set 而不是 Unsafe.putObject/objectFieldOffset：后两者自 JDK 24 起被
+        // terminal deprecation（--sun-misc-unsafe-memory-access=deny 立刻抛异常），
+        // 而它们的调用方正是「写 final 实例字段」——Field.set 完全等价且三个 JDK 都支持。
         Field durationsField = MetricsCollector.class.getDeclaredField("collectDurations");
         durationsField.setAccessible(true);
-        putObject.invoke(unsafe, collector,
-            (Long) objectFieldOffset.invoke(unsafe, durationsField),
-            new java.util.concurrent.ConcurrentLinkedDeque<>());
+        durationsField.set(collector, new java.util.concurrent.ConcurrentLinkedDeque<>());
 
         Field countField = MetricsCollector.class.getDeclaredField("collectDurationsCount");
         countField.setAccessible(true);

@@ -129,13 +129,12 @@ class HistoryRingCounterTest {
         var allocate = unsafeClass.getMethod("allocateInstance", Class.class);
         Object collector = allocate.invoke(unsafe, MetricsCollector.class);
 
-        // 初始化 history（final 字段，Unsafe 可以让它落地）
-        var putObject = unsafeClass.getMethod("putObject", Object.class, long.class, Object.class);
-        var objectFieldOffset = unsafeClass.getMethod("objectFieldOffset", Field.class);
+        // 用 Field.set 而不是 Unsafe.putObject/objectFieldOffset：后两者自 JDK 24 起被
+        // terminal deprecation（--sun-misc-unsafe-memory-access=deny 立刻抛异常），
+        // 而它们的调用方正是「写 final 实例字段」——Field.set 完全等价且三个 JDK 都支持。
         Field historyField = MetricsCollector.class.getDeclaredField("history");
         historyField.setAccessible(true);
-        long offset = (Long) objectFieldOffset.invoke(unsafe, historyField);
-        putObject.invoke(unsafe, collector, offset, new java.util.concurrent.ConcurrentLinkedDeque<>());
+        historyField.set(collector, new java.util.concurrent.ConcurrentLinkedDeque<>());
 
         Field countField = MetricsCollector.class.getDeclaredField("historyCount");
         countField.setAccessible(true);

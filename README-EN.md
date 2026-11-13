@@ -25,15 +25,16 @@ A comprehensive performance monitoring plugin for Minecraft servers, focused on 
 - **Performance Report Export** —— HTML/TXT/JSON formats, HTML reports include TPS trend chart, entity distribution table, memory progress bar, alert highlights
 - **Auto Report Generation** —— Configurable interval, async generation without blocking main thread, auto cleanup by retention days
 - **Per-World Independent Alerts** —— Override entity alert thresholds per world
-- **Threshold Alert Push** (new in v1.1, converged in v1.2) —— When an alert fires, pushes to the console + online players holding the `perfscope.alert` permission; by default an alert must stay over-threshold for 3 consecutive collection cycles before the first push (debounce, configurable); the same alert has a default 300-second cooldown to prevent spam; level upgrades (warning→critical) send a single "（级别升级）" message bypassing the cooldown; a recovery notice is sent when the issue clears; configurable in the `alerts` section of `config.yml`
+- **Threshold Alert Push** (new in v1.1, converged in v1.2) —— When an alert fires, pushes to the console + online players holding the `perfscope.alert` permission; by default an alert must stay over-threshold for 3 consecutive collection cycles before the first push (debounce, configurable); the same alert has a default 300-second cooldown to prevent spam; level upgrades (warning→critical) send a single " (level escalated)" message bypassing the cooldown; a recovery notice is sent when the issue clears; configurable in the `alerts` section of `config.yml`
 - **Webhook Push** (new in v1.2, extended in v1.4) —— Alerts / recoveries / daily summaries can be pushed to Discord and QQ OneBot; from v1.4 also to **WeCom / Feishu / DingTalk** group robots (those three channels are unreleased — see below). Sent fully asynchronously, failures are logged without blocking
 - **Daily Summary** (new in v1.2, extended in v1.4) —— A digest at a fixed time each day; if the server happens to be down at the configured time, one catch-up summary is sent after startup. From v1.4 it grows from 3 lines to 5:
-  - lowest TPS (with time) / p95 TPS / time spent below the threshold / peak entities / peak heap / alert statistics (all present since v1.2);
+  - lowest TPS (with time) / p95 TPS / time spent below the threshold / peak entities / peak heap / alert statistics (all present since v1.2.1);
   - **MSPT spike** (with its time) — a single 500 ms stall is averaged away by `msptAvg` over a 60-second window; the spike is what players actually felt;
   - **peak process CPU / peak system CPU / GC increase within the window** (count and time).
   - All three new metrics distinguish "**not collected in this window**" (old CSV rows, module disabled, platform unsupported) from genuinely healthy: an unmeasured dimension says "not collected" and **never 0**, so a blind spot is not read as health. If the window spans a JVM restart, the GC increase is summed pairwise across it and the restart count is noted on the line — it never goes negative.
 - **History Summary** (new in v1.2) —— `/perfscope history` shows the last ~24 hours: coverage, lowest TPS with its timestamp, peak entities, peak heap — answering "when did it start getting worse"
 - **Hotspot Localization** (new in v1.2) —— `/perfscope hotspot` lists the top-3 entity-density chunks server-wide with coordinates (and dominant type share), drilling from "many entities" down to "go look at this spot"; coordinates are click-to-copy
+- **Prometheus metrics endpoint** (new in v1.4) —— a dependency-free `/metrics` text endpoint that plugs the plugin into an existing monitoring stack (Prometheus scrape → Grafana dashboards). Beyond TPS/MSPT/memory/entities/chunks it exports the plugin's own trustworthiness signals (snapshot age, collector degradation, per-module availability, per-alert state) that tell "the server died" apart from "the metrics froze". Listens on `127.0.0.1:8940` by default. See "Wiring up Prometheus / Grafana" below
 - **Color-Coded UI** —— Rendered via Paper Adventure API, key metrics colored by level (green/yellow/red) based on the `config.yml` alert thresholds; display and alerts **share the same config source and the same level-decision entry point**, and colors follow immediately after a config reload. Note: the display uses closed intervals (color changes when the threshold is *reached*) while some alert checks use strict greater-than, so **at exactly the threshold the color flips a moment before the alert fires** — an intentional early-warning semantic
 
 ## Target Platform & Compatibility
@@ -84,10 +85,22 @@ Additional notes:
 | `/perfscope report [format]` | Export performance report (html/txt/json) |
 | `/perfscope monitor` | Toggle ActionBar live monitor (when collection has stalled it shows "no data for N" instead of stale figures) |
 | `/perfscope status` | Plugin self-health (collector alive / module states / history / alerts). The last collection error is shown as a redacted summary (exception type + first line, absolute paths replaced by `<path>`); the full text stays in the console log |
+| `/perfscope alerts [N]` | Alert history (most recent N, default 20, max 500). Each line gives the time, event type (`open` / `upgrade` / `downgrade` / `resolve` / `refire` / `restore` / `suspend` / `resolved_by_disable`), alert key and description; the last line summarises count / currently active / suspended |
+| `/perfscope webhook [status\|test]` | Webhook self-check (v1.4; needs `perfscope.admin` or `perfscope.reload`). `status` shows the channel type, whether the payload is signed, the last delivery result and how many messages the rate limiter dropped; `test` actually sends a probe message and reports the platform's verdict. See "Webhook self-check" below |
 | `/perfscope reload` | Reload config file |
 | `/perfscope help` | Show command help |
 
-Aliases: `/pscope`, `/perf`
+Aliases: `/pscope`, `/perf`; `alerts` also answers to `/perfscope alarm`
+
+### Webhook self-check (v1.4)
+
+> **v1.4 unreleased**: `/perfscope webhook` is in no v1.3.0 artifact — build from source if you need it.
+
+WeCom / Feishu / DingTalk **return HTTP 200 even when the message is rejected**; the error code lives in the response body (`errcode` / `code` / `retcode`). A wrong URL, a bad signature, or a robot removed from the group all look like "success" at the HTTP layer — and the owner's only observable channel is "the group has been silent", which is indistinguishable from "the server is healthy so there is nothing to report". That is exactly why `test` exists: it turns "can this reach the platform?" from *wait for a real incident* into *ask any time*.
+
+- `status` makes no network request at all, it only reports the last result; `test` really posts a message to the group (one per sender every 10 seconds; the result is also written to the console, because an RCON session may already be gone).
+- **Failure criterion**: delivered means "HTTP 2xx **and** the body carries no platform error code" → `Delivered: HTTP {0}, and the platform confirmed success`. A non-2xx status prints `Not delivered: HTTP {0}`; a 2xx with a non-success business code prints `the platform rejected it with code {0}`, followed by an actionable next step.
+- **Client-side rate limiting**: WeCom / DingTalk 4000 ms, Feishu 700 ms, Discord 2000 ms, OneBot unlimited. A message arriving inside that interval is **dropped outright** and counted in `dropped` (`status` reports that number — it is the only signal that your alerts are being throttled). DingTalk caps at "≤ 20 messages in any 60-second window" and bans for 10 minutes when exceeded, hence the built-in 25% margin.
 
 ## Full Diagnostic Output Example
 
@@ -95,11 +108,12 @@ When you run `/perfscope`, the output looks like:
 
 ```
 === PerfScope 诊断 ===
+服务端: Paper (Paper)
 采集时间: 14:35:22
 TPS (1m/5m/15m): 20.0 / 19.8 / 19.5
-MSPT (avg/min/max): 15.23ms / 8.10ms / 28.50ms
+MSPT (avg/min/max): 15.23 ms / 8.10 ms / 28.50 ms
 在线玩家: 3 / 20
-实体总数: 847
+总实体数: 847
 加载区块: 632 (强加载: 4)
 --- 服务器级诊断 ---
   世界: world | 实体: 520 | 区块: 380 | 强加载: 4 | 方块实体: 72
@@ -107,9 +121,11 @@ MSPT (avg/min/max): 15.23ms / 8.10ms / 28.50ms
   世界: world_the_end | 实体: 112 | 区块: 72 | 强加载: 0 | 方块实体: 18
 内存: 2048MB / 8192MB (25%)
 CPU: 进程 12.3% / 系统 35.8%
-运行时间: 2天 6时 35分 22秒 | 线程: 48 | 插件: 15 | 世界: 3
+运行时间: 2 天 6 时 35 分 | 线程: 48 | 插件: 15 | 世界: 3
 GC: 42 次 / 5.23 秒
 ```
+
+This is the `zh` output. With the shipped default `general.language: en` the same command prints the English equivalent (`Server: Paper (Paper)`, `Sampled at:`, `Total entities:`, …). The `Server:` line combines `Bukkit.getServer().getName()` with the server type (e.g. `Paper (Paper)`, `Purpur (Paper)`); on Folia it also appends `[TPS=global region local value]`. Uptime shows at most three units (d / h / m).
 
 ## Permissions
 
@@ -144,14 +160,18 @@ GC: 42 次 / 5.23 秒
 ## Configuration
 
 > **v1.4 unreleased**: the `alerts.webhook.secret` key and the `type: wecom | feishu | dingtalk` channels below are v1.4 work and are in no v1.3.0 artifact; v1.3.0 supports only `discord` / `onebot`. Build from source if you need them.
+>
+> **Three default values also changed in v1.4**: `alerts.enabled` from `true` to `false`; `entities` thresholds from `2000/3000` to `20000/30000`; `chunks` thresholds from `1500/2500` to `10000/15000`. **If you are still on a v1.3.0 artifact, your `config.yml` holds the old values** — config is read from your file and never merged with the shipped defaults.
 
-Key configuration options (`config.yml`):
+Key configuration options (`config.yml`). The values below are the **shipped defaults** — byte-for-byte the same as the `config.yml` packaged into the jar, so copying them changes nothing:
 
 ```yaml
 general:
-  update_interval: 20       # Data collection interval (ticks)
+  update_interval: 20       # Data collection interval (ticks); legal range 5-1200, out of range falls back to 20
+  verbose_startup: true     # Print detailed information at startup
   debug: false
   language: en              # UI language: en (default) / zh; takes effect on /perfscope reload
+  bstats-enabled: true      # bStats anonymous statistics, see "Data disclosure" above
 
 tps:
   enabled: true
@@ -170,13 +190,13 @@ players:
 
 entities:
   enabled: true
-  total_warning_threshold: 2000
-  total_critical_threshold: 3000
+  total_warning_threshold: 20000    # Server-wide entity total
+  total_critical_threshold: 30000
 
 chunks:
   enabled: true
-  loaded_warning_threshold: 1500
-  loaded_critical_threshold: 2500
+  loaded_warning_threshold: 10000   # Loaded chunks per world (NOT a server-wide total)
+  loaded_critical_threshold: 15000
 
 memory:
   enabled: true
@@ -196,18 +216,23 @@ report:
   retention_days: 7         # Report retention days
 
 alerts:
-  enabled: true             # Master switch (false = no alert checks or pushes at all)
+  enabled: false            # Master switch. Default false since v1.4 (alerting is opt-in, see "Alerting is off by default" below)
   console: true             # Console push
   in-game: true             # In-game push (online players with perfscope.alert permission)
   cooldown-seconds: 300     # Cooldown per alert in seconds (0 = no cooldown, still throttled by the collection cycle)
   notify-recovery: true     # Recovery notice (sent when an alert clears)
+  notify-mitigation: true   # Mitigation notice: pushed when a critical drops to warning (still a problem, not a recovery)
   debounce-cycles: 3        # Debounce: N consecutive over-threshold cycles before the first push (1 = push immediately)
+  recovery-debounce-cycles: 3  # Recovery debounce: N consecutive clean cycles before declaring recovery; 1 = one clean cycle (old behaviour)
+  digest-mode: false        # Digest mode: new alerts within one check cycle are merged into a single message (upgrades/re-fires still go out individually)
+  unknown-after-minutes: 5  # After a module has been unavailable for N minutes, its alerts move to unknown (no longer counted as "active")
   flap-window-seconds: 180  # Flap window: a "recovery → re-breach" inside this window is treated as the same incident (no duplicate notifications)
   repush-delta: 8           # Re-push delta: an active alert is not re-pushed unless its value changes by at least this much (applies to cpu:system only)
   refire-min-interval-seconds: 60  # Re-fire interval: after a recovery, a re-breach counts as a "re-fire" only within this window (0 = disable re-fire detection; a re-breach is then treated as a normal new alert, still subject to cooldown-seconds)
   daily-summary:
     enabled: false          # Daily summary switch
-    time: "08:00"           # Daily summary time (local HH:mm)
+    time: "08:00"           # Daily summary time (HH:mm)
+    timezone: ""            # IANA zone (e.g. Asia/Shanghai). Empty = follow the JVM system zone
   webhook:
     enabled: false          # Webhook push switch (alerts/recoveries/daily summary)
     type: discord           # discord | onebot | wecom | feishu | dingtalk
@@ -224,16 +249,51 @@ hotspots:
   enabled: true
   sample-every-cycles: 30       # Hotspot refresh throttle (one full round every N cycles, ~30s)
   scan-shards: 10               # Incremental scan shards (1 = off; higher = cheaper per tick, slower refresh)
+  chunk-warning-threshold: 200  # Per-chunk entity alert threshold (a different unit from the entities total)
 
-# Per-world overrides
+prometheus:                     # v1.4, see "Wiring up Prometheus / Grafana"
+  enabled: false
+  bind: "127.0.0.1"             # Containers / panel hosts must use "0.0.0.0", otherwise unreachable from outside
+  port: 8940
+  path: "/metrics"
+  server-id: ""                 # Cross-server identity label; empty = derived (first world name, else the port)
+  auth-token: ""                # Set this whenever you bind 0.0.0.0 and expose it publicly
+
+# Per-world entity threshold overrides. This block is an **example, not a recommendation**: the three
+# worlds sum exactly to the global thresholds above, split 60% overworld / 25% nether / 15% end.
+# Rewrite the world names and values for your own server, or delete the whole block.
 worlds:
   world:
     entities:
-      total_warning_threshold: 2500
+      total_warning_threshold: 12000
+      total_critical_threshold: 18000
   world_nether:
     entities:
-      total_warning_threshold: 2000
+      total_warning_threshold: 5000
+      total_critical_threshold: 7500
+  world_the_end:
+    entities:
+      total_warning_threshold: 3000
+      total_critical_threshold: 4500
 ```
+
+> **The `entities` / `chunks` defaults assume a mid-sized server, not yours**: both are rounded up from the upper end of a normal 60-player Paper server (server-wide entities 5,000-15,000 → 20,000; per-world chunks 3,000-8,000 → 10,000). **Small servers must lower them** — after startup run `/perfscope entities` and `/perfscope chunks` to see your real numbers, then set the threshold to about "normal peak × 1.3".
+
+> **Note (the whitespace trap in `alerts.webhook.secret`)**: no leading or trailing spaces or newlines. Whitespace is part of the signed payload and the plugin deliberately **does not trim** it — one extra space makes signature verification fail, and the platform only ever replies "signature mismatch", never "you have whitespace". Also, an all-digit secret must be quoted (`secret: "123456"`), otherwise YAML parses it as a number and drops it. `url` and `type` *are* trimmed normally.
+
+> **Note (`alerts.daily-summary.timezone`)**: use an IANA name (`Asia/Shanghai`, `UTC`, …); empty means "follow the JVM system zone". **Containers and cloud hosts are often UTC**, in which case `time: "08:00"` actually fires at 16:00 Beijing time — set this explicitly. When it differs from the system zone the plugin names it in the startup log.
+
+### Alerting is off by default (since v1.4)
+
+`alerts.enabled` ships as **false**. Collection, `/perfscope` full diagnostics, reports, history and the Prometheus endpoint all keep working; only the **push** layer waits for your consent — because no single set of shipped thresholds can fit both a small server and a huge one, and defaulting to on means a fresh install gets buried under a wall of criticals that have nothing to do with it.
+
+Enabling takes three steps:
+
+1. Start the server once and write down your real numbers: `/perfscope entities` (server-wide total + per-world distribution), `/perfscope chunks` (chunks per world), `/perfscope` (steady-state TPS / MSPT / memory).
+2. Rewrite the thresholds in the `entities` / `chunks` / `memory` / `tps` sections to about "normal peak × 1.3".
+3. Set `alerts.enabled` to `true` and run `/perfscope reload`.
+
+> Server owners who already have `enabled: true` in an older config are **unaffected**: config is read from your file and never merged with the shipped defaults.
 
 See `plugins/PerfScope/config.yml` for complete configuration details.
 
@@ -254,13 +314,13 @@ general:
 
 > Exceptions (do not follow the language): the `plugin.yml` description, report files already exported, history entries already written (stored in the language they were written in; not re-rendered on switch), and webhook messages already queued at the moment of the switch.
 
-> Note (threshold direction): TPS is a low-is-bad metric — the lower the worse — so it requires `warning_threshold ≥ critical_threshold` (the opposite of high-is-bad metrics such as MSPT or memory; do not invert it by mistake). If inverted, `/perfscope reload` validates and falls back to the default values, logging a "配置校验：…设置倒置，已回退默认值" warning to the console — it will not take effect silently.
+> Note (threshold direction): TPS is a low-is-bad metric — the lower the worse — so it requires `warning_threshold ≥ critical_threshold` (the opposite of high-is-bad metrics such as MSPT or memory; do not invert it by mistake). If inverted, `/perfscope reload` validates and falls back to the default values, logging a "Configuration check: … has its warning/critical thresholds inverted; reverted to the defaults" warning to the console — it will not take effect silently.
 >
 > Note (thresholds must not be 0): the thresholds of `players`, `entities`, `chunks`, `memory`, `mspt` and `worlds.*.entities.*` must be ≥ 1 (and ≤ 100 for percentage-based ones). A value of 0 is rejected on reload: the value falls back to the default and a warning is logged. The reason is the direction of the predicate: those metrics are high-is-bad, so a threshold of 0 makes the rule **fire permanently and never recover** (with `players.warning_threshold: 0`, 1 player online out of 200 is reported as "close to capacity"). **To turn a metric off, use that module's `enabled: false`, not a zero threshold.** The one exception is `tps.*`: it is a low-is-bad metric (predicate `tps < threshold`), so 0 means "never alert" and stays legal as a way to mute it.
 >
 > Known behavior (alert cooldown across reload): the alert cooldown table is **not** cleared by `/perfscope reload` (by design, to prevent alert re-pushes on reload); as a side effect, during troubleshooting a genuine alert may be briefly suppressed by a cooldown window left over from before the reload.
 >
-> Known behavior (alert debounce delay): by default an alert must stay over-threshold for 3 consecutive collection cycles before the first push (`alerts.debounce-cycles`, configurable; 1 = push immediately), adding up to ~3× the collection interval of latency — a deliberate trade for a useful signal instead of a crying-wolf one; level upgrades (warning→critical) bypass both cooldown and debounce and arrive immediately as a single "（级别升级）" message.
+> Known behavior (alert debounce delay): by default an alert must stay over-threshold for 3 consecutive collection cycles before the first push (`alerts.debounce-cycles`, configurable; 1 = push immediately), adding up to ~3× the collection interval of latency — a deliberate trade for a useful signal instead of a crying-wolf one; level upgrades (warning→critical) bypass both cooldown and debounce and arrive immediately as a single " (level escalated)" message.
 
 ## All Monitorable Metrics
 
@@ -276,6 +336,7 @@ general:
 | GC | count/time/per-collector | Garbage collection stats |
 | Tile Entity | total/per-world | Block entity load |
 | Server | uptime/threads/plugins/worlds/JVM | Server basic info |
+| Prometheus | `/metrics` text endpoint (v1.4) | Snapshot age / collector degradation / module availability / per-alert state; see "Wiring up Prometheus / Grafana" below |
 
 > Note: **Redstone activity** and **network throughput** monitoring were discontinued in v1.1 (redstone was a stub implementation; network was hardcoded fake data); these metrics and features are no longer provided. The `/perfscope redstone` subcommand is kept as an entry point but only returns a discontinued notice.
 
@@ -304,7 +365,24 @@ signals** — which is what distinguishes it from a generic MC exporter:
 | `perfscope_collector_degraded` | Whether collection has gone stale (0/1) |
 | `perfscope_module_available{module}` | Per-module availability for the 11 collectors — look here first when a curve breaks |
 | `perfscope_alerts_active` / `perfscope_alerts_suspended` | Current state of the alert state machine |
+| `perfscope_alert{key,module}` | Per-alert state: `0` = healthy, `1` = warning, `2` = critical. See below |
 | `perfscope_tps{period}` / `perfscope_tick_duration_seconds{stat}` | Note the unit: tick duration is in **seconds**; multiply by 1000 in Grafana to show MSPT |
+
+#### Three counter-intuitive design decisions behind `perfscope_alert`
+
+None of these are incidental:
+
+1. **Severity travels in the value, not in a label.** Written as `perfscope_alert{severity="warning"}`, a warning→critical upgrade looks to Prometheus like "one series went stale and a brand-new one started", which zeroes `ALERTS_FOR_STATE` — so the carefully chosen `for: 5m` restarts its timer on every level flip and never fires, no matter how good your flap suppression is. As a value the series is stable and an upgrade is just `1 → 2`.
+2. **Healthy alerts are exported as 0, not omitted.** Health is an observable fact. Without that line the series vanishes on recovery: you get no `resolved` notification, and `absent()` can no longer distinguish "currently no alerts" from "collection is dead".
+3. **Dimensions that cannot be judged are not exported as 0.** The key universe is defined by the collection layer (`MetricsSnapshot.alertLevels`). A key absent from it means that dimension is currently unjudgeable (module disabled, platform unsupported, no data yet) and is **deliberately left out** — emitting 0 for an unmeasured dimension would be a claim that it is healthy.
+
+Which makes an alerting rule like this possible:
+
+```yaml
+- alert: PerfScopeTrackingLost
+  expr: absent(perfscope_alert{key="tps:global"})
+  for: 5m
+```
 
 #### Scraping from a container / panel host
 
@@ -355,14 +433,20 @@ loopback-only protection for nothing.
   scrape the **service name** directly: `mc:8940` — no port publishing at all.
 
 **Pterodactyl (Pelican shares the same panel lineage, so the same applies)** — the panel hands out
-host ports as "allocations". The first two steps are the admin's, the last two are yours:
+host ports as "allocations". The first two steps are the admin's; the rest are yours:
 
 1. the port pool is created per port range under `Admin → Nodes → Allocation`;
 2. the allocation is attached to the server under
    `Admin → Servers → [server] → Build Configuration → Assign Additional Ports`;
 3. in `config.yml` change `bind` to `"0.0.0.0"` — adding the allocation without changing the bind
    still leaves the endpoint unreachable from outside;
-4. Prometheus scrapes `http://<node IP>:<allocated port>/metrics`.
+4. **set `prometheus.port` to the port allocated in step 2** — that key decides which port the
+   plugin actually listens on, while Wings only forwards the port **recorded in the allocation**.
+   **Your allocation is not necessarily 8940** (it comes from an existing entry in the node's port
+   pool, not from a number you type in). When the two disagree, Wings forwards to a port nobody is
+   listening on: from outside you see `connection refused`, while `curl 127.0.0.1:8940` inside the
+   container still answers. **If your allocated port happens to be 8940, leave it alone**;
+5. Prometheus scrapes `http://<node IP>:<allocated port>/metrics`.
 
 > **Why you cannot see the "Create Allocation" button**: the client-side button only appears when
 > the server's `allocation_limit` is greater than 0, and on a stock panel that value may be `NULL`.
@@ -548,9 +632,6 @@ The full evidence chain is in `docs/06-tasks/research/v140-01-cpu-async-blocking
 
 Reproduce: `tools/perfscope-jfr-overhead.ps1` (counts per sample block, requests both `jdk.ExecutionSample` and `jdk.NativeMethodSample`, isolates Server thread with a Wilson interval, prints the tested jar's version and SHA-256; **excludes `cn.perfscope.shaded.*`** — that is the shaded bStats network stack, and counting it as plugin overhead inflates the number: with every collector disabled the residue was still 6.46%).
 The full executable minimal measurement set (three load tiers, A/B baseline, artifact format) is in `docs/07-guides/PERF-BASELINE-PLAN.md`.
-
-Reproduce: `tools/perfscope-jfr-overhead.ps1` (counts per sample block, requests both `jdk.ExecutionSample` and `jdk.NativeMethodSample`, reports Server thread separately with a Wilson interval, and prints the tested jar's version and SHA-256).
-The full, executable minimal measurement set (three load tiers, A/B baseline, artifact format) is in `docs/07-guides/PERF-BASELINE-PLAN.md`.
 
 > Caveat: the table above is a **magnitude reference** from one shared dev machine (empty server + 1 bot, `view-distance 5`, ~121 loaded chunks, 90-second window) — not a performance guarantee and not representative of your server. The test load is only **2%–5%** of the 2000–5000-chunk target (121 chunks vs 2000–5000, a 16–41× gap). If you observe abnormal overhead, report it with a `/spark profiler` link.
 
