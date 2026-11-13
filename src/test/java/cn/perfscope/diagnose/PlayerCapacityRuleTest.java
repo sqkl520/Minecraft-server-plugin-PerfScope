@@ -290,7 +290,7 @@ class PlayerCapacityRuleTest {
         assertFalse(d.critical(), "95% is a warning; critical starts at 98%");
     }
 
-    /** detail 必须由实现真的把 {current, max, percent, minutes, windowLow} 填进模板。 */
+    /** detail 必须由实现真的把 {current, max, percent, minutes, lowPlayers} 填进模板。 */
     @Test
     void detailCarriesTheWindowLowAndTheSpan() throws Exception {
         ConfigManager cm = configManager(true);
@@ -299,10 +299,146 @@ class PlayerCapacityRuleTest {
         Diagnosis d = evaluate(snapshot(95, MAX_PLAYERS), hs, cm).hit();
         assertNotNull(d);
 
-        // 6 条 × 100 秒 = 500 秒 → 整数分钟 8
+        // 6 条 × 100 秒 = 500 秒 → 整数分钟 8；窗口最低样本是 90 名玩家
         String expected = Messages.get("diag.DIAG-PLAYER-CAP.detail", 95, 100, 95, 8L, 90);
         assertEquals(expected, d.detail(),
-            "detail must render {current, max, percent, minutes, windowLow} in that order");
+            "detail must render {current, max, percent, minutes, windowLowPlayers} in that order");
+    }
+
+    // ==================== F-8：detail 不得编造历史百分比 ====================
+
+    /**
+     * <b>F-8（回归）</b>：历史样本只存<b>当时的玩家数</b>，不存当时的容量，所以任何
+     * "窗口最低也有 X%" 都是一个按<b>当前</b>上限重算出来的、历史上从未发生过的百分比。
+     *
+     * <p>形状：当前 48/50（96%）；窗口里最低是 45 名玩家。按当前上限折算是 90%，
+     * 而样本被采集的那一刻上限是多少、当时占比多少，历史里根本没有记录。</p>
+     *
+     * <p>区分力：旧 detail 写"最低也有 90%"，全文<b>不含</b> 45；新 detail 必须报出
+     * 原始计数 45，且不得出现那个折算出来的 90%。</p>
+     */
+    @Test
+    void historyLowIsReportedAsARawCountNotAFabricatedPercentage() throws Exception {
+        ConfigManager cm = configManager(true);
+        HistoryStore hs = history(cm, samples(45, 46, 47, 48, 48, 48));
+
+        Diagnosis d = evaluate(snapshot(48, 50), hs, cm).hit();
+        assertNotNull(d, "48/50 = 96% sustained is a real capacity wall");
+
+        assertTrue(d.detail().contains("45"),
+            "F-8: the window low must be reported as the raw player count that history really "
+                + "stores (45), not only as a percentage recomputed from the current cap, got: "
+                + d.detail());
+        // 45/50 = 90%：旧实现会在 detail 里打出这个数，而它按当时的容量从未发生过
+        assertFalse(d.detail().contains("90%"),
+            "F-8: no '90%' may appear — that percentage was recomputed with today's cap and never "
+                + "occurred at the time the samples were taken, got: " + d.detail());
+
+        String expected = Messages.get("diag.DIAG-PLAYER-CAP.detail", 48, 50, 96, 8L, 45);
+        assertEquals(expected, d.detail(),
+            "detail must render {current, max, percent, minutes, windowLowPlayers}");
+    }
+
+    /** F-7 用的配置装配：阈值被构造成 0（模拟配置层校验失效或有人直构 ConfigData）。 */
+    private static ConfigManager configManagerZeroPlayersThreshold() throws Exception {
+        ConfigManager cm = configManager(true);
+        cm.get().players_warningThreshold = 0;
+        cm.get().players_criticalThreshold = 0;
+        return cm;
+    }
+
+    /**
+     * 反向（扩容 100→200）：历史 95 名玩家按当前上限折算是 47.5%，窗口低谷成立 → clean。
+     *
+     * <p>这条锁住"判定没被 F-8 的措辞修复带偏"：clean 的依据是历史玩家的<b>原始计数</b>
+     * 相对当前容量的占比，而不是某个历史百分比。</p>
+     */
+    @Test
+    void grownCapacityMakesTheSameHistoryLookHealthy() throws Exception {
+        ConfigManager cm = configManager(true);
+        HistoryStore hs = history(cm, samples(95, 95, 95, 95, 95, 95));
+
+        // 当前 95/200 = 47.5% < 90 → 提前 clean，不进入历史判定
+        Evaluation ev = evaluate(snapshot(95, 200), hs, cm);
+        assertNull(ev.hit());
+        assertTrue(ev.isClean());
+    }
+
+    // ==================== F-7：不可用的阈值不得产生荒谬结论 ====================
+
+    /**
+     * <b>F-7（回归）</b>：{@code players.warning_threshold = 0}（配置层漏放）时，
+     * 规则不得把"1 人在线 / 上限 200"报成"接近上限"。
+     *
+     * <p>旧实现：{@code currentPercent(1) < 0} 恒假 → 不早退；{@code minPercent < 0-10} 恒假 →
+     * 不 return clean；{@code 1 >= critical(0)} 恒真 → 一条 critical。
+     * 一个 0 人服也会被判"容量严重不足"。</p>
+     *
+     * <p>防御口径：阈值 0 不是一个可用的判据，规则必须<b>如实说无法评估</b>（skip），
+     * 而不是猜一个默认值——猜默认值会掩盖配置错误，正是本项目一条硬原则的反面。</p>
+     */
+    @Test
+    void zeroWarningThresholdSkipsInsteadOfReportingACritical() throws Exception {
+        ConfigManager cm = configManagerZeroPlayersThreshold();
+        HistoryStore hs = history(cm, samples(1, 1, 1, 1, 1, 1));
+
+        Evaluation ev = evaluate(snapshot(1, 200), hs, cm);
+
+        assertNull(ev.hit(), "F-7: 1 player out of 200 must never be 'near capacity'");
+        assertFalse(ev.isClean(), "the threshold is unusable, so nothing was really evaluated");
+        assertNotNull(ev.skip());
+        assertEquals(reason("diag.skip.players-threshold-invalid", 0), ev.skip().reason());
+    }
+
+    /** 负数阈值同样不可用（配置层本该拦，规则侧不依赖它拦）。 */
+    @Test
+    void negativeWarningThresholdSkips() throws Exception {
+        ConfigManager cm = configManager(true);
+        cm.get().players_warningThreshold = -1;
+        cm.get().players_criticalThreshold = -1;
+        HistoryStore hs = history(cm, samples(1, 1, 1, 1, 1, 1));
+
+        Evaluation ev = evaluate(snapshot(1, 200), hs, cm);
+
+        assertNull(ev.hit());
+        assertNotNull(ev.skip());
+        assertEquals(reason("diag.skip.players-threshold-invalid", -1), ev.skip().reason());
+    }
+
+    /**
+     * 临界阈值不可用（&lt;= 0）时不得把每条命中都升成 critical。
+     *
+     * <p>{@code currentPercent >= 0} 恒真——旧实现会把任何一个命中标成严重。
+     * 现在命中照旧输出（warning 阈值本身是有效的），但严重度退回 false。</p>
+     */
+    @Test
+    void unusableCriticalThresholdDoesNotEscalateEveryHit() throws Exception {
+        ConfigManager cm = configManager(true);
+        cm.get().players_criticalThreshold = 0;
+        HistoryStore hs = history(cm, samples(90, 92, 93, 94, 95, 95));
+
+        Diagnosis d = evaluate(snapshot(95, MAX_PLAYERS), hs, cm).hit();
+        assertNotNull(d, "the warning threshold is fine, so the hit itself is still valid");
+        assertFalse(d.critical(),
+            "a critical threshold of 0 is not a judgement anyone made; it must not turn every hit "
+                + "into a critical");
+    }
+
+    /**
+     * 规则侧防御不得与配置层的正解冲突：合法阈值下行为逐字不变。
+     *
+     * <p>与另一个 Agent 在 {@code ConfigManager} 里加的"阈值必须 &gt; 0"是<b>两层分工</b>：
+     * 配置层负责把错误配置挡在门外并给出 warning；规则层负责在错误配置真的漏进来时
+     * 不产生荒谬结论（跳过 + 说明），绝不悄悄替换成一个"看起来正常"的值。</p>
+     */
+    @Test
+    void aSaneThresholdIsUnaffectedByTheDefensiveGuard() throws Exception {
+        ConfigManager cm = configManager(true);
+        HistoryStore hs = history(cm, samples(90, 92, 93, 94, 95, 95));
+
+        Diagnosis d = evaluate(snapshot(95, MAX_PLAYERS), hs, cm).hit();
+        assertNotNull(d);
+        assertFalse(d.critical(), "95% is still below the 98% critical line");
     }
 
     // ==================== critical 分级 ====================

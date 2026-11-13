@@ -318,7 +318,89 @@ class MemoryLeakRuleTest {
         Evaluation ev = evaluate(snapshot(95, 4L * 1024 * 1024 * 1024), hs, cm);
         assertNull(ev.hit(), "a 0% sample is a missing-reading sentinel, not a real 0% heap");
         assertNotNull(ev.skip(), "the rule must say it could not conclude, not pretend it is clean");
-        assertEquals(reason("diag.skip.heap-sample-missing"), ev.skip().reason());
+        assertEquals(reason("diag.skip.heap-sample-missing", 1, 16), ev.skip().reason());
+    }
+
+    // ==================== F-1 / F-2：窗口内任何一条缺采都必须让结论降级 ====================
+
+    /**
+     * <b>F-1</b>：抬升不足 8 个百分点 + 窗口内存在缺采样本 → 必须是 SKIP，不是 CLEAN。
+     *
+     * <p>形状照抄审查报告：{@code heapUsagePercent = [85, 0×10, 86]}（12 条里 10 条内存缺采）。
+     * 旧实现先看 {@code growth = 86-85 = 1 < 8} 就返回 CLEAN，根本没走到后半段的缺采守卫——
+     * 于是"窗口里有 10 条没读数"被说成"查过了，没事"。</p>
+     *
+     * <p>区分力：正确实现 SKIP，旧实现 CLEAN，两者结论相反。</p>
+     */
+    @Test
+    void mostlyMissingWindowIsSkipNotClean() throws Exception {
+        ConfigManager cm = configManager(true);
+        long now = System.currentTimeMillis();
+        int[] percents = {85, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 86};
+        java.util.ArrayList<HistorySample> s = new java.util.ArrayList<>(percents.length);
+        for (int i = 0; i < percents.length; i++) {
+            s.add(new HistorySample(now - (long) (percents.length - 1 - i) * 100_000L,
+                20.0, 10.0, percents[i], 5, 100, 500));
+        }
+        HistoryStore hs = history(cm, s);
+
+        Evaluation ev = evaluate(snapshot(86, 4L * 1024 * 1024 * 1024), hs, cm);
+
+        assertNull(ev.hit(), "a window that is 10/12 unread cannot support a leak verdict");
+        assertFalse(ev.isClean(),
+            "F-1: growth < 8 short-circuited to CLEAN before the missing-sample guard, so "
+                + "'10 of 12 samples have no reading' was reported as 'checked, all fine'");
+        assertNotNull(ev.skip());
+        assertEquals(reason("diag.skip.heap-sample-missing", 10, 12), ev.skip().reason(),
+            "the skip reason must state how many samples are missing out of how many");
+    }
+
+    /**
+     * <b>F-2</b>：缺采样本在窗口<b>中间</b>（既不首也不尾、也不在后半段）+ 抬升足够 →
+     * 旧实现直接 HIT，并在 detail 里声称"窗口最低点仍是 92%"，把 4 条<b>缺失</b>样本
+     * 排除在"窗口最低"之外。
+     *
+     * <p>区分力：正确实现 SKIP，旧实现 HIT。</p>
+     */
+    @Test
+    void missingSamplesInTheMiddleBlockTheVerdict() throws Exception {
+        ConfigManager cm = configManager(true);
+        long now = System.currentTimeMillis();
+        int[] percents = {80, 0, 0, 0, 0, 90, 92, 94, 95, 95, 95, 95};
+        java.util.ArrayList<HistorySample> s = new java.util.ArrayList<>(percents.length);
+        for (int i = 0; i < percents.length; i++) {
+            s.add(new HistorySample(now - (long) (percents.length - 1 - i) * 100_000L,
+                20.0, 10.0, percents[i], 5, 100, 500));
+        }
+        HistoryStore hs = history(cm, s);
+
+        Evaluation ev = evaluate(snapshot(95, 4L * 1024 * 1024 * 1024), hs, cm);
+
+        assertNull(ev.hit(),
+            "F-2: 4 of the 12 samples have no reading, so the window minimum is unknown");
+        assertFalse(ev.isClean());
+        assertNotNull(ev.skip());
+        assertEquals(reason("diag.skip.heap-sample-missing", 4, 12), ev.skip().reason());
+    }
+
+    /**
+     * detail 必须声明参与统计的样本条数，且数值与真实窗口一致。
+     *
+     * <p>"窗口最低点"这类措辞最容易在样本被部分丢弃时变成编造——把条数写进 detail，
+     * 读者才能自己核对这个最低点是在几条读数上取的。</p>
+     */
+    @Test
+    void detailStatesHowManySamplesItIsBasedOn() throws Exception {
+        ConfigManager cm = configManager(true);
+        long now = System.currentTimeMillis();
+        HistoryStore hs = history(cm, risingSamples(16, 100_000L, 80, 95, now));
+
+        Diagnosis d = evaluate(snapshot(95, 4L * 1024 * 1024 * 1024), hs, cm).hit();
+        assertNotNull(d);
+        String expected = reason("diag.DIAG-MEM-LEAK.detail",
+            25L, 80, 95, 15, 88, 95, 16);
+        assertEquals(expected, d.detail(),
+            "detail must render {minutes, first, last, growth, laterHalfLow, current, samples}");
     }
 
     /**

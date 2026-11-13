@@ -64,12 +64,14 @@ public final class DiagnoseMessages {
         put(en, zh, "diag.DIAG-MEM-LEAK.title",
             "Sustained heap growth (possible memory leak)",
             "堆占用持续抬升（疑似内存泄漏）");
+        // F-1/F-2：{6} = 本结论实际依据的样本条数。缺采样本已被前置检查挡掉（缺一条就 SKIP），
+        // 因此这里的条数与"窗口最低点"取样的样本量严格一致——读者能自己核对。
         put(en, zh, "diag.DIAG-MEM-LEAK.detail",
             "Heap usage climbed from {1}% to {2}% over the last {0} min (+{3} percentage points), and the "
                 + "lowest reading in that window was still {4}% (it never fell back to the starting level) "
-                + "— currently {5}%",
+                + "— currently {5}%; based on {6} samples, all with a real reading",
             "近 {0} 分钟内堆占用从 {1}% 升至 {2}%（+{3} 个百分点），且该时段最低点仍为 {4}%"
-                + "（未回落到起点）——当前 {5}%");
+                + "（未回落到起点）——当前 {5}%；依据 {6} 条均有真实读数的样本");
         put(en, zh, "diag.DIAG-MEM-LEAK.suggestion",
             "Preserve evidence before you act: 1) /perfscope report to archive the current state; "
                 + "2) /spark heapdump to take a heap snapshot (Paper bundles spark, which already ships "
@@ -125,10 +127,14 @@ public final class DiagnoseMessages {
         put(en, zh, "diag.DIAG-PLAYER-CAP.title",
             "Player count sustained near capacity",
             "在线人数持续接近上限");
+        // F-8：{4} 是历史窗口里的<b>原始玩家数</b>（history 只存这个，不存当时的 maxPlayers）。
+        // 旧文案把它写成"最低也有 {4}%"，而那个百分比是用**当前**容量折算的、历史上从未发生过的数字。
         put(en, zh, "diag.DIAG-PLAYER-CAP.detail",
-            "Currently {0}/{1} ({2}%), and even the lowest point in the last {3} min was {4}% "
-                + "— new players may not be able to join",
-            "当前 {0}/{1}（{2}%），近 {3} 分钟内最低也有 {4}%——新玩家可能进不来");
+            "Currently {0}/{1} ({2}%), and the window low over the last {3} min was {4} players "
+                + "(a raw count, as stored in history; history does not record the capacity in "
+                + "effect at the time) — new players may not be able to join",
+            "当前 {0}/{1}（{2}%），近 {3} 分钟内最低为 {4} 名玩家"
+                + "（历史里存储的原始计数；历史不记录当时的容量）——新玩家可能进不来");
         put(en, zh, "diag.DIAG-PLAYER-CAP.suggestion",
             "First separate capacity from idling: 1) /perfscope players to see the online-time "
                 + "distribution; 2) if AFK players are holding slots, install an AFK-kick plugin to free "
@@ -149,6 +155,14 @@ public final class DiagnoseMessages {
             "Peak {0}ms is about {2}x the {1}ms average — the average hides an isolated stall, "
                 + "which players feel as a brief hitch",
             "最大 {0}ms ≈ 平均 {1}ms 的 {2} 倍——均值掩盖了偶发卡顿，玩家体感为「顿一下」");
+        // F-6：均值本身已越过 mspt.critical_threshold 时，这是"持续压力上的毛刺"，不是孤立尖刺。
+        // 两种病对应两种排查方向，因此必须是两条文案而不是同一句。
+        put(en, zh, "diag.DIAG-MSPT-SPIKE.detail-pressure",
+            "Peak {0}ms is about {2}x the {1}ms average, and that average already exceeds the "
+                + "{3}ms critical line — this is a stall on top of sustained pressure, not an "
+                + "isolated spike (the alerts panel is reporting the same average)",
+            "最大 {0}ms ≈ 平均 {1}ms 的 {2} 倍，而该均值本身已越过 {3}ms 的严重线——"
+                + "这是持续压力之上的卡顿，不是孤立尖刺（告警区报的也是同一个均值）");
         put(en, zh, "diag.DIAG-MSPT-SPIKE.suggestion",
             "Spikes usually come from chunk saves or GC: 1) reduce chunk-save pressure — lower "
                 + "chunks.max-auto-save-chunks-per-tick in config/paper-world-defaults.yml "
@@ -178,12 +192,11 @@ public final class DiagnoseMessages {
             "Current heap usage {0}% is below the warning line {1}% (no leak verdict at low water level)",
             "当前堆占用 {0}% 低于告警线 {1}%（低水位不判定泄漏）");
         put(en, zh, "diag.skip.heap-sample-missing",
-            "The window contains samples without memory data (heapUsagePercent=0); cannot compare the trend",
-            "窗口内含内存未采集样本（heapUsagePercent=0），无法比较趋势");
-        put(en, zh, "diag.skip.heap-sample-missing-later-half",
-            "The second half of the window contains samples without memory data (heapUsagePercent=0); "
-                + "cannot tell whether usage fell back",
-            "窗口后半段含内存未采集样本（heapUsagePercent=0），无法判定是否回落");
+            "{0} of the {1} samples in the window have no memory reading (heapUsagePercent=0), so the "
+                + "window has gaps and its true low point is unknown; the rule needs an unbroken window "
+                + "to claim a sustained rise",
+            "窗口内 {1} 条样本中有 {0} 条内存未采集（heapUsagePercent=0），窗口有缺口、最低点无从判定；"
+                + "本规则需要完整窗口才能断言「持续抬升」");
 
         put(en, zh, "diag.skip.hotspots-unavailable",
             "Hotspot chunk module unavailable (collection failed or disabled via hotspots.enabled=false)",
@@ -205,6 +218,13 @@ public final class DiagnoseMessages {
         put(en, zh, "diag.skip.max-players-not-ready",
             "max-players not available yet (currently {0})",
             "max-players 未就绪（当前 {0}）");
+        // F-7：阈值 0/负数不是"最严格的门槛"，而是"没有门槛"。规则侧不猜默认值（那会掩盖配置错误），
+        // 只如实说这个判据用不了。根因修复在 ConfigManager 的阈值校验。
+        put(en, zh, "diag.skip.players-threshold-invalid",
+            "players.warning_threshold is {0}, which is not a usable threshold (it must be > 0); "
+                + "fix the configuration — the rule will not guess a default for you",
+            "players.warning_threshold 为 {0}，不是可用的阈值（必须 > 0）；请修正配置——"
+                + "本规则不会替你猜一个默认值");
 
         put(en, zh, "diag.skip.mspt-unavailable",
             "MSPT module unavailable (collection failed or disabled in the configuration)",

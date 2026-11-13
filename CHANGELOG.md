@@ -25,6 +25,120 @@
 > `1.3.0` 归档 JAR 里查不到 Prometheus 端点、`/perfscope webhook` 子命令与
 > 企业微信 / 飞书 / 钉钉通道。要用这些功能只能自己从源码构建。
 
+### v1.4 未发布 — Fixed：阈值对取 0 能通过校验，导致规则永久告警
+
+> **v1.4 未发布**：本小节不在 v1.3.0 的任何发布包中，需自行从源码构建。
+
+- **症状**：`players.warning_threshold: 0` + `players.critical_threshold: 0` 能通过加载期校验
+  （非负、且 `0 <= 0`）。后果是 `DIAG-PLAYER-CAP` 永久 critical——1 人在线 / 200 上限也报
+  「接近上限，新玩家可能进不来」。同类问题存在于 `memory.heap_*`、`entities.total_*`、
+  `chunks.loaded_*`、`worlds.*.entities.*` 与 `mspt.*`。
+- **根因（两条判据同时失效）**：`MetricsCollector.collectPlayers` 的判据是 `pct >= warning`，
+  而 `playerPercent()` 值域 0-100，阈值 0 恒满足；`CoreRules.PlayerCapacityRule` 的前置短路是
+  `currentPercent < warning`（`0 < 0` 为 false，不再短路），其唯一逃逸条件
+  `minPercent < warning - 10` 退化为 `< -10`——对百分比**永假**，于是这条规则失去全部出口。
+  计数对（entities/chunks）同理：判据是严格大于，阈值 0 等于「有一个就超」，而任何真实服务器
+  都恒有实体与区块。
+- **修复**：`ConfigManager.sanitizeIntPair` 的下界由 `0` 抬到 `1`，并按指标域加上界——
+  百分比对（players / memory）上界 100，计数对（entities / chunks / worlds 覆盖）上界 10,000,000。
+  `mspt` 是 `double` 高值差对，单列一道 `<= 0` 的闸（判据 `msptAvg > threshold`，0 让严重档恒真），
+  不设 1ms 之类下界，亚毫秒配置仍合法。
+- **不拒绝 `0` 的地方（避免一刀切误伤）**：`tps` 是低值差指标，判据 `tps1m < threshold`，
+  阈值 0 让告警**永不触发**——是一种自洽的「关掉 TPS 告警」写法，语义与 players 正好相反，
+  故保持合法；测试 `tpsZeroIsStillLegal` 锁住它不被误伤。同理 `cpu.hysteresis_margin` 的
+  `0 = 关闭迟滞`、`alerts.cooldown-seconds` 的 `0 = 无冷却`、`report.retention_days` 的
+  `0 = 永久保留` 全部不受影响（它们不是阈值对，走的不是 `sanitizeIntPair`）。
+- **`0` 不被解释成「禁用」**：全仓没有任何一处把阈值 0 当开关，模块级开关是
+  `players/entities/chunks/memory.enabled`。把 0 静默当禁用会压掉整条诊断，且与用户写 0 时的
+  直觉（「从 0 起报」= 最灵敏）相反。新文案 `config.check.threshold-zero` 明确提示
+  「想关闭监测请改用 `enabled: false`」。
+- **新增测试** `ThresholdPairZeroValidationTest`（21 个用例）：0/0、0/95、85/0、负数、超上限
+  （101 与 10,000,001）、倒置全部回退；默认值、`1/1`、`100/100`、500,000 级计数、0.5/1.0 的
+  mspt、tps 0/0 全部原样保留；worlds 覆盖回退到**已校验的全局值**而非硬编码；模块禁用时阈值
+  仍被校验；两条 warning 文案分别锁住「点名键 + `enabled: false` 提示」与「上界文案的下界写 1 而非 0」。
+- **变异验证**（三道闸各自独立被锁住，逐个验证）：把下界改回 `0` 并同时删掉 mspt 闸
+  → 10 个用例变红；把百分比上界放宽到 1e7 → `abovePercentCeilingFallsBack` 变红；
+  删掉 mspt 闸 → `msptZeroPairFallsBack` 变红；把上界文案换回通用
+  `threshold-out-of-range` → `aboveCeilingWarningStatesTheRealLowerBound` 变红。
+- **兼容性**：6 个已发布 jar 的 `config.yml` 阈值（80/95、2000/3000、1500/2500、12000/18000 等）
+  全部落在合法区间内，`tools/check-config-compat.mjs` 仍 9/9 PASS，无既有配置被误伤。
+
+### v1.4 未发布 — Fixed：`CoreRules` 五条诊断规则的错误结论（F-1 / F-2 / F-5 / F-6 / F-7 / F-8）
+
+> **v1.4 未发布**：本小节不在 v1.3.0 的任何发布包中，需自行从源码构建。
+
+独立审查在 `CoreRules.java` 里找到 6 条缺陷，逐条判定后 **5 条修、1 条只改措辞**，
+另 1 条（F-8 的 schema 缺口）按成本明确不修。共同主题是**规则给出了它没有证据支持的结论**。
+
+- **F-1 / F-2：内存泄漏规则在缺采窗口上给出 CLEAN 或伪造的"窗口最低点"**。
+  缺采检查（`heapUsagePercent == 0` 是"这条样本没采到内存"的哨兵，`HistoryStore` 只按时间
+  过滤、不剔除 0 值，所以哨兵能进到规则体里）原排在 `growth < 8 → clean` **之后**，且只校验
+  首尾两点。后果两种：
+  - 12 条里 10 条缺采（`[85, 0×10, 86]`）→ `growth = 1 < 8` 先返回 **CLEAN**，
+    规则根本没看过后半段那 10 条；
+  - 缺采落在窗口**中间**（`[80, 0,0,0,0, 90,92,94,95,95,95,95]`）→ 首尾都有效、growth 足够
+    → **HIT**，detail 写"窗口最低点仍是 92%"，把 4 条**缺失**样本排除在"窗口最低"之外。
+
+  现在缺采检查前置到所有判据之前，并要求**窗口内每一条样本都有读数**；缺一条即
+  SKIP 并说明"12 条里有 4 条没读数"。detail 末尾新增"依据 N 条均有真实读数的样本"，
+  让"窗口最低点"这句话的样本量与读者看到的数字严格一致。
+  **行为变更：这类窗口的结论从 CLEAN/HIT 变为 SKIP。** 代价是一条坏样本会让本规则沉默
+  一整个 30 分钟窗口——这是刻意选的：在有洞的数据上给泄漏结论，比沉默更糟。
+- **F-5：热点区块的严重线与命中线量纲不联动**。严重线原为写死的 `CHUNK_CRITICAL = 500`，
+  命中线却是 `max(100, hotspots.chunk-warning-threshold)`。服主把阈值调到 1000
+  （"我觉得 1000 才值得一看"）后，一个**刚好达到他自己那条线**的区块被判 critical，
+  而 detail 同时写着"单区块阈值 1000"——读起来像配置没生效。
+  现在 `critical = count >= 生效命中线 × 2.5`。选 2.5 而非项目惯用的 1.5，是因为
+  `200 × 2.5 = 500` 正好复现 v1.2 手校准过的默认严重线，**默认配置下零行为变化**；
+  1.5 会让 300–499 实体的区块从警告升级为严重，给所有默认配置的服新增噪音。
+  不变式：倍数 > 1 ⇒ 严重线永远严格高于命中线，"刚达到命中线"只可能是警告。
+  未新增配置键——`hotspots` 段只有 `chunk-warning-threshold` 一个键，新增 critical 键属扩展
+  而非修复，且缺省回退会让"配置没生效"换个形式重现。
+  **行为变更：抬高了 `chunk-warning-threshold` 的服，原本 critical 的区块可能降为 warning。**
+- **F-6：MSPT 的三套 critical 口径，其中两套互相否定**。摸底结果：
+  ①`MetricsCollector.collectMSPT` 用 `msptAvg > cfg.mspt_criticalThreshold`（默认 50）发告警；
+  ②`ThresholdColors.levelOf(MSPT)` 用 `>= 同一阈值` 染色——与 ① 只差等号归属，同源；
+  ③本规则原用硬编码 `msptMax > 1000.0`，量的是**峰值**。
+  ③ 与 ①② 量的是不同的东西（单拍冻结 vs 均值负载），这个区分是真实的，**不抹平**——
+  均值 12ms 但有一拍 1500ms 的服要查区块保存/GC，均值 60ms 的服要查整体负载。
+  但同一屏不能互相否定：`msptAvg=60`（告警区已 critical）、`msptMax=200` 时，旧诊断判
+  `critical=false` 并把这条排到命中列表末尾染成黄色。现在严重度取并集：
+  `msptMax > 1000` **或** `msptAvg > cfg.mspt_criticalThreshold` → critical。
+  告警层一个字没动，只是让诊断层的严重度**不会低于**告警层。
+  阈值 `<= 0`（直构 `ConfigData` 的未加载实例）时不启用后一支——0 不是"最严格的门槛"，
+  而是"没有门槛"。文案拆成两条：均值未越线时说"均值掩盖了偶发卡顿"，越线时说
+  "均值本身已越过严重线，这是持续压力之上的卡顿（告警区报的也是同一个均值）"。
+  **行为变更：均值越线的服务器，MSPT 命中从黄色 warning 变为红色 critical。**
+- **F-7：`players.warning_threshold = 0` 让规则永久 critical**。配置层能放行 0
+  （`sanitizeIntPair` 只拦负数与 >1e7），此时 `currentPercent < 0` 恒假、`minPercent < -10`
+  恒假、`currentPercent >= 0` 恒真 → 1 人在线 / 200 上限也报"接近上限"、且是 critical。
+  配置层正在补"阈值必须 > 0"的校验（那是**根因修复**）；本规则侧的**防御**是：`warning <= 0`
+  时 SKIP 并点名键值，`critical <= 0` 时命中照常输出但不下"严重"结论。
+  **分工**：配置层负责"错误配置进不来"，规则层负责"万一进来了也不产生荒谬结论"，
+  任一层失效时另一层仍成立。规则层**不猜默认值**——悄悄替换成 90 会掩盖配置错误
+  （服主永远不知道自己的配置没生效），正是"不让盲区假装成健康"原则的反面。
+  **行为变更：阈值非法的服，该规则从"永久 critical"变为"跳过并说明原因"。**
+- **F-8：玩家容量规则用当前 `maxPlayers` 重算历史百分比**。`HistorySample` 只存
+  `playerCount`，**不存当时的 maxPlayers**（CSV 12 列里没有这一列）。旧 detail 把历史玩家数
+  除以当前上限折成百分比，声称"近 N 分钟最低也有 95%"——容量 200→100 时，历史 95 人当时是
+  47.5%，那个 95% **从未发生过**。**判定逻辑本身是对的**（当前 95/100 确实贴顶），
+  错的只有措辞。现在 detail 只报历史里真实存储的**原始玩家数**，并注明"历史不记录当时的容量"。
+  **不给 `HistorySample` 加 `maxPlayers` 列**：那会把 CSV 从 12 列变 13 列，影响旧文件兼容与
+  `CsvLayoutTest` 的 15 个用例，而本条缺陷的实质是措辞伪造、不是判定错误，收益不足以抵消。
+  判定阈值仍是"历史玩家数按当前上限折算的百分比"——但这个折算**不冒充历史事实**，
+  它只是把历史计数放到今天的容量尺度上衡量（与 `currentPercent` 同口径）。
+  **行为变更：detail 文案改变（不再出现历史百分比），结论不变。**
+- **新增/改写测试 38 个**（`MemoryLeakRuleTest` 12→15、`EntityHotspotRuleTest` 13→17、
+  `MsptSpikeRuleTest` 15→20、`PlayerCapacityRuleTest` 17→24）。每条缺陷的红→绿都保留了
+  **结论相反**的靶点：F-1 CLEAN↔SKIP、F-2 HIT↔SKIP、F-5 critical↔warning、
+  F-6 warning↔critical、F-7 HIT↔SKIP、F-8 伪造百分比↔原始计数。
+  `EntityHotspotRuleTest` 里原先刻意断言缺陷存在的 `knownDefectChunkAtTheRaisedThresholdIsCritical`
+  按约定改为断言 `!critical`（`chunkAtTheRaisedThresholdIsNoLongerCritical`）。
+- **变异验证（14 个变异体全部被咬住，0 存活）**：缺采检查挪回 growth 之后 / 只校验首尾 /
+  完全不数缺采；严重线改回固定 500 / 倍数改 1.0 / 用未托底的配置值算严重线 / 丢掉
+  `ABSOLUTE_FLOOR`；MSPT 去掉均值分支 / 去掉阈值可用性守卫 / 两种严重度共用一条文案 /
+  把 `>` 写成 `>=`；玩家容量去掉 warning 守卫 / 去掉 critical 守卫；窗口低谷改回百分比。
+
 ### v1.4 未发布 — 逐告警 Prometheus 指标
 
 > **v1.4 未发布**：本小节不在 v1.3.0 的任何发布包中，需自行从源码构建。

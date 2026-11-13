@@ -249,6 +249,27 @@ public final class ConfigMessages {
             "Configuration check: {0} is out of range (must satisfy 0 <= value <= {1}); "
                 + "reverted to the defaults: w={2} c={3}",
             "配置校验：{0} 数值越界（要求 0 ≤ 值 ≤ {1}），已回退默认值：w={2} c={3}");
+        // v1.4：int 阈值对的**上界**越界。不能复用上面那条——它的下界写的是 0，
+        // 而 players/memory 这类百分比对的合法下界已抬到 1；用户写 101 却被告知"要求 0 ≤ 值"
+        // 会以为 0 是合法的，改完再撞一次墙。两条文案的下界各说各的。
+        put(en, zh, "config.check.threshold-above-max",
+            "Configuration check: {0} exceeds the limit for this metric "
+                + "(must satisfy 1 <= value <= {1}); reverted to the defaults: w={2} c={3}. "
+                + "A threshold above the metric's maximum can never be reached, so the alert stays silent",
+            "配置校验：{0} 超出该指标的上限（要求 1 ≤ 值 ≤ {1}），已回退默认值：w={2} c={3}。"
+                + "阈值高于该指标的读数上限时永远不可达，告警会一直静默");
+        // v1.4：阈值对取 0（或负数）时的专用文案。旧口径把 0 与负数的后果混为一谈，
+        // 只说"越界"会让服主以为是笔误；实际 0 的语义是「最灵敏」——读数恒 >= 0，
+        // 于是整条诊断永久命中且恢复条件永不可达。所以文案必须点出「想关闭告警请用 enabled: false」，
+        // 否则用户会反复试 0、-1、0.0 之类的写法。
+        put(en, zh, "config.check.threshold-zero",
+            "Configuration check: {0} has warning={1} critical={2}, but a threshold of 0 (or less) "
+                + "makes the rule fire permanently and never recover (every metric reading is >= 0); "
+                + "reverted to the defaults: w={3} c={4}. To turn this metric off, use the module's "
+                + "enabled: false instead of a zero threshold",
+            "配置校验：{0} 的 warning={1} critical={2}，但阈值取 0（或更小）会让该规则永久命中且永不恢复"
+                + "（所有指标读数都 ≥ 0）；已回退默认值：w={3} c={4}。如需关闭这项监测，"
+                + "请改用该模块的 enabled: false，而不是把阈值写成 0");
         // f-s03-logic-01 残留闭合：阈值落在近恒真区 (20.0, 20.5] 时只警告、不改值。
         // 与 config.check.history-interval 的 warn-only 口径一致，避免 breaking change。
         put(en, zh, "config.check.tps-near-ceiling",

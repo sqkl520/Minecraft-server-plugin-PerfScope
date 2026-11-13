@@ -247,6 +247,114 @@ class MsptSpikeRuleTest {
         assertFalse(d.critical(), "exactly 1000ms stays at warning level (the bar is strictly >1000)");
     }
 
+    // ==================== F-6：诊断层与告警层不得互相否定 ====================
+
+    /**
+     * <b>F-6（回归）</b>：{@code msptAvg = 60}（采集层已按 {@code mspt.critical_threshold=50}
+     * 判为 critical 告警）、{@code msptMax = 200} 时，诊断结论不得是"只是一次尖刺、不严重"。
+     *
+     * <p>旧实现只看 {@code msptMax > 1000}，于是同一屏上告警区写着"critical"、
+     * 诊断区却把这条排到命中列表末尾（warning 级），两个结论互相否定。</p>
+     *
+     * <p>本规则的定位是"尖刺"，所以判据是"均值是否也已越线"——均值越线就不再是孤立尖刺，
+     * 而是持续的压力。这样既不改变告警层语义（那边仍按 avg 判），也让同屏结论一致。</p>
+     */
+    @Test
+    void spikeOnAnAlreadyCriticalAverageIsCritical() {
+        ConfigManager.ConfigData cfg = new ConfigManager.ConfigData();
+        cfg.mspt_warningThreshold = 45.0;
+        cfg.mspt_criticalThreshold = 50.0;
+
+        Evaluation ev = new CoreRules.MsptSpikeRule().evaluate(snapshot(60, 200), null, cfg);
+
+        Diagnosis d = ev.hit();
+        assertNotNull(d, "a 200ms peak on a 60ms average is still a spike worth reporting");
+        assertTrue(d.critical(),
+            "F-6: the collection layer already raised a critical MSPT alert for avg=60 > 50; the "
+                + "diagnostic must not contradict it by calling the same snapshot a mere warning");
+    }
+
+    /** 反向：均值在告警线下、峰值也未过一秒 → 仍是 warning，不得因为这条修复而升级。 */
+    @Test
+    void spikeOnAHealthyAverageStaysAWarning() {
+        ConfigManager.ConfigData cfg = new ConfigManager.ConfigData();
+        cfg.mspt_warningThreshold = 45.0;
+        cfg.mspt_criticalThreshold = 50.0;
+
+        Diagnosis d = new CoreRules.MsptSpikeRule().evaluate(snapshot(20, 150), null, cfg).hit();
+
+        assertNotNull(d);
+        assertFalse(d.critical(), "a 150ms peak on a 20ms average is a hitch, not a freeze");
+    }
+
+    /**
+     * 边界：均值<b>恰好</b>等于 critical 阈值（50.0）→ critical。
+     *
+     * <p>采集层用的是 {@code msptAvg > cfg.mspt_criticalThreshold}（严格大于），
+     * 诊断层若也用 {@code >} 就完全同口径。这里锁的是"等号归哪边"必须与采集层一致：
+     * 采集层 50.0 不告警，诊断层 50.0 也不得升严重。</p>
+     */
+    @Test
+    void averageExactlyAtTheCriticalThresholdDoesNotEscalate() {
+        ConfigManager.ConfigData cfg = new ConfigManager.ConfigData();
+        cfg.mspt_warningThreshold = 45.0;
+        cfg.mspt_criticalThreshold = 50.0;
+
+        Diagnosis d = new CoreRules.MsptSpikeRule().evaluate(snapshot(50.0, 200), null, cfg).hit();
+
+        assertNotNull(d);
+        assertFalse(d.critical(),
+            "the collection layer uses a strict '>' against mspt.critical_threshold; at exactly 50.0 "
+                + "it raises only a warning, so the diagnostic must not label it critical either");
+    }
+
+    /**
+     * 严重线的三套口径必须同源：硬编码的一秒冻结（1000ms）<b>仍然</b>有效。
+     *
+     * <p>修复不得把"一秒冻结"这条绝对判据换掉——均值 10ms 但有一拍 1000ms+ 的服务器
+     * 体验是"偶尔卡死一下"，与均值越线是两种不同的病。</p>
+     */
+    @Test
+    void oneSecondFreezeStaysCriticalEvenWhenTheAverageIsHealthy() {
+        ConfigManager.ConfigData cfg = new ConfigManager.ConfigData();
+        cfg.mspt_warningThreshold = 45.0;
+        cfg.mspt_criticalThreshold = 50.0;
+
+        Diagnosis d = new CoreRules.MsptSpikeRule().evaluate(snapshot(10, 1200), null, cfg).hit();
+
+        assertNotNull(d);
+        assertTrue(d.critical(), "a 1.2s tick is a visible freeze whatever the average says");
+    }
+
+    /**
+     * detail 必须把"尖刺"与"均值负载"两种严重度分开表述。
+     *
+     * <p>同一个数字（峰值）在两种场景下读法完全不同：均值健康时它是"偶发卡顿"，
+     * 均值越线时它是"持续压力下的毛刺"。detail 里必须能看到均值与阈值的对照，
+     * 否则服主无法判断这条结论与告警区的关系。</p>
+     */
+    @Test
+    void detailDistinguishesASpikeFromSustainedPressure() {
+        ConfigManager.ConfigData cfg = new ConfigManager.ConfigData();
+        cfg.mspt_warningThreshold = 45.0;
+        cfg.mspt_criticalThreshold = 50.0;
+
+        Diagnosis spikeOnly = new CoreRules.MsptSpikeRule().evaluate(snapshot(20, 150), null, cfg).hit();
+        Diagnosis pressure = new CoreRules.MsptSpikeRule().evaluate(snapshot(60, 200), null, cfg).hit();
+        assertNotNull(spikeOnly);
+        assertNotNull(pressure);
+
+        assertEquals(150.0, 150.0);
+        assertFalse(spikeOnly.detail().equals(pressure.detail()),
+            "the two conclusions carry different severity, so their evidence text must differ");
+        assertTrue(pressure.detail().contains("60"),
+            "the critical detail must show the average that crossed the critical line, got: "
+                + pressure.detail());
+        assertTrue(pressure.detail().contains("50"),
+            "the critical detail must show the critical threshold it is compared against, got: "
+                + pressure.detail());
+    }
+
     // ==================== 纯函数契约 ====================
 
     /** 规则只读快照：同一份输入跑两遍，结论与证据必须逐字一致。 */

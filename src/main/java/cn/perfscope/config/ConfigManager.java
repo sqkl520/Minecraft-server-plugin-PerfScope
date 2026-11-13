@@ -934,6 +934,9 @@ public class ConfigManager {
      *   <li>worlds 段覆盖值对——倒置时回退到（已校验的）全局值；</li>
      *   <li>alerts.cooldown-seconds——负值钳制为 0；</li>
      *   <li>9A-11：cpu.process/system_warning_threshold 要求 {@code 0 < v <= 100}（百分比语义），越界回退默认。</li>
+     *   <li>v1.4：int 阈值对（players/entities/chunks/memory 与 worlds 覆盖）要求 {@code 1 <= v <= 上界}
+     *       且 {@code w <= c}。下界由 0 抬到 1——{@code 0} 与负数同效（永久告警、恢复条件永不可达）；
+     *       上界按指标域取（百分比对 100，计数对 10,000,000）。详见 {@link #sanitizeIntPair}。</li>
      * </ul>
      */
     private void validateThresholds(ConfigData cfg) {
@@ -979,29 +982,45 @@ public class ConfigManager {
             cfg.mspt_warningThreshold, cfg.mspt_criticalThreshold, 45.0, 50.0, true);
         cfg.mspt_warningThreshold = mspt[0];
         cfg.mspt_criticalThreshold = mspt[1];
+        // v1.4：mspt 是高值差指标，判据为 `msptAvg > threshold`，而 msptAvg 在采集侧被过滤为恒正。
+        // 于是 mspt_critical_threshold: 0 使「严重」档恒真（v1.4 之前 0/0 能通过校验）。
+        // 这里只拦 ==0/负数，不设 1ms 之类的下界：亚毫秒阈值虽激进但语义自洽。
+        // 反向对照 tps（低值差，判据 `tps < threshold`）：那里 0 让告警**永不触发**，
+        // 是一种自洽的"关掉 TPS 告警"惯用法，故 tps 不设同一道闸——见类内 tps 分支的注释。
+        if (cfg.mspt_warningThreshold <= 0.0d || cfg.mspt_criticalThreshold <= 0.0d) {
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.threshold-zero",
+                "mspt.warning_threshold/critical_threshold",
+                cfg.mspt_warningThreshold, cfg.mspt_criticalThreshold, 45.0, 50.0));
+            cfg.mspt_warningThreshold = 45.0;
+            cfg.mspt_criticalThreshold = 50.0;
+        }
 
-        // 玩家（高值差，warning 应 <= critical）
+        // 玩家（高值差，warning 应 <= critical；百分比语义 → 上界 100）
         int[] players = sanitizeIntPair("players.warning_threshold/critical_threshold",
-            cfg.players_warningThreshold, cfg.players_criticalThreshold, 90, 98);
+            cfg.players_warningThreshold, cfg.players_criticalThreshold, 90, 98,
+            MAX_PERCENT_THRESHOLD);
         cfg.players_warningThreshold = players[0];
         cfg.players_criticalThreshold = players[1];
 
         // 实体（高值差，采集层为逐世界语义，warning 应 <= critical）
         // 回退值与 readInt 的缺省、以及 jar 内 config.yml 必须三者一致（见 load() 里的说明）
         int[] entities = sanitizeIntPair("entities.total_warning_threshold/critical_threshold",
-            cfg.entities_totalWarningThreshold, cfg.entities_totalCriticalThreshold, 20000, 30000);
+            cfg.entities_totalWarningThreshold, cfg.entities_totalCriticalThreshold, 20000, 30000,
+            MAX_INT_THRESHOLD);
         cfg.entities_totalWarningThreshold = entities[0];
         cfg.entities_totalCriticalThreshold = entities[1];
 
         // 区块（高值差，warning 应 <= critical）
         int[] chunks = sanitizeIntPair("chunks.loaded_warning_threshold/critical_threshold",
-            cfg.chunks_loadedWarningThreshold, cfg.chunks_loadedCriticalThreshold, 10000, 15000);
+            cfg.chunks_loadedWarningThreshold, cfg.chunks_loadedCriticalThreshold, 10000, 15000,
+            MAX_INT_THRESHOLD);
         cfg.chunks_loadedWarningThreshold = chunks[0];
         cfg.chunks_loadedCriticalThreshold = chunks[1];
 
-        // 内存（高值差，warning 应 <= critical）
+        // 内存（高值差，warning 应 <= critical；百分比语义 → 上界 100）
         int[] memory = sanitizeIntPair("memory.heap_warning_threshold/critical_threshold",
-            cfg.memory_heapWarningThreshold, cfg.memory_heapCriticalThreshold, 85, 95);
+            cfg.memory_heapWarningThreshold, cfg.memory_heapCriticalThreshold, 85, 95,
+            MAX_PERCENT_THRESHOLD);
         cfg.memory_heapWarningThreshold = memory[0];
         cfg.memory_heapCriticalThreshold = memory[1];
 
@@ -1038,7 +1057,8 @@ public class ConfigManager {
                 int[] pair = sanitizeIntPair(
                     "worlds." + entry.getKey() + ".entities.total_warning_threshold/critical_threshold",
                     ws.entities_totalWarningThreshold, ws.entities_totalCriticalThreshold,
-                    cfg.entities_totalWarningThreshold, cfg.entities_totalCriticalThreshold);
+                    cfg.entities_totalWarningThreshold, cfg.entities_totalCriticalThreshold,
+                    MAX_INT_THRESHOLD);
                 ws.entities_totalWarningThreshold = pair[0];
                 ws.entities_totalCriticalThreshold = pair[1];
             }
@@ -1254,7 +1274,7 @@ public class ConfigManager {
         if (!outOfRange && !inverted) {
             return new double[]{w, c};
         }
-        warnThresholdFallback(key, outOfRange, w, c);
+        warnThresholdFallback(key, MAX_DOUBLE_THRESHOLD, outOfRange, w, c);
         return new double[]{defW, defC};
     }
 
@@ -1330,22 +1350,59 @@ public class ConfigManager {
     private static final int HISTORY_INTERVAL_TREND_SAFE_SEC = 180;
 
     /**
-     * T4：int 阈值对校验（高值差）——warning &gt; critical 时记 warning 并回退默认值。
+     * T4：int 阈值对校验（高值差）——非法值记 warning 并回退默认值。
      *
      * <p><b>9A-6 修正</b>：原实现只检查 {@code w <= c}，不设下界。于是
      * {@code entities.total_warning_threshold: -5} 合法通过，随后任何非零实体数都触发 severe，
      * 且恢复条件永不可达（永久告警）；反过来超大值（如 999999）会让告警永久静默。
      * 现要求两者都在 {@code [0, 10_000_000]} 内。</p>
      *
+     * <p><b>v1.4 修正：下界由 0 抬到 1，并加上指标域上界</b>。9A-6 的下界 0 漏掉了比负数更隐蔽的一类
+     * 配置：{@code 0/0}（以及任何 {@code w = 0}）能通过 {@code 0 <= 0} 的检查，而它们的后果与负数
+     * <b>完全相同</b>——永久告警。以 {@code players.warning_threshold: 0} 为例：</p>
+     * <ul>
+     *   <li>{@code MetricsCollector.collectPlayers} 判据是 {@code pct >= warning}，而
+     *       {@link MetricsSnapshot#playerPercent()} 的值域是 0-100，恒满足 → 本项告警每周期都命中；</li>
+     *   <li>{@code CoreRules.PlayerCapacityRule} 的判据是 {@code currentPercent < warning} 才 clean，
+     *       {@code 0 < 0} 为 false → 规则不再短路；其后的「窗口内有低谷就不算容量问题」逃逸条件是
+     *       {@code minPercent < warning - 10}，即 {@code minPercent < -10}，对 0-100 的百分比<b>永假</b>
+     *       → 该规则失去唯一出口，1 人在线 / 200 上限也报「接近上限，新玩家可能进不来」。</li>
+     * </ul>
+     * <p>实体/区块两个计数对同理：判据是严格大于，{@code 0} 意味着「只要有一个实体/区块就超」，
+     * 而任何真实服务器都恒有实体与区块。</p>
+     *
+     * <p><b>{@code 0} 不是本插件的「关闭」语义</b>：全仓没有任何一处把阈值 0 解释为禁用，
+     * {@code config.yml} 里标注 "0 = 关闭" 的只有 {@code cpu.hysteresis_margin}、
+     * {@code alerts.cooldown-seconds}、{@code report.retention_days} 等<b>非阈值对</b>键；
+     * 模块级开关是 {@code players/entities/chunks/memory.enabled}。故此处不实现「0 = 禁用」，
+     * 而是拒绝 0 并提示用户改用 {@code enabled: false}——把 0 当禁用会在配置层静默压下整条诊断，
+     * 且与用户写 0 时的直觉（"从 0 起报"=最灵敏）正好相反，属于"猜错意图且不吭声"。</p>
+     *
+     * @param maxValue 该指标的数值域上界：百分比类传 {@link #MAX_PERCENT_THRESHOLD}（读数域 0-100），
+     *                 计数类传 {@link #MAX_INT_THRESHOLD}。超过域上界的阈值永远不触发，
+     *                 是「0 永久触发」的镜像错误，故一并拦掉。
      * @return {warning, critical}（合法原值或回退后的默认值）
      */
-    private int[] sanitizeIntPair(String key, int w, int c, int defW, int defC) {
-        boolean negative = w < 0 || c < 0;
-        boolean tooLarge = w > MAX_INT_THRESHOLD || c > MAX_INT_THRESHOLD;
-        if (!negative && !tooLarge && w <= c) {
+    private int[] sanitizeIntPair(String key, int w, int c, int defW, int defC, int maxValue) {
+        // 下界 1 而非 0：0 与负数同效（永久告警），见方法注释
+        if (w < 1 || c < 1) {
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.threshold-zero",
+                key, w, c, defW, defC));
+            return new int[]{defW, defC};
+        }
+        // 上界越界：百分比对 100、计数对 1e7。用专用文案（要求 1 ≤ 值 ≤ 上界），
+        // 而非通用的 threshold-out-of-range——那条写的下界是 0，会误导用户去写 0
+        boolean tooLarge = w > maxValue || c > maxValue;
+        if (!tooLarge && w <= c) {
             return new int[]{w, c};
         }
-        warnThresholdFallback(key, negative || tooLarge, w, c);
+        if (tooLarge) {
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.threshold-above-max",
+                key, maxValue, w, c));
+        } else {
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.threshold-inverted",
+                key, w, c));
+        }
         return new int[]{defW, defC};
     }
 
@@ -1353,15 +1410,29 @@ public class ConfigManager {
     private static final int MAX_INT_THRESHOLD = 10_000_000;
 
     /**
+     * 百分比型阈值对的数值域上界。
+     *
+     * <p>取 100 而非 {@link #MAX_INT_THRESHOLD}：这些指标的读数域本身就是 0-100
+     * （{@code MetricsSnapshot.heapUsagePercent}、{@link MetricsSnapshot#playerPercent()}），
+     * 阈值写 101 与写 {@code 0} 是同一类错误的两端——前者永不触发，后者永久触发，
+     * 而「校验通过」会让服主以为配置生效了。</p>
+     */
+    private static final int MAX_PERCENT_THRESHOLD = 100;
+
+    /**
      * 阈值回退告警（9A-6：按真实原因分类，不再统一说"倒置"）。
      *
-     * @param outOfRange true = 越界（负数/超上限）；false = 倒置（非有限值已由
-     *                   {@link #warnThresholdNonFinite} 分流，不会进本方法）
+     * @param bound      该类指标的合法上界，仅用于越界分支的文案：百分比对传 int 100，
+     *                   计数对传 int {@link #MAX_INT_THRESHOLD}，mspt（double 对）传
+     *                   {@link #MAX_DOUBLE_THRESHOLD}。以 {@code Object} 接收是为了让文案里的
+     *                   数字保持调用点原本的渲染形态（int 显示 {@code 100}，而不是 {@code 100.0}）
+     * @param outOfRange true = 越界；false = 倒置（负数与 0 已由 {@link #sanitizeIntPair} /
+     *                   mspt 的专用分支先行分流，不会进本方法）
      */
-    private void warnThresholdFallback(String key, boolean outOfRange, Object w, Object c) {
+    private void warnThresholdFallback(String key, Object bound, boolean outOfRange, Object w, Object c) {
         if (outOfRange) {
             plugin.getLogger().warning("[PerfScope] "
-                + Messages.get("config.check.threshold-out-of-range", key, MAX_INT_THRESHOLD, w, c));
+                + Messages.get("config.check.threshold-out-of-range", key, bound, w, c));
         } else {
             plugin.getLogger().warning("[PerfScope] "
                 + Messages.get("config.check.threshold-inverted", key, w, c));

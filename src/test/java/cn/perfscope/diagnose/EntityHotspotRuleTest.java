@@ -193,7 +193,7 @@ class EntityHotspotRuleTest {
 
     // ==================== critical 分级 ====================
 
-    /** {@code entityCount >= 500} → critical。 */
+    /** {@code entityCount >= 500} → critical（默认阈值 200 下，严重线仍是 500）。 */
     @Test
     void chunkAtCriticalLineIsCritical() {
         Diagnosis d = evaluate(snapshotWith(500), config(DEFAULT_THRESHOLD)).hit();
@@ -211,28 +211,80 @@ class EntityHotspotRuleTest {
         assertFalse(d.critical(), "499 is severe-adjacent but still below the 500 line");
     }
 
-    // ==================== 记录已知缺陷（不改生产代码） ====================
+    // ==================== F-5：严重线必须跟着命中线走 ====================
 
     /**
-     * <b>已知缺陷（记录现状，不修）</b>：配置把单区块阈值抬到 1000 时，
-     * 一个恰好 1000 的区块会被判 {@code critical=true}。
+     * <b>F-5（回归）</b>：配置把单区块阈值抬到 1000 时，一个恰好 1000 的区块<b>不再</b>是 critical。
      *
-     * <p>原因：严重线是写死的 {@code CHUNK_CRITICAL=500}，与命中线
-     * {@code max(100, cfg.hotspots_chunkWarningThreshold)} 量纲不联动。服主把阈值调到 1000
-     * 明确表示"我觉得 1000 才值得一看"，插件却回一句"严重"——严重度与他自己的判断相反。</p>
+     * <p>旧实现用写死的 {@code CHUNK_CRITICAL=500} 当严重线，于是"刚好达到服主自己定的 1000"
+     * 会被判成严重——严重度与服主自己的判断相反，而且 detail 里同时写着"阈值 1000"，
+     * 读起来像配置没生效。</p>
      *
-     * <p>本用例<b>刻意断言缺陷存在</b>：它是一张"当前行为"快照，而不是"正确行为"规格。
-     * 修掉该缺陷时这条会变红，届时把它改成断言 {@code !critical} 即可（那时是一个真正的修复，
-     * 需要同步 CHANGELOG 的 Fixed 段）。<b>不要为了让这条保持绿而回避修复。</b></p>
+     * <p>本用例是 {@code knownDefectChunkAtTheRaisedThresholdIsCritical} 的替代：
+     * 旧用例刻意断言缺陷存在，修掉后按约定改成断言 {@code !critical}。</p>
      */
     @Test
-    void knownDefectChunkAtTheRaisedThresholdIsCritical() {
+    void chunkAtTheRaisedThresholdIsNoLongerCritical() {
         Diagnosis d = evaluate(snapshotWith(1000), config(1000)).hit();
 
         assertNotNull(d, "1000 entities meets the configured 1000 line");
-        assertTrue(d.critical(),
-            "KNOWN DEFECT: the critical line is a fixed 500, so a chunk that only just reached the "
-                + "owner's own 1000 line is still labelled critical");
+        assertFalse(d.critical(),
+            "F-5: the severity line must follow the configured warning line, so a chunk that only "
+                + "just reached the owner's own 1000 line is a warning, not a critical");
+    }
+
+    /** 抬高命中线后，严重线随之抬高：2500 是配置 1000 下的严重线。 */
+    @Test
+    void criticalLineScalesWithARaisedWarningLine() {
+        assertFalse(evaluate(snapshotWith(2499), config(1000)).hit().critical(),
+            "2499 is one short of the 2.5x line derived from a 1000 warning line");
+        assertTrue(evaluate(snapshotWith(2500), config(1000)).hit().critical(),
+            "2500 is exactly 2.5x the configured 1000 line (inclusive)");
+    }
+
+    /**
+     * <b>不变式</b>：严重线永远不可能落在命中线之前。
+     *
+     * <p>扫描一组配置：每一个"恰好等于生效命中线"的区块都不得被判 critical。
+     * 若有人把倍数写成小于 1 的值（例如 {@code 0.5}），或忘了减掉绝对下限那一支，
+     * 这条会立刻红——这正是 F-5 修复要保住的语义。</p>
+     */
+    @Test
+    void criticalLineIsNeverBelowTheWarningLine() {
+        int[] configured = {1, 20, 99, 100, 101, 200, 999, 1000, 2500, 10_000};
+        for (int w : configured) {
+            int effective = Math.max(100, w);
+            Diagnosis d = evaluate(snapshotWith(effective), config(w)).hit();
+            assertNotNull(d, "a chunk exactly at the effective warning line must still hit (config " + w + ")");
+            assertFalse(d.critical(),
+                "config " + w + " (effective warning line " + effective + "): the severity line must "
+                    + "never be at or below the warning line — a chunk that only just reached the "
+                    + "warning line cannot already be critical");
+        }
+    }
+
+    /**
+     * 默认配置下的严重线<b>不变</b>：仍是 500。
+     *
+     * <p>2.5 这个倍数是反推出来的——{@code 200 × 2.5 = 500}，与 v1.2 校准过的默认严重线逐位相同。
+     * 改成项目里 entities/chunks 惯用的 1.5 会让 300–499 实体的区块从警告升级为严重，
+     * 那是给所有默认配置的服新增噪音；取 2.5 则让本次修复对默认配置<b>零行为变化</b>。</p>
+     */
+    @Test
+    void defaultConfigurationKeepsTheCalibratedFiveHundredLine() {
+        assertTrue(evaluate(snapshotWith(500), config(DEFAULT_THRESHOLD)).hit().critical(),
+            "500 must stay critical under the default 200 warning line");
+        assertFalse(evaluate(snapshotWith(499), config(DEFAULT_THRESHOLD)).hit().critical(),
+            "499 must stay a warning under the default 200 warning line");
+    }
+
+    /** detail 里的"阈值"是生效阈值，严重线不写进 detail，二者不会互相打架（锁定现状）。 */
+    @Test
+    void detailNeverQuotesACriticalLineThatContradictsTheConfig() {
+        Diagnosis d = evaluate(snapshotWith(1000), config(1000)).hit();
+        assertNotNull(d);
+        assertTrue(d.detail().contains("1000"),
+            "detail must quote the effective warning line, got: " + d.detail());
     }
 
     /**
