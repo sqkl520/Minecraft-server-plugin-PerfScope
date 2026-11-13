@@ -157,6 +157,12 @@ if ($null -ne $node) {
     Invoke-Step 'L1 config backward compatibility' {
         & $node (Join-Path $PSScriptRoot 'check-config-compat.mjs') '--repo' $RepoRoot
     }
+    # Product docs gate. The "no sentence particle in user-facing text" rule used to live only
+    # in CLAUDE.md, so it decayed: README and config.yml both shipped with it, and CHANGELOG
+    # accumulated 331 of them. One cleanup is not enough -- without a gate it grows back.
+    Invoke-Step 'L1 product docs (no sentence particle)' {
+        & $node (Join-Path $PSScriptRoot 'check-docs.mjs') '--repo' $RepoRoot
+    }
 } else {
     Write-Step 'static gates need node -- skipped' 'WARN'
 }
