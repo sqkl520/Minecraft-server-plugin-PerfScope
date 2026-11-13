@@ -201,6 +201,80 @@ class HistoryStoreAccessorsTest {
             "the old sample is filtered out, so the remaining two are 2x apart = no gap: " + gaps);
     }
 
+    // ==================== gapsOf：命令层共用的纯函数形态 ====================
+
+    /**
+     * {@code gapsOf} 与 {@code gaps()} 对同一批样本必须给出相同结果。
+     *
+     * <p>这个类存在的理由就是"命令层不要自己再写一遍判据"——两份实现会各自演化，
+     * 于是测试覆盖的是 A、用户看到的是 B。这条测试把两者钉在一起：
+     * 只要有人改了其中一边的算法，这里立刻红。</p>
+     */
+    @Test
+    void gapsOfAgreesWithTheInstanceMethod() {
+        long now = System.currentTimeMillis();
+        long step = MINUTE;
+        List<HistorySample> samples = List.of(
+            sample(now - 20 * step),
+            sample(now - 19 * step),
+            sample(now - 5 * step),   // 14 分钟空档
+            sample(now - 4 * step),
+            sample(now));             // 4 分钟空档
+
+        ConfigManager cm = HistoryFixtures.config();
+        HistoryStore store = HistoryFixtures.seeded(cm, samples);
+
+        List<HistoryStore.Gap> viaInstance = store.gaps(0L, step);
+        List<HistoryStore.Gap> viaStatic = HistoryStore.gapsOf(samples, 0L, step);
+
+        assertEquals(viaInstance, viaStatic,
+            "the command layer's shared implementation must match the instance method");
+        assertEquals(2, viaStatic.size());
+    }
+
+    /**
+     * {@code gapsOf} 是纯函数：不依赖 store，也不改动传入的列表。
+     *
+     * <p>命令层的样本可能来自文件持久化而不是内存环，所以它必须能对任意列表工作。</p>
+     */
+    @Test
+    void gapsOfWorksOnAnyListWithoutMutatingIt() {
+        long now = System.currentTimeMillis();
+        long step = MINUTE;
+        List<HistorySample> samples = new ArrayList<>(List.of(
+            sample(now - 10 * step),
+            sample(now)));
+        int sizeBefore = samples.size();
+        HistorySample firstBefore = samples.get(0);
+
+        List<HistoryStore.Gap> gaps = HistoryStore.gapsOf(samples, 0L, step);
+
+        assertEquals(1, gaps.size());
+        assertEquals(sizeBefore, samples.size(), "the input list must not be modified");
+        assertEquals(firstBefore, samples.get(0), "the input list must not be reordered");
+    }
+
+    /** 非正期望间隔与 null 输入都返回空列表，不抛异常。 */
+    @Test
+    void gapsOfToleratesBadArguments() {
+        long now = System.currentTimeMillis();
+        List<HistorySample> samples = List.of(sample(now - MINUTE), sample(now));
+
+        assertTrue(HistoryStore.gapsOf(samples, 0L, 0L).isEmpty(), "zero interval");
+        assertTrue(HistoryStore.gapsOf(samples, 0L, -5L).isEmpty(), "negative interval");
+        assertTrue(HistoryStore.gapsOf(null, 0L, MINUTE).isEmpty(), "null samples");
+    }
+
+    /** 溢出保护在共享实现里同样生效（命令层会直接用到它）。 */
+    @Test
+    void gapsOfDoesNotOverflowOnHugeExpectedInterval() {
+        long now = System.currentTimeMillis();
+        List<HistorySample> samples = List.of(sample(now - 10 * MINUTE), sample(now));
+
+        assertTrue(HistoryStore.gapsOf(samples, 0L, Long.MAX_VALUE).isEmpty(),
+            "an overflowing threshold must clamp, not wrap negative");
+    }
+
     // ==================== Gap 记录本身 ====================
 
     /**

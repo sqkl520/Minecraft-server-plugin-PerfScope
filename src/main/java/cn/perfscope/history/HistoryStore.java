@@ -279,14 +279,31 @@ public final class HistoryStore {
      * @return 缺口列表（按时间升序，不可变）；参数非法时返回空列表
      */
     public List<Gap> gaps(long sinceMs, long expectedIntervalMs) {
-        if (expectedIntervalMs <= 0L) {
+        return gapsOf(snapshotAll(), sinceMs, expectedIntervalMs);
+    }
+
+    /**
+     * 缺口检测的纯函数形态（9A-18 原始实现，v1.4 提取出来供命令层复用）。
+     *
+     * <p><b>为什么要提出来</b>：{@code /perfscope trend} 的图表样本可能来自<b>文件持久化</b>
+     * （跨重启）而不是内存环，{@link #gaps} 读的是内存环，两者不是同一批数据。如果命令层
+     * 自己再写一遍判据，就会出现"两套阈值算法各自演化"——那样 test 覆盖的是 A 实现，
+     * 用户看到的是 B 实现。提取成静态方法后，两边共用同一段逻辑，测试也就对两边都有效。</p>
+     *
+     * @param samples            样本（旧→新）
+     * @param sinceMs            只统计该时刻（含）之后的样本
+     * @param expectedIntervalMs 期望采样间隔；非正时返回空列表
+     * @return 不可变的缺口列表（按时间升序）
+     */
+    public static List<Gap> gapsOf(List<HistorySample> samples, long sinceMs, long expectedIntervalMs) {
+        if (expectedIntervalMs <= 0L || samples == null) {
             return List.of();
         }
         long threshold = expectedIntervalMs > Long.MAX_VALUE / 2L
             ? Long.MAX_VALUE : expectedIntervalMs * 2L;
         List<Gap> result = new ArrayList<>();
         HistorySample prev = null;
-        for (HistorySample s : snapshotAll()) {
+        for (HistorySample s : samples) {
             if (s.timestamp() < sinceMs) {
                 continue;
             }

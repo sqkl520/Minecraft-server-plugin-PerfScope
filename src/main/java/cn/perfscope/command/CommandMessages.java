@@ -271,6 +271,18 @@ public final class CommandMessages {
         put(en, zh, "cmd.trend.gc-insufficient",
             "not enough samples (at least 2 are needed to measure the increase)",
             "样本不足（统计增量至少需要 2 条）");
+        // 数据缺口：把"没数据"与"数据正常"区分开。上面的覆盖行只说 A～B、N 个样本，
+        // 均匀铺满与中间断 6 小时的覆盖行一模一样，而两者对"昨晚有没有卡"是不同证据。
+        put(en, zh, "cmd.trend.gaps-none",
+            "Data continuity: no gaps (no interval exceeded 2x the sampling interval)",
+            "数据连续性: 无缺口（无相邻间隔超过采样间隔的 2 倍）");
+        put(en, zh, "cmd.trend.gaps-summary",
+            "Data continuity: {0} gap(s), {1} in total — no samples exist inside these windows",
+            "数据连续性: {0} 处缺口，共 {1} —— 这些时段内没有任何样本");
+        put(en, zh, "cmd.trend.gaps-entry", "  - {0} to {1} ({2})", "  - {0} ～ {1}（{2}）");
+        put(en, zh, "cmd.trend.gap-duration-days", "{0}d {1}h", "{0} 天 {1} 小时");
+        put(en, zh, "cmd.trend.gap-duration-hours", "{0}h {1}m", "{0} 小时 {1} 分");
+        put(en, zh, "cmd.trend.gap-duration-minutes", "{0}m", "{0} 分钟");
 
         // ==================== 热点区块 ====================
         put(en, zh, "cmd.hotspots.empty",

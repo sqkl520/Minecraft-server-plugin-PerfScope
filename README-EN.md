@@ -80,7 +80,7 @@ Additional notes:
 | `/perfscope history` | History summary (last ~24h: lowest TPS / peak entities / peak heap) |
 | `/perfscope hotspot` | Hotspot localization (entity-density top-3 chunks with coordinates) |
 | `/perfscope diagnose` | Smart diagnosis (rule engine: conclusions + parameter-level advice; `diag` stays the full-diagnostics alias) |
-| `/perfscope trend [days]` | Trend summary (cross-restart persistent history, default 1 day). Falls back to the in-memory ring and clamps to 1 day when persistence is unavailable; unparsable history rows are reported with their count |
+| `/perfscope trend [days]` | Trend summary (cross-restart persistent history, default 1 day). Falls back to the in-memory ring and clamps to 1 day when persistence is unavailable; unparsable history rows are reported with their count; the last line reports **data continuity** (any span where the gap between adjacent samples exceeds twice the sampling interval counts as a gap), separating "nothing went wrong in this period" from "there is no data for this period" |
 | `/perfscope gc` | GC statistics (per-collector details) |
 | `/perfscope report [format]` | Export performance report (html/txt/json) |
 | `/perfscope monitor` | Toggle ActionBar live monitor (when collection has stalled it shows "no data for N" instead of stale figures) |

@@ -1244,6 +1244,69 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                     ? "cmd.trend.gc-insufficient" : "cmd.trend.not-recorded"), GRAY)));
         sender.sendMessage(Component.text(Messages.get("cmd.trend.coverage",
             formatTrendTime(oldest.timestamp()), formatTrendTime(latest.timestamp())), GRAY));
+        showTrendGaps(sender, samples, sinceMs);
+    }
+
+    /**
+     * 趋势的数据缺口（9A-18 的 {@link HistoryStore#gaps}，此前从未接到任何命令上）。
+     *
+     * <p><b>为什么这行值得存在</b>：上面的"覆盖 A ～ B（N 个样本）"回答不了"这 N 个样本是
+     * 均匀铺满整段，还是中间断了 6 小时"。两种情况的覆盖行一模一样，而它们对"昨晚到底有没有
+     * 卡"这个问题是截然不同的证据——断掉那段里的卡顿不存在于任何样本里。没有这一行，
+     * 一次重启造成的空窗会被静默读成"这段时间很健康"。</p>
+     *
+     * <p><b>为什么用文件来源时也要算</b>：{@code gaps()} 读的是内存环，而 {@code samples}
+     * 可能来自文件（跨重启）。两者不是同一批数据，所以这里<b>不调用</b> {@code gaps()}，
+     * 而是对本次实际展示的 {@code samples} 直接算——否则算出的缺口与上面的统计范围不一致，
+     * 用户会拿两份不同样本集的结论对照。判据与 {@code gaps()} 保持一致：
+     * 相邻间隔 &gt; 2× 期望间隔。</p>
+     *
+     * <p>期望间隔取配置值（{@code history.sample-interval-seconds}）；配置读不到或非正时
+     * 不猜，直接不输出这一行——宁可少一行，也不要拿一个假间隔把正常数据报成满屏缺口。</p>
+     */
+    private void showTrendGaps(CommandSender sender, List<HistorySample> samples, long sinceMs) {
+        long intervalSec = (long) thresholdOf(cfgNow(), "history_sampleIntervalSeconds", 60.0);
+        long expectedMs = intervalSec * 1000L;
+        if (expectedMs <= 0L || samples.size() < 2) {
+            return; // 没有期望间隔或不足两条样本，谈不上"缺口"
+        }
+        // 走 HistoryStore.gapsOf 而不是在命令层再写一遍判据：两份实现会各自演化，
+        // 于是测试覆盖的是 A 实现、用户看到的是 B 实现。
+        List<HistoryStore.Gap> gaps = HistoryStore.gapsOf(samples, sinceMs, expectedMs);
+        if (gaps.isEmpty()) {
+            sender.sendMessage(Component.text(Messages.get("cmd.trend.gaps-none"), GRAY));
+            return;
+        }
+        long totalMs = 0L;
+        for (HistoryStore.Gap g : gaps) {
+            totalMs += g.durationMs();
+        }
+        // 缺口多于 3 处时只列最近的 3 处，剩下的用总数交代——否则一次长时间停机
+        // 会把 trend 刷成几十行，把真正要看的 TPS/内存挤出屏幕。
+        sender.sendMessage(Component.text(Messages.get("cmd.trend.gaps-summary",
+            gaps.size(), formatGapDuration(totalMs)), YELLOW));
+        int shown = Math.min(3, gaps.size());
+        for (int i = gaps.size() - shown; i < gaps.size(); i++) {
+            HistoryStore.Gap g = gaps.get(i);
+            sender.sendMessage(Component.text(Messages.get("cmd.trend.gaps-entry",
+                formatTrendTime(g.startMs()), formatTrendTime(g.endMs()),
+                formatGapDuration(g.durationMs())), GRAY));
+        }
+    }
+
+    /** 缺口时长 → "1天2小时" / "3小时5分" / "12分" 的人类可读形态。 */
+    private String formatGapDuration(long ms) {
+        long totalMinutes = Math.max(0L, ms) / 60_000L;
+        long days = totalMinutes / (24L * 60L);
+        long hours = (totalMinutes % (24L * 60L)) / 60L;
+        long minutes = totalMinutes % 60L;
+        if (days > 0) {
+            return Messages.get("cmd.trend.gap-duration-days", days, hours);
+        }
+        if (hours > 0) {
+            return Messages.get("cmd.trend.gap-duration-hours", hours, minutes);
+        }
+        return Messages.get("cmd.trend.gap-duration-minutes", minutes);
     }
 
     /** Wave 8B：趋势时间戳 → "MM-dd HH:mm"（跨天查询需带日期）。 */
