@@ -390,6 +390,33 @@ class TpsPersistentRuleTest {
         assertTrue(ev.isClean(), "the window was evaluated and is healthy (20.0); that is clean, not skip");
     }
 
+    /**
+     * 上界也必须与窗口侧同口径：{@code > 20.5} 的读数不是可信读数。
+     *
+     * <p>窗口侧一直有 {@code TPS_CEILING} 上界，快照侧原先只有下界。<b>目前</b>这不产出错误
+     * 结论——{@code ConfigManager} 把 {@code tps.warning_threshold} 钳在 {@code <= 20.5}，
+     * 所以 {@code tps15m > 20.5} 时 {@code persist15m} 恒为 false。但那是在靠<b>别的类</b>
+     * 的钳制兜底：一旦上界放宽（或有人直接构造 {@code ConfigData}），快照侧会拿一个
+     * "窗口认为是垃圾"的值去判定。这条测试把两个侧的口径钉在一起。</p>
+     *
+     * <p>构造：窗口正常（20.0），{@code tps15m} 用一个物理上不可能的 25.0。若快照侧放行它，
+     * 它既不低于告警线也不会命中；真正要钉的是"它被贴上未上报标签"而不是被当成读数打印。</p>
+     */
+    @Test
+    void aboveCeilingFifteenMinuteValueIsAlsoTreatedAsNotReported() throws Exception {
+        ConfigManager cm = configManager(true);
+        HistoryStore hs = history(cm, flatSamples(12, 45_000L, 20.0));
+
+        // 让规则经由窗口侧命中，从而真的走到 detail 渲染
+        HistoryStore slow = history(cm, flatSamples(12, 45_000L, 3.0));
+        Diagnosis d = evaluate(snapshot(3.0, 25.0, 25.0), slow, cm).hit();
+        assertNotNull(d, "the window evidence alone is enough to conclude");
+        assertTrue(d.detail().contains(Messages.get("diag.value.not-reported")),
+            "a value above the ceiling must be labelled, not printed as a reading: " + d.detail());
+        assertFalse(d.detail().contains("25.00"),
+            "25.00 is not a real 15-minute average and must not reach the user: " + d.detail());
+    }
+
     // ==================== 三态与前置闸门（回归保护） ====================
 
     /** TPS 模块不可用 → skip 且点名模块（这正说明 F-3 的 0 不可能是"未采集"）。 */

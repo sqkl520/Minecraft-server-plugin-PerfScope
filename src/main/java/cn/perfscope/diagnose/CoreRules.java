@@ -353,7 +353,12 @@ public final class CoreRules {
             // 用 > 0 把它当未知，会让"最坏的真实读数"得出 CLEAN。这里只挡"物理上不可能是读数"
             // 的值（负数 / NaN / Infinity）——它们与窗口侧的过滤口径保持一致（见上面的循环），
             // 否则会出现"窗口滤掉了 -1，快照却拿 -1 判成 critical"这种自相矛盾。
-            boolean tps15mReported = Double.isFinite(snap.tps15m) && snap.tps15m >= 0;
+            // 上界也必须与窗口侧同一个 TPS_CEILING：少了它，20.5 以上的读数会被窗口丢弃、
+            // 却被快照侧放行并参与判定——同一个量在两处用两套口径。当前 ConfigManager 把阈值
+            // 钳在 <=20.5（见其 20.5 注释），所以这条分裂暂时不会产出错误结论；但那是**别的类
+            // 的钳制**在替本规则兜底，一旦钳制放宽就会漏出来。
+            boolean tps15mReported = Double.isFinite(snap.tps15m)
+                && snap.tps15m >= 0 && snap.tps15m <= TPS_CEILING;
             boolean persist15m = tps15mReported && snap.tps15m < cfg.tps_warningThreshold;
             boolean persistWindow = avg1m < cfg.tps_warningThreshold;
             if (!persist15m && !persistWindow) {
