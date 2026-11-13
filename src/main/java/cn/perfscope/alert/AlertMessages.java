@@ -432,6 +432,44 @@ public final class AlertMessages {
         put(en, zh, "daily.alerts.suspended",
             " / {0} unknown (module unavailable)", " / unknown（模块不可用）{0} 条");
 
+        // ==================== 每日摘要：v1.4 新增 5 指标的行 ====================
+        //
+        // 渲染契约（与 HistoryStore 的 -1 过滤口径配套，改动前先读 DailySummaryService 的注释）：
+        //   * "有数据" 走 *_value；
+        //   * "整个窗口都没采集" 走 daily.metrics.not-collected —— 它与 daily.metrics.no-gc 是
+        //     两句话，不能合并：前者是盲区，后者是"测了，确实是 0 次"。
+        //     给没测的维度写 0 等于宣称它健康，这是本项目的硬原则。
+        //
+        // 尖峰 + 发生时刻（与最低 TPS 同构：只有这两个指标是"某一次事件"，时刻本身就是证据）
+        put(en, zh, "daily.metrics.spike-at", "{0} ms (at {1})", "{0} ms（{1}）");
+        // {0}=毫秒值，{1}=HH:mm
+        put(en, zh, "daily.metrics.spike", "MSPT spike: {0}", "MSPT 尖峰: {0}");
+        // {0}=进程 CPU 百分比，{1}=系统 CPU 百分比
+        put(en, zh, "daily.metrics.cpu",
+            "Peak process CPU: {0} | peak system CPU: {1}",
+            "进程 CPU 峰值: {0} | 系统 CPU 峰值: {1}");
+        // {0}=GC 次数增量，{1}=GC 耗时增量（秒，一位小数）
+        put(en, zh, "daily.metrics.gc", "GC: {0} time(s), {1}s", "GC: {0} 次，{1} 秒");
+        // 算不出增量时的外壳。必须与上面的"数值"外壳分开：数值模板里的 "time(s)" / "秒"
+        // 是量词，套在"本窗口未采集"这类整句上会渲染成
+        // "GC: not collected in this window time(s), --s"——那是一句病句，用户读不懂。
+        put(en, zh, "daily.metrics.gc-state", "GC: {0}", "GC: {0}");
+        // "未记录"与"未发生"必须分开：这一句只说盲区，不暗示任何健康结论
+        put(en, zh, "daily.metrics.not-collected",
+            "not collected in this window",
+            "本窗口未采集");
+        // 有样本、但凑不出可比的一对（只有 1 条，或相邻对全是重启边界）。与"未采集"分开：
+        // 数据其实在，只是不够配对；也与"未发生 GC"分开：那是结论，这不是。
+        put(en, zh, "daily.metrics.gc-insufficient",
+            "not enough samples to measure the increase (at least 2 comparable ones are needed)",
+            "样本不足，无法统计增量（至少需要 2 条可比的样本）");
+        // 真正的 0 次 GC（窗口内无重置、有效增量对数为 0 但差值确实为 0）
+        put(en, zh, "daily.metrics.no-gc", "no GC in this window", "本窗口未发生 GC");
+        // 重启说明：计数器跨进程归零，增量按"逐对累加"算，重启前那一段仍计入
+        put(en, zh, "daily.metrics.gc-reset",
+            " (counter reset {0}x — JVM restarted mid-window; increments before and after are summed pairwise)",
+            "（计数器归零 {0} 次——窗口内发生过 JVM 重启；重启前后增量按相邻样本分别累计）");
+
         // 每日摘要服务日志
         put(en, zh, "daily.log.disabled",
             "Daily summary is not enabled (alerts.daily-summary.enabled=false)",

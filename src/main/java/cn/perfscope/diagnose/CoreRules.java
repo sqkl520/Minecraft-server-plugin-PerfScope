@@ -222,10 +222,33 @@ public final class CoreRules {
      *
      * <p>9A-8 修正：优先用快照自带的 {@code tps15m}（服务端 15 分钟滚动均值）作为
      * "持续"的主判据；{@code tps1m} 只用于"当前是否仍在恶化"。历史窗口仍要求覆盖达标。</p>
+     *
+     * <p><b>零值口径（F-3 / F-4）</b>：本规则的 TPS 字段<b>没有</b> {@code -1} 哨兵——
+     * {@link MetricsSnapshot} 的 {@code tps1m/tps5m/tps15m} 由采集层直接写入
+     * {@code Bukkit.getTPS()}，而 TPS 不可用时的快照根本不会进历史环
+     * （{@link HistoryStore#record} 的污染防护：{@code unavailable} 含 {@code MODULE_TPS} 即整条不记）。
+     * 因此在<b>本规则能看到的数据里</b>，{@code 0.0} 基本只可能是"服务器真的没有 tick"——
+     * 最坏的真实读数，必须参与判定，不能当"未知"丢掉：</p>
+     * <ul>
+     *   <li>快照侧：{@code tps15m == 0} 命中告警（且必然 critical），不再被 {@code > 0} 过滤掉；</li>
+     *   <li>历史侧：{@code tps1m == 0} 参与窗口均值与最低点（旧实现把它当垃圾丢掉，
+     *       全 0 窗口会得出"有效样本 0/5 → 无法评估"，等于在最该报警时失声）。</li>
+     * </ul>
+     * <p><b>唯一已知的例外（不隐瞒）</b>：Folia 的 global region 在<b>启动初期</b>会短暂报表空/
+     * 接近 0（见 {@code AlertService} 的 9B-6 启动抑制窗口，它专为此存在），且此时
+     * {@code MODULE_TPS} 是"可用"的、样本会正常入环。本规则不做平台分支（告警层已按服务端类型处理），
+     * 实际影响被覆盖判据挡住：命中需要 10 分钟窗内 ≥5 条样本且跨度达标，而那个空窗按设计是"短暂"的。
+     * 若将来把采样间隔调得很大或提高抑制窗口，这里需要重新评估。</p>
+     * <p>仍然过滤的只有"不可能是读数"的值，两侧口径一致（{@code 0} 放行）：
+     * {@code > 20.5} 的不可能读数、负数、以及 {@code NaN}/{@code Infinity}（服务端异常返回，
+     * 无法解释成任何读数，且会让均值变成 NaN）。唯一需要向用户标注"未上报"的情形就是后者——
+     * 这也是 F-3 第二项要求的：{@code 0.00} 必须作为真实读数出现，只有真正没上报时才换标签。</p>
      */
     public static final class TpsPersistentRule implements DiagnosticRule {
         private static final long WINDOW_MINUTES = 10;
         private static final int MIN_SAMPLES = 5;
+        /** 物理上不可能的读数上限（含 1 tick 抖动余量）；超过它只可能是采集异常，不是真实 TPS。 */
+        private static final double TPS_CEILING = 20.5;
 
         @Override
         public String id() {
@@ -247,8 +270,10 @@ public final class CoreRules {
             int count = 0;
             HistorySample lowest = null;
             for (HistorySample s : window) {
-                if (s.tps1m() <= 0 || s.tps1m() > 20.5) {
-                    continue; // 过滤哨兵与异常值
+                // F-4：只过滤"物理上不可能"的读数与非有限值。**不能**过滤 <= 0——
+                // TPS 不可用期的快照根本不进环（见类注释），所以环里的 0 是真实的 0 TPS。
+                if (!(s.tps1m() >= 0) || s.tps1m() > TPS_CEILING) {
+                    continue;
                 }
                 sum += s.tps1m();
                 count++;
@@ -264,21 +289,31 @@ public final class CoreRules {
             // 告警线即命中——15 分钟滚动均值（服务端自带，天然平滑）负责"久低"，窗口均值负责
             // "刚崩"。改 AND 会减少误报但漏报"刚发生的大幅下跌"，故不取值域收窄。
             // 文案侧已同步为"任一口径低于告警线即命中"，规则语义零变更。
-            boolean persist15m = snap.tps15m > 0 && snap.tps15m < cfg.tps_warningThreshold;
+            //
+            // F-3：15 分钟判据不再要求 tps15m > 0。该字段无 -1 哨兵，0.0 = 彻底冻结；
+            // 用 > 0 把它当未知，会让"最坏的真实读数"得出 CLEAN。这里只挡"物理上不可能是读数"
+            // 的值（负数 / NaN / Infinity）——它们与窗口侧的过滤口径保持一致（见上面的循环），
+            // 否则会出现"窗口滤掉了 -1，快照却拿 -1 判成 critical"这种自相矛盾。
+            boolean tps15mReported = Double.isFinite(snap.tps15m) && snap.tps15m >= 0;
+            boolean persist15m = tps15mReported && snap.tps15m < cfg.tps_warningThreshold;
             boolean persistWindow = avg1m < cfg.tps_warningThreshold;
             if (!persist15m && !persistWindow) {
                 return Evaluation.clean();
             }
             long minutes = Math.max(1, (window.get(window.size() - 1).timestamp() - window.get(0).timestamp()) / 60_000L);
-            // 数值格式保持原样（Locale.ROOT + %.2f）：翻译只换语序，不碰数字口径
+            // 数值格式保持原样（Locale.ROOT + %.2f）：翻译只换语序，不碰数字口径。
+            // F-3：0.00 是真实读数，照常打印；只有"服务端根本没上报"时才换成显式标签，
+            // 绝不让 NaN 之类的东西带着格式走进用户视线。
             return Evaluation.of(new Diagnosis(id(), Messages.get("diag.DIAG-TPS-PERSIST.title"),
                 Messages.get("diag.DIAG-TPS-PERSIST.detail",
-                    String.format(java.util.Locale.ROOT, "%.2f", snap.tps15m), minutes,
+                    tps15mReported ? String.format(java.util.Locale.ROOT, "%.2f", snap.tps15m)
+                        : Messages.get("diag.value.not-reported"),
+                    minutes,
                     String.format(java.util.Locale.ROOT, "%.2f", avg1m),
                     cfg.tps_warningThreshold,
                     String.format(java.util.Locale.ROOT, "%.2f", lowest.tps1m())),
                 Messages.get("diag.DIAG-TPS-PERSIST.suggestion"),
-                snap.tps15m > 0 && snap.tps15m < cfg.tps_criticalThreshold));
+                tps15mReported && snap.tps15m < cfg.tps_criticalThreshold));
         }
     }
 

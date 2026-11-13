@@ -60,7 +60,14 @@ import java.util.logging.Logger;
  *       （0 = 实体模块禁用/采集失败时的默认值，非真实计数；峰值语义下跳过不损失信息）；</li>
  *   <li>{@link #peakHeapSince}：{@code heapUsagePercent <= 0} 的行跳过
  *       （真实 JVM 堆占用恒 &gt; 0；0 = 内存模块禁用/失败/预热期的默认值）；</li>
- *   <li>MSPT 极值当前无 helper；后续若增加，按 {@code msptAvg <= 0} 跳过口径实现。</li>
+ *   <li>{@link #peakMsptSpikeSince}：{@code msptMax <= 0} 的行跳过。真实 tick 耗时恒 &gt; 0，
+ *       而 -1 表示"该拍只有 avg 路径（{@code getAverageTickTime}）或 TPS 反推，没有极值信息"。
+ *       <b>必须跳过而不是当 0</b>：0 会在求最大值时静默落败，让"从没尖峰过"和"没采到尖峰"同形；</li>
+ *   <li>{@link #peakProcessCpuSince} / {@link #peakSystemCpuSince}：只跳过 {@code < 0} 的行。
+ *       <b>0.0 是合法读数</b>（CPU 真的闲置），拿 0 当哨兵会把空载服务器误报成"未采集"；</li>
+ *   <li>GC 是<b>累计量</b>（counter），没有"峰值"语义，故不提供 peak helper，而是
+ *       {@link #gcDeltaSince}：返回窗口内增量，永不为 null（空窗口 / 未采集都返回"不可测"），
+ *       规则见 {@link GcDelta#of}。</li>
  * </ul>
  *
  * <p><b>线程安全</b>：{@code record}（采集主线程）与读取（命令线程，通常也是主线程）经同一把
@@ -356,6 +363,174 @@ public final class HistoryStore {
             }
         }
         return best;
+    }
+
+    // ==================== v1.4：新增 5 指标的历史查询 ====================
+
+    /**
+     * 窗口内 {@code msptMax} 最高的样本（"最严重的单次 tick 尖峰"）；无有效样本返回 null。
+     *
+     * <p><b>为什么不能用 {@code msptAvg} 代替</b>：一次 500ms 的卡顿在 60 秒窗口里只占 1/1200，
+     * 平均值几乎不动。玩家感受到的是尖峰，而 {@code msptAvg} 结构上采不到它。</p>
+     *
+     * <p><b>为什么 {@code msptMax <= 0} 的行整行跳过</b>（而不是保留成 0 或当候选值）：</p>
+     * <ul>
+     *   <li>保留成 0 → 全 -1 窗口返回一个 {@code msptMax = 0} 的样本，调用方无法分辨
+     *       "没采到"与"真的是 0ms"，渲染出来就是一条伪造的"尖峰 0ms"；</li>
+     *   <li>当候选值 → 全 -1 窗口返回 -1，而 {@code -1 ms} 被渲染出来是"最快的一次 tick 是负数"。
+     *       混合窗口里它虽然赢不了最大值，但 {@link #peakEntitiesSince} 这类"最小值"消费方
+     *       会被它静默污染。</li>
+     * </ul>
+     * <p>{@code -1} 的来源有两种，语义都是"没有极值信息"：本拍走了 avg-only（{@code getAverageTickTime}）
+     * 或 TPS 反推路径，以及 v1.4 之前的 7 列旧样本。两者都该报"未采集"，而不是一个数值。
+     * （{@code NaN > 0} 为 false，故 NaN 同样被跳过。）</p>
+     */
+    public HistorySample peakMsptSpikeSince(long sinceMs) {
+        HistorySample worst = null;
+        for (HistorySample s : snapshotAll()) {
+            if (s.timestamp() < sinceMs || !(s.msptMax() > 0)) {
+                continue;
+            }
+            if (worst == null || s.msptMax() > worst.msptMax()) {
+                worst = s;
+            }
+        }
+        return worst;
+    }
+
+    /**
+     * 窗口内进程 CPU 最高的样本；无有效样本返回 null。
+     *
+     * <p><b>过滤口径只排除 {@code < 0}</b>：{@code 0.0} 是合法读数（服务器真的在空转），
+     * 若沿用上面几条 helper 的 {@code <= 0} 口径，一台闲置服务器的 CPU 会永远显示"未采集"——
+     * 那是把健康说成盲区，与"把盲区说成健康"同样是错误结论。{@code -1} 才是哨兵
+     * （非 sun.* MXBean / 模块被禁用）。</p>
+     */
+    public HistorySample peakProcessCpuSince(long sinceMs) {
+        return peakBy(sinceMs, s -> s.cpuProcess() >= 0, HistorySample::cpuProcess);
+    }
+
+    /**
+     * 窗口内系统 CPU 最高的样本；无有效样本返回 null。
+     *
+     * <p>与 {@link #peakProcessCpuSince} 同口径（{@code 0.0} 合法，只排除负哨兵）。
+     * 独立于进程 CPU 的意义：进程低而系统高 = 机器被别的东西占了，不是本服的问题。</p>
+     */
+    public HistorySample peakSystemCpuSince(long sinceMs) {
+        return peakBy(sinceMs, s -> s.cpuSystem() >= 0, HistorySample::cpuSystem);
+    }
+
+    /** 通用"窗口内最大值"扫描（仅 v1.4 的 double 指标使用，避免四份几乎相同的循环）。 */
+    private HistorySample peakBy(long sinceMs, java.util.function.Predicate<HistorySample> valid,
+                                 java.util.function.ToDoubleFunction<HistorySample> value) {
+        HistorySample best = null;
+        for (HistorySample s : snapshotAll()) {
+            if (s.timestamp() < sinceMs || !valid.test(s)) {
+                continue;
+            }
+            if (best == null || value.applyAsDouble(s) > value.applyAsDouble(best)) {
+                best = s;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * 窗口内 GC 的<b>增量</b>（不是最大值——GC 次数是累计量，取最大值等于报开机以来的总数）。
+     *
+     * @param sinceMs 只统计该时刻（含）之后的样本
+     * @return 永不为 null；窗口内没有任何可测的相邻有效样本时 {@link GcDelta#measured()} 为 false
+     */
+    public GcDelta gcDeltaSince(long sinceMs) {
+        return GcDelta.of(snapshotAll(), sinceMs);
+    }
+
+    /**
+     * 窗口内一段 GC 累计量的增量（v1.4）。
+     *
+     * <p><b>为什么不是一个 long</b>：三种"算不出来"的原因必须与"真的是 0 次 GC"区分开——
+     * 前者是盲区，后者是健康。所以除了两个增量，还要带上"有效样本数"与"重置次数"，
+     * 由 {@link #measured()} 统一回答"这两个 0 可不可信"。</p>
+     *
+     * @param countDelta   窗口内 GC 次数增量（只累加非重置的相邻对）
+     * @param timeDeltaMs  窗口内 GC 耗时增量（毫秒）
+     * @param increments   真正贡献了增量的相邻对数；0 = 无法测量
+     * @param resets       检测到计数器回退（进程重启）的次数
+     * @param validSamples 窗口内含 GC 数据的样本数
+     */
+    public record GcDelta(long countDelta, long timeDeltaMs, int increments, int resets, int validSamples) {
+
+        /** 无数据的空结果（{@link #measured()} 为 false）。 */
+        public static final GcDelta NONE = new GcDelta(0L, 0L, 0, 0, 0);
+
+        /**
+         * 从样本列表算出增量（按时间升序、只考虑 {@code timestamp >= sinceMs} 的行）。
+         *
+         * <h2>三条规则及其理由</h2>
+         * <ol>
+         *   <li><b>逐对累加增量，不用"末值减首值"</b>：末值减首值在窗口内发生过重启时会把
+         *       重启前的那部分直接丢掉（甚至算出负数），而重启恰好是 GC 计数归零最常见的原因。
+         *       逐对累加让重启前的增量仍然计入。</li>
+         *   <li><b>计数器回退 = 重启，该对跳过</b>：{@code cur < prev}（次数或耗时任一）说明这段
+         *       区间里 JVM 换了一个进程，两个数不同基，差值无意义。跳过后把基线更新到新值，
+         *       之后的增量照常累计——这正是"跨重启仍不产生负增量"的实现。</li>
+         *   <li><b>-1 哨兵行整行跳过，且不参与相邻对</b>：把哨兵当 0 会让"未采集"变成一次
+         *       巨大的假下降（被误判成重启），或让增量凭空多出一段。跳过意味着增量是"跨过
+         *       数据缺口的累计"，语义上仍然成立（GC 计数在进程内单调）。</li>
+         * </ol>
+         *
+         * <p><b>已知局限（不隐瞒）</b>：若重启发生在两段可测数据之间的缺口里，且重启后的计数
+         * 已经超过重启前的值，则差值会被低估——没有第三方信息可以识别这种情况。故
+         * {@code resets} 只统计"能被计数器回退观测到"的重启。</p>
+         *
+         * @param samples 旧→新的样本列表（顺序错乱会得到错误结果，调用方负责）
+         * @param sinceMs 窗口起点（含）
+         */
+        public static GcDelta of(List<HistorySample> samples, long sinceMs) {
+            if (samples == null || samples.isEmpty()) {
+                return NONE;
+            }
+            long prevCount = HistorySample.NO_LONG;
+            long prevTime = HistorySample.NO_LONG;
+            int valid = 0;
+            int resets = 0;
+            int increments = 0;
+            long countDelta = 0L;
+            long timeDeltaMs = 0L;
+            for (HistorySample s : samples) {
+                if (s == null || s.timestamp() < sinceMs) {
+                    continue;
+                }
+                // 两个字段必须同时有效：只有一半的样本无法配对，用它配对会拿 0 参与减法
+                if (s.gcCount() == HistorySample.NO_LONG || s.gcTime() == HistorySample.NO_LONG) {
+                    continue;
+                }
+                valid++;
+                boolean hasPrev = prevCount != HistorySample.NO_LONG;
+                if (hasPrev) {
+                    if (s.gcCount() < prevCount || s.gcTime() < prevTime) {
+                        resets++;   // 进程重启：计数器归零，这一对不可用
+                    } else {
+                        countDelta += s.gcCount() - prevCount;
+                        timeDeltaMs += s.gcTime() - prevTime;
+                        increments++;
+                    }
+                }
+                prevCount = s.gcCount();
+                prevTime = s.gcTime();
+            }
+            return new GcDelta(countDelta, timeDeltaMs, increments, resets, valid);
+        }
+
+        /**
+         * 增量是否可信：至少有一对非重置的相邻有效样本。
+         *
+         * <p>{@code validSamples == 1}（只有一条样本）与"全部相邻对都是重启"都返回 false——
+         * 这两种情况下 {@link #countDelta()} 恒为 0，而 0 会被读成"整段没发生 GC"。</p>
+         */
+        public boolean measured() {
+            return increments > 0;
+        }
     }
 
     /** 当前实际存量（诊断用；不受 history.enabled 影响——门控只作用于 read 路径的返回值）。 */

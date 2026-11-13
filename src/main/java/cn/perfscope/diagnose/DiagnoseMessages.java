@@ -52,6 +52,13 @@ public final class DiagnoseMessages {
 
         // ==================== 通用标签 ====================
         put(en, zh, "diag.label.history", "History", "历史");
+        // F-3：TPS 的 0.0 是真实读数（无 -1 哨兵），只有"不可能是读数"的值（负数 / NaN /
+        // Infinity）才算"服务端没上报"。
+        // 刻意不用"未采集"这个词——它在本项目里专指"采集层没取到"，而这里是采集层取到了
+        // 一个无法解释的值；两者都不该被当成 0 渲染，但原因不同，措辞也要不同。
+        put(en, zh, "diag.value.not-reported",
+            "not reported by the server",
+            "服务端未上报");
 
         // ==================== DIAG-MEM-LEAK ====================
         put(en, zh, "diag.DIAG-MEM-LEAK.title",

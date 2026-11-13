@@ -282,6 +282,12 @@ public class DailySummaryService {
         HistorySample lowest = store == null ? null : store.lowestTpsSince(sinceMs);
         HistorySample peakEntities = store == null ? null : store.peakEntitiesSince(sinceMs);
         HistorySample peakHeap = store == null ? null : store.peakHeapSince(sinceMs);
+        // v1.4：新增 5 指标。三者各自处理"没数据"，口径见 MetricWindow 的注释。
+        HistorySample peakSpike = store == null ? null : store.peakMsptSpikeSince(sinceMs);
+        HistorySample peakProcessCpu = store == null ? null : store.peakProcessCpuSince(sinceMs);
+        HistorySample peakSystemCpu = store == null ? null : store.peakSystemCpuSince(sinceMs);
+        HistoryStore.GcDelta gc = store == null
+            ? HistoryStore.GcDelta.NONE : store.gcDeltaSince(sinceMs);
 
         long coverageMs = 0L;
         if (window.size() >= 2) {
@@ -354,6 +360,10 @@ public class DailySummaryService {
         List<String> body = new ArrayList<>();
         body.add(line1);
         body.add(line2);
+        // v1.4：新增 5 指标压成两行（尖峰一行、CPU+GC 一行）。必须插在告警统计行之前——
+        // 「末行含 告警统计:」是 harness 依赖的稳定锚点，挪到后面会让所有既有断言失效。
+        body.add(spikeLine(peakSpike, zone));
+        body.add(cpuGcLine(peakProcessCpu, peakSystemCpu, gc));
         body.add(line3);
         if (coverageText != null) {
             body.add(Messages.get("daily.note.label", coverageText));
@@ -460,6 +470,87 @@ public class DailySummaryService {
             totalMs += per;
         }
         return (int) Math.max(0, Math.round(totalMs / 60000.0));
+    }
+
+    // ==================== v1.4：新增 5 指标的渲染 ====================
+    //
+    // 三个渲染方法刻意是包级可见（而非 private）：它们是无副作用的纯函数，"未采集 / 样本不足 /
+    // 真的是 0" 的三态区分是本批最容易被改坏的地方，必须能被同包测试直接驱动。
+    // 走反射（本仓库其它测试的既有手法）也能测，但那会让"三态是否真的分开"这件事
+    // 在重构时静默失效——测试编译不过才是我们要的信号。
+
+    /**
+     * MSPT 尖峰行。
+     *
+     * <p><b>-1 哨兵不显示成数值</b>：{@code -1 ms} 会被读成"有史以来最快的一次 tick 是负数"，
+     * 比不显示更糟。整个窗口都没有尖峰值时显式写"本窗口未采集"——它与"没有尖峰"是两件事，
+     * 前者是盲区（旧 CSV / avg-only 路径 / TPS 反推），后者是健康的结论。
+     * 两件事不能共用一句话，否则盲区会被读成健康。</p>
+     */
+    static String spikeLine(HistorySample peakSpike, ZoneId zone) {
+        String value = peakSpike == null
+            ? Messages.get("daily.metrics.not-collected")
+            : Messages.get("daily.metrics.spike-at",
+                String.format(Locale.ROOT, "%.2f", peakSpike.msptMax()),
+                formatTime(peakSpike.timestamp(), zone));
+        return Messages.get("daily.metrics.spike", value);
+    }
+
+    /**
+     * CPU + GC 行。
+     *
+     * <p><b>两个 CPU 分开放"未采集"判断</b>：进程 CPU 与系统 CPU 是两个独立指标，
+     * 一边有一边无（例如 Windows 上 {@code getProcessCpuLoad} 被跳过）时不能用一个共同结论
+     * 覆盖两边——那会把有数据的那一边也标成盲区。</p>
+     *
+     * <p><b>GC 报增量而不是最大值</b>：{@code gcCount}/{@code gcTime} 是进程内累计计数器，
+     * 报最大值等于报"开机以来一共 GC 了多少次"，与"本窗口"无关。增量由
+     * {@link HistoryStore.GcDelta} 逐对累加，跨重启不会出现负值。</p>
+     */
+    static String cpuGcLine(HistorySample peakProcessCpu, HistorySample peakSystemCpu,
+                            HistoryStore.GcDelta gc) {
+        String process = peakProcessCpu == null
+            ? Messages.get("daily.metrics.not-collected")
+            : String.format(Locale.ROOT, "%.1f%%", peakProcessCpu.cpuProcess());
+        String system = peakSystemCpu == null
+            ? Messages.get("daily.metrics.not-collected")
+            : String.format(Locale.ROOT, "%.1f%%", peakSystemCpu.cpuSystem());
+        return Messages.get("daily.metrics.cpu", process, system)
+            + " | " + gcText(gc);
+    }
+
+    /**
+     * GC 增量的三种态，逐条区分（任何一种都不能退化成"0 次"）：
+     * <ol>
+     *   <li><b>窗口内没有任何带 GC 数据的样本</b> → "本窗口未采集"（旧 CSV / GC 模块被禁用）；</li>
+     *   <li><b>有样本但凑不出可比的相邻对</b> → "样本不足"（只有 1 条，或相邻对全是重启边界）；</li>
+     *   <li><b>可测且增量为 0</b> → "本窗口未发生 GC"（这是真的健康结论，不是盲区）。</li>
+     * </ol>
+     * 窗口内发生过 JVM 重启时追加一句说明：增量按相邻对累加，重启前那段仍计入——
+     * 服主据此知道"这个数字没有被重启吞掉"。
+     */
+    static String gcText(HistoryStore.GcDelta gc) {
+        if (gc == null || gc.validSamples() == 0) {
+            // 用 gc-state（"GC: {0}"）而不是数值模板：数值模板的量词是给数字用的，
+            // 套在整句上会渲染成 "GC: not collected in this window time(s), --s" 这种病句
+            return Messages.get("daily.metrics.gc-state",
+                Messages.get("daily.metrics.not-collected"));
+        }
+        if (!gc.measured()) {
+            // 样本在，但凑不出可比的一对：既不是"未采集"，也不是"没发生 GC"
+            return Messages.get("daily.metrics.gc-state",
+                Messages.get("daily.metrics.gc-insufficient"));
+        }
+        if (gc.countDelta() == 0L && gc.timeDeltaMs() == 0L) {
+            return Messages.get("daily.metrics.no-gc");
+        }
+        String text = Messages.get("daily.metrics.gc",
+            String.valueOf(gc.countDelta()),
+            String.format(Locale.ROOT, "%.1f", gc.timeDeltaMs() / 1000.0));
+        if (gc.resets() > 0) {
+            text += Messages.get("daily.metrics.gc-reset", gc.resets());
+        }
+        return text;
     }
 
     private static String formatTps(double tps) {

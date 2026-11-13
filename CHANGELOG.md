@@ -47,6 +47,120 @@
   而 9941/9942/9943 同样已被占用；8940 在 IANA 与 Prometheus 两张表中均未分配。
   端口被占时日志会直接点名冲突对象并给出替代值。
 
+### v1.4 未发布 — 每日摘要接入新增 5 指标（MSPT 尖峰 / CPU / GC）
+
+> **v1.4 未发布**：本小节不在 v1.3.0 的任何发布包中，需自行从源码构建。
+
+- **日报只看得到 3 个指标**。`HistorySample` 在 v1.4 从 7 列扩到 12 列（`msptMax` /
+  `cpuProcess` / `cpuSystem` / `gcCount` / `gcTime`），但 `DailySummaryService` 仍只读
+  `tps1m` / `totalEntities` / `heapUsagePercent`——新采的数据一条都没进日报，服主每天收到的
+  还是那份"看不出昨晚卡过"的三行。现在日报增加两行：
+  - `MSPT 尖峰: 1200.00 ms（03:14）` —— `msptAvg` 会把一次 500ms 的卡顿在 60 秒窗口里摊薄
+    到几乎不动，尖峰才是玩家实际感受到的东西；
+  - `进程 CPU 峰值: 61.5% | 系统 CPU 峰值: 33.0% | GC: 7 次，1.7 秒`。
+  - 新行插在**告警统计行之前**：`末行含 告警统计:` 是 harness 依赖的稳定锚点，不能挪。
+- **`-1` 哨兵绝不渲染成数值**。此前若照直格式化，会打出 `-1.00 ms`——用户会以为"有史以来
+  最快的一次 tick 是负数"。现在整个窗口没有该指标时写 **`本窗口未采集`**。
+- **"未采集"与"健康"在文案层强制分开**（三态，任何一种都不退化成 0）：
+  | 情形 | 输出 |
+  |---|---|
+  | 窗口内全是 `-1`（旧 CSV / 模块被禁用） | `本窗口未采集` |
+  | 有样本但凑不出可比的一对（1 条 / 相邻对全是重启） | `样本不足，无法统计增量` |
+  | 可测且增量确实为 0 | `本窗口未发生 GC` |
+  给没测的维度发 0 等于宣称它健康，是本项目写在 README 里的硬原则。
+- **GC 报窗口增量，不是最大值**。`gcCount`/`gcTime` 是进程内累计计数器，取最大值等于报
+  "开机以来一共 GC 了多少次"。增量按**相邻样本逐对累加**，而不是"末值减首值"——
+  后者在窗口跨进程重启时会把重启前那段丢掉，甚至算出负数（500 次 → 重启后 3 次 = -497）。
+  检测到计数器回退（任一字段变小）即跳过该对、把基线更新到新值，之后照常累加；
+  重启前的增量因此不丢。日报会在增量后追加 `（计数器归零 N 次…）`，让服主知道这个数字
+  没有被重启吞掉。
+- **CPU 的 `0.0` 不当哨兵**。`peakProcessCpuSince` / `peakSystemCpuSince` 只排除 `< 0`；
+  沿用堆/实体那套 `<= 0` 口径会让一台空载服务器的 CPU 永远显示"未采集"——
+  那是把健康说成盲区，与"把盲区说成健康"同样是错误结论。
+- **两个 CPU 各自判断未采集**。进程 CPU 与系统 CPU 是两个独立指标，一边有一边无
+  （如 Windows 上 `getProcessCpuLoad` 被跳过）时不共用一个结论，否则有数据的那边也被标成盲区。
+
+### Fixed — 诊断规则 `DIAG-TPS-PERSIST` 在两个最该报警的场景失声（F-3 / F-4）
+
+> **v1.4 未发布**：本小节不在 v1.3.0 的任何发布包中，需自行从源码构建。
+
+- **F-3：`tps15m == 0` 被当成"未知"，而 0 是最坏读数**。规则的 15 分钟判据写成
+  `snap.tps15m > 0 && snap.tps15m < 阈值`，但 `MetricsSnapshot` 的 `tps1m/tps5m/tps15m`
+  **没有** `-1` 哨兵（与 `msptAvg`/`cpu` 不同）：采集层直接写 `Bukkit.getTPS()`。
+  所以 `0.0` 是"服务器彻底冻结"这个最坏的真实读数，不是"未采集"。
+  用 `> 0` 把它滤掉之后，15 分钟均值 0.0（完全卡死）时规则返回 `CLEAN`——"查过了，没事"。
+  现在零值参与判定并必然 `critical`；负数 / `NaN` / `Infinity` 才走新的显式标签
+  `diag.value.not-reported`（与窗口侧的过滤口径一致，都是"不可能是读数"的值）。
+  反向问题一并修掉：旧实现命中时用 `%.2f` **无条件**打印 `tps15m`，detail 里会出现
+  "15 分钟均值 0.00"——把规则自己判为"不可信"的那个值当真实读数呈现给服主。
+  现在 `0.00` 是真实读数、照常打印，只有真正没上报时才换标签。
+- **F-4：窗口内 TPS 全 0 时整条规则 SKIP**。窗口扫描用 `tps1m() <= 0` 过滤"哨兵"，
+  但 `HistoryStore.record()` 在 `unavailable` 含 `MODULE_TPS` 时**整条样本不入环**
+  （污染防护），因此环里出现的 `tps1m == 0` 几乎只可能是真实的 0 TPS。该过滤等于把最严重的
+  证据当垃圾丢掉：实测 12 条全 0 样本 + `tps15m=3.0`（远低于告警线 18）时规则返回
+  `SKIP("Not enough valid TPS samples in history (0/5)")`——服主看到"无法评估"，
+  真相是"严重低位"。现在 `0` 参与 `avg1m` 与窗口最低点（真实卡死就该拉低均值）；
+  只保留"不可能是读数"的过滤：`> 20.5`（上界提为具名常量 `TPS_CEILING`）、负数、`NaN`/`Infinity`。
+  - 已知例外（已在规则 javadoc 里记明）：Folia 的 global region 在启动初期会短暂报接近 0，
+    且此时 `MODULE_TPS` 是"可用"、样本会入环。本规则不做平台分支（告警层的 9B-6 启动抑制
+    窗口已按服务端类型处理），实际被覆盖判据挡住（10 分钟窗 ≥5 条 + 跨度达标）。
+- **新增 `TpsPersistentRuleTest`（20 个用例）**，直连规则体（不经过引擎闸门），
+  用 `Unsafe.allocateInstance` + 反射写 `HistoryStore` 私有 `ring` 喂窗口，
+  与 `MemoryLeakRuleTest` 同范式（`record()` 有墙钟节流闸门，造不出 10 分钟 12 个样本）。
+  红→绿留证：对 `HEAD` 的原实现运行得 8 failures（3 条 F-3、4 条 F-4、1 条引擎接线）。
+  变异验证（全部被测试咬住）：`tps15m` 改回 `> 0` → 2 failures；`tps1m` 过滤改回 `<= 0`
+  → 5 failures；删掉 `> 20.5` 上界 → 1 failure；快照侧守卫缩成只判 `isFinite` → 1 failure
+  （打出一条 `15-minute average -1.00 … critical=true`）。
+  这几条用例刻意做成"结论相反"而非"碰巧通过"：`allZeroTpsWindowMustHitNotSkip` 区分
+  hit/skip，`zeroFifteenMinuteTpsIsCriticalNotClean` 区分 hit/clean，
+  `allZeroWindowHitsEvenWhenFifteenMinuteAverageLooksHealthy` 锁住两个判据的 OR 关系
+  （改成 AND 立刻红）。
+- **前提锁定（两条用例，用真实 `record()` 而非反射写环）**：F-4 的整个立论依赖
+  "TPS 不可用期的快照不进环"这条住在 `HistoryStore` 里的约定。一旦有人为了"多留点历史"
+  去掉那段守卫，规则会重新开始把假 0 当真实读数，而**规则自己的测试全部仍然绿**。
+  `tpsUnavailableSnapshotNeverEntersTheRing` 与 `realZeroTpsSnapshotIsRecorded` 一正一反
+  把这条约定钉在同一个测试类里，越界改动的第一现场就会有信号。
+
+### Added — 新测试类 `DailySummaryNewMetricsTest`（22 个用例）
+
+- 守住上面每一条的**反命题**：全 `-1` 窗口不出 `-1`/`null`/`0`、混杂窗口的最大值来自真实读数
+  而非哨兵、GC 跨重启不出负增量（含"只回退耗时字段"与连续重启两种变体）、`0.0` CPU 不被当哨兵、
+  三态文案两两不同、窗口外样本不计入、`history.enabled=false` 时新 helper 一律为空、
+  老 helper（heap/entities）的跳 0 口径未被动过。
+- 新增包级可见的三个纯函数入口（`spikeLine` / `cpuGcLine` / `gcText`）：三态区分是本批最容易
+  被改坏的地方，走反射能测但重构时会静默失效，编译不过才是想要的那个信号。
+
+### Added — 新测试类：三条零覆盖诊断规则的直接驱动测试（45 个用例）
+
+> **v1.4 未发布**：本小节不在 v1.3.0 的任何发布包中，需自行从源码构建。
+
+`CoreRules` 的 5 条规则里，`MemoryLeakRule` 已有 12 个用例，而 `EntityHotspotRule` /
+`PlayerCapacityRule` / `MsptSpikeRule` 在 `src/test` 下**零引用**——16 个针对性变异体全部存活。
+本批补上直连规则体的测试（不经过引擎闸门），三条规则共 45 个用例：
+
+- `MsptSpikeRuleTest`（15 个）：两个 skip 成因（平均值未知 / 无 tick 极值）必须<u>互相可区分</u>；
+  `msptAvg=0` 与 `msptMax=0` 都按哨兵处理，不得当作真实读数；命中需同时满足
+  `max >= 100ms` 与 `max >= avg×3`，等号归命中（这两处实现是 `<` 早退，与字段注释写的
+  `>` 不同，边界用例锁的是**现行口径**）；`max > 1000` 才升 critical，恰好 1000 仍是警告。
+- `EntityHotspotRuleTest`（13 个）：命中线是 `max(100, cfg.hotspots_chunkWarningThreshold)`——
+  配置调低时必须被绝对下限托住，否则小服一个村庄就会报警；严重线是写死的 500 且与配置不联动；
+  detail 用消息层同一模板做全等比较，世界名 / 区块坐标 / 方块坐标三者错位会当场红。
+- `PlayerCapacityRuleTest`（17 个）：核心是 **`playerCount = 0` 的样本必须参与最低点计算**。
+  用例 `zeroPlayerSamplesAreTheOnlyLowInTheWindow` 把 0 设为窗口里唯一的低谷——
+  跳过 0 的实现会把最低点算成 95%，从而输出一条假的「在线人数持续接近上限」，
+  与正确实现**结论相反**，因而具备区分力而非碰巧通过。另有 `warning - 10` 余量的等号边界
+  （恰好 80% 仍命中，79% 才 clean）。
+
+### Notes — 两条记录在案、未修的行为（测试里以「已知缺陷/已知假设」标注）
+
+- `hotspots.chunk-warning-threshold` 被调到 1000 时，一个恰好 1000 实体的区块仍被判
+  `critical=true`：严重线 `CHUNK_CRITICAL=500` 与命中线量纲不联动，严重度与服主自己的阈值判断相反。
+  用例 `knownDefectChunkAtTheRaisedThresholdIsCritical` **刻意断言缺陷存在**，作为「当前行为」快照；
+  修掉它时该用例会变红，届时改成断言 `!critical` 并在此段补一条 Fixed。
+- `EntityHotspotRule` 只读 `topEntityChunks.get(0)`，不自己求最大值——「列表已降序」是采集层的承诺。
+  用例 `onlyTheFirstEntryIsInspected` 喂入乱序列表（索引 0 为 150、索引 1 为 5000）得到 clean，
+  锁住这个耦合：若采集层哪天不再排序，规则会静默漏报，且不会有任何测试变红。
+
 ### v1.4 未发布 — 告警状态加载顺序
 
 > **v1.4 未发布**：本小节不在 v1.3.0 的任何发布包中，需自行从源码构建。
