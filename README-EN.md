@@ -157,7 +157,7 @@ This is the `zh` output. With the shipped default `general.language: en` the sam
 
 ## Upgrade notes (1.3.0 → 1.4.0)
 
-Going from 1.3.0 to 1.4.0, **only one default flip changes your behaviour**:
+Going from 1.3.0 to 1.4.0, **these are the only changes that alter existing behaviour — everything else is new features or fixes**:
 
 - **`alerts.enabled` ships as `false` instead of `true`.** Alert push (console / in-game / webhook) moves from "on by default" to "opt-in". Collection, `/perfscope` full diagnostics, reports, history and the Prometheus endpoint are unaffected.
   - **Your existing config is never rewritten**: the key is read from your `config.yml` and only falls back to the default when **missing** — it is never merged with the shipped defaults. Servers that wrote `enabled: true` keep alerting.
