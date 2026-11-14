@@ -124,11 +124,15 @@ public final class ThresholdColors {
                 if (value >= cfg.memory_heapWarningThreshold) return Level.WARN;
                 return Level.GOOD;
             case CPU_PROCESS:
-                if (value <= 0) return Level.UNKNOWN; // -1 哨兵：JDK 取不到
+                // 只排除负哨兵。0.0 是合法读数（空载服务器的 CPU 就是 0），把它当"未采集"
+                // 会让一台空闲服永远显示"未知"，而它恰恰是最健康的状态。这与
+                // MetricsSnapshot 的约定一致（processCpuLoad 默认 -1 表示未采集），
+                // 也与 /perfscope trend 的口径一致（那里同样用 >= 0 放行 0.0）。
+                if (value < 0) return Level.UNKNOWN;
                 if (value >= cfg.cpu_processWarningThreshold) return Level.WARN; // 无 critical 键
                 return Level.GOOD;
             case CPU_SYSTEM:
-                if (value <= 0) return Level.UNKNOWN;
+                if (value < 0) return Level.UNKNOWN;
                 if (value >= cfg.cpu_systemWarningThreshold) return Level.WARN;
                 return Level.GOOD;
             case PLAYERS:

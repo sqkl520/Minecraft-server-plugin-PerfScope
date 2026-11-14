@@ -18,6 +18,24 @@
 
 > v1.4.1 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
 
+### Fixed — 空载服务器的 CPU 被显示成"未采集"
+
+`ThresholdColors` 判 CPU 等级时用 `value <= 0` 判 UNKNOWN，把 `0.0` 也当成了哨兵。
+但 `MetricsSnapshot` 的 CPU 哨兵是 **`-1`**（构造器注释：「MSPT/CPU 未采集时为 -1」），
+`0.0` 是"真的没占用"——一台完全空载的服务器 CPU 就是 0，那是最健康的状态，
+不该显示成"未知"。
+
+同项目 `PerfScopeCommand` 算趋势峰值时一直用的是 `cpuProcess() >= 0`（只排除负哨兵），
+两处口径相反。现在统一为"只排除负哨兵"。
+
+MSPT 的 `<= 0` 保持不变：`msptAvg` 默认 -1，且每 tick 耗时不可能真的是 0，
+那里判 UNKNOWN 是对的。**两者不能一刀切**，这正是初版测试容易写错的地方
+（初版跟随旧实现断言 `CPU_PROCESS, 0.0 → UNKNOWN`，等于把缺陷写成了契约）。
+
+顺带补了两个此前零测试的类：`DurationFormatTest`（14 个）与 `ThresholdColorsTest`（34 个）。
+`DurationFormat` 负责报告 / 趋势 / 诊断的全部时长展示，`ThresholdColors` 决定游戏内
+所有数值的着色——改坏了用户会看到错误的时长或错误的颜色，此前没有任何测试拦得住。
+
 ### Fixed — `/perfscope report` 失败时只说"报告生成失败"，不说是哪一种
 
 失败原因有四种，处置方式完全不同：
