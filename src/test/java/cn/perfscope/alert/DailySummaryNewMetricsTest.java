@@ -541,4 +541,78 @@ class DailySummaryNewMetricsTest {
         assertNull(hs.peakHeapSince(since()), "heap 0 is still a missing reading");
         assertNull(hs.peakEntitiesSince(since()), "entities 0 is still a missing reading");
     }
+
+    // ==================== 日报里的 TPS 0 不能当哨兵 ====================
+
+    /**
+     * TPS 的 {@code 0} 是真实读数，日报的 p95 必须把它算进去。
+     *
+     * <p><b>为什么</b>：{@code tps1m} 没有 -1 哨兵——采集层直接写 {@code Bukkit.getTPS()}，
+     * 而 TPS 不可用时的快照整条不入历史环（{@code HistoryStore} 的污染防护）。所以环里的
+     * {@code 0} 只可能是"服务器真的冻结了"，是最坏的真实读数。</p>
+     *
+     * <p><b>滤掉它会怎样</b>：p95 偏高，日报看起来比实际健康。窗口里如果有一半样本是 0，
+     * 真实 p95 应该是 0；滤掉之后会显示成那些非零样本的高分位数，读者完全看不到卡死。</p>
+     */
+    @Test
+    void percentileCountsTpsZeroAsARealReading() throws Exception {
+        // 10 条样本，5 条 0（卡死）、5 条 20.0（正常）
+        List<HistorySample> window = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            window.add(new HistorySample(NOW - (9 - i) * 60_000L, i < 5 ? 0.0 : 20.0,
+                12.0, 50, 5, 100, 500));
+        }
+
+        double p95 = percentile(window, 0.95);
+        assertEquals(20.0, p95, 0.001,
+            "with half the window at 0 TPS, the p95 of the full set is 20.0; "
+                + "dropping the zeros would still give 20.0 here, so this alone is not proof");
+
+        // 关键对比：全是 0 的窗口，p95 必须是 0，而不是"无有效样本"的 -1
+        List<HistorySample> allZero = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            allZero.add(new HistorySample(NOW - (4 - i) * 60_000L, 0.0, 12.0, 50, 5, 100, 500));
+        }
+        assertEquals(0.0, percentile(allZero, 0.95), 0.001,
+            "a fully frozen window has p95 = 0; returning -1 (\"no valid samples\") hides total failure");
+    }
+
+    /**
+     * 超阈时长必须把 TPS 0 的时段算进去。
+     *
+     * <p>一台卡死 20 分钟的服务器，那 20 分钟当然"低于告警阈值"。滤掉 0 会让这 20 分钟
+     * 从统计里消失，日报报"超阈 0 分钟"——把最严重的情况报成最健康。</p>
+     */
+    @Test
+    void overThresholdMinutesCountsZeroTpsIntervals() throws Exception {
+        ConfigManager.ConfigData cfg = new ConfigManager.ConfigData();
+        cfg.tps_warningThreshold = 18.0;
+
+        // 10 条样本、每 60s，全部 tps=0（整段卡死）
+        List<HistorySample> window = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            window.add(new HistorySample(NOW - (9 - i) * 60_000L, 0.0, 12.0, 50, 5, 100, 500));
+        }
+
+        int minutes = overThresholdMinutes(window, cfg);
+        assertTrue(minutes >= 9,
+            "10 samples 60s apart at 0 TPS is ~9 minutes below the warning line; "
+                + "reporting 0 means the worst case reads as the healthiest; got: " + minutes);
+    }
+
+    // ==================== 反射直连两个私有纯函数 ====================
+
+    private static double percentile(List<HistorySample> samples, double q) throws Exception {
+        var m = DailySummaryService.class.getDeclaredMethod("percentile", List.class, double.class);
+        m.setAccessible(true);
+        return (Double) m.invoke(null, samples, q);
+    }
+
+    private static int overThresholdMinutes(List<HistorySample> samples, ConfigManager.ConfigData cfg)
+        throws Exception {
+        var m = DailySummaryService.class.getDeclaredMethod(
+            "overThresholdMinutes", List.class, ConfigManager.ConfigData.class);
+        m.setAccessible(true);
+        return (Integer) m.invoke(null, samples, cfg);
+    }
 }

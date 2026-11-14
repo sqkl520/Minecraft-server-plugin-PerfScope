@@ -18,6 +18,25 @@
 
 > v1.4.1 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
 
+### Fixed — 日报与趋势把 TPS 0 当哨兵过滤，把卡死报成健康
+
+同一个错误的第三处、第四处：`tps1m` 没有 `-1` 哨兵（采集层直接写 `Bukkit.getTPS()`，
+TPS 不可用时的快照整条不入环），所以环里的 `0` **只可能是服务器真的冻结了**。
+这是最坏的真实读数，不是"未采集"。
+
+三处都用 `> 0` 把它滤掉了，后果各不相同：
+
+| 位置 | 后果 |
+|---|---|
+| `DailySummaryService` 的 p95 | 窗口里一半样本是 0 时，p95 仍显示非零样本的高分位数——**日报看起来比实际健康** |
+| `DailySummaryService` 的超阈时长 | 卡死的那 20 分钟不计入统计，日报报"超阈 0 分钟"——**把最严重的情况报成最健康** |
+| `PerfScopeCommand` 的 trend 最低 TPS | 报"最低 18.0"而实际卡死过——**直接伪造历史**，而 trend 正是服主用来回顾"昨晚到底卡没卡"的 |
+
+现在统一为只排除负哨兵（`>= 0`）。全 0 的窗口 p95 会如实算出 0，而不是"无有效样本"。
+
+新增两条测试（`percentileCountsTpsZeroAsARealReading` / `overThresholdMinutesCountsZeroTpsIntervals`）；
+变异验证：把两处改回 `> 0`，两条立刻失败。
+
 ### Fixed — 空载服务器的 `cpu:process` 指标整条不出现
 
 上一节修的是 `ThresholdColors` 的着色口径；同一处错误在**采集层**还有一份，更严重。

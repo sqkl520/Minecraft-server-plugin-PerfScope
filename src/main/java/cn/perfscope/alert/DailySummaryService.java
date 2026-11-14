@@ -408,13 +408,18 @@ public class DailySummaryService {
     }
 
     /**
-     * 窗口内 TPS 的 p95（线性插值，只统计 {@code tps1m > 0} 的有效样本）。
+     * 窗口内 TPS 的 p95（线性插值，只统计有效样本）。
      * 无有效样本返回 -1，展示为 {@code --}。
+     *
+     * <p><b>为什么不过滤 {@code 0}</b>：{@code tps1m} 没有 -1 哨兵——采集层直接写
+     * {@code Bukkit.getTPS()}，而 TPS 不可用时的快照整条不入历史环（{@code HistoryStore}
+     * 的污染防护）。所以环里的 {@code 0} 只可能是"服务器真的冻结了"，是最坏的真实读数。
+     * 把它滤掉会让 p95 偏高，日报看起来比实际健康。</p>
      */
     private static double percentile(List<HistorySample> samples, double q) {
         List<Double> vals = new ArrayList<>();
         for (HistorySample s : samples) {
-            if (s.tps1m() > 0) {
+            if (s.tps1m() >= 0) {
                 vals.add(s.tps1m());
             }
         }
@@ -457,7 +462,8 @@ public class DailySummaryService {
             medianGap += gap;
             gaps++;
             double tps = samples.get(i).tps1m();
-            if (tps > 0 && tps < threshold) {
+            // 0 是真实读数（见 percentile 的注释），它当然低于任何告警线，必须计入超阈时长
+            if (tps >= 0 && tps < threshold) {
                 totalMs += gap;
             }
         }
@@ -466,7 +472,7 @@ public class DailySummaryService {
         }
         long per = medianGap / gaps;
         HistorySample last = samples.get(samples.size() - 1);
-        if (last.tps1m() > 0 && last.tps1m() < threshold) {
+        if (last.tps1m() >= 0 && last.tps1m() < threshold) {
             totalMs += per;
         }
         return (int) Math.max(0, Math.round(totalMs / 60000.0));

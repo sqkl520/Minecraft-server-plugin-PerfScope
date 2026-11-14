@@ -1171,7 +1171,10 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         long prevGcTime = HistorySample.NO_LONG;
         long prevGcCount = HistorySample.NO_LONG;
         for (HistorySample s : samples) {
-            if (s.tps1m() > 0 && s.tps1m() <= 20.5) {
+            // tps1m 没有 -1 哨兵（TPS 不可用时的快照整条不入环），所以 0 是真实的
+            // "服务器冻结"，是最该被看见的最低值。用 > 0 把它滤掉，trend 会报"最低 18.0"
+            // 而实际卡死过——那是伪造历史。只排除负哨兵与物理上不可能的上界。
+            if (s.tps1m() >= 0 && s.tps1m() <= 20.5) {
                 sumTps += s.tps1m();
                 tpsCount++;
                 if (s.tps1m() < minTps) {
