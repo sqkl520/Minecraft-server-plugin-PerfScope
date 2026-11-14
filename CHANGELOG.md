@@ -18,6 +18,27 @@
 
 > v1.4.1 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
 
+### Fixed — 空载服务器的 `cpu:process` 指标整条不出现
+
+上一节修的是 `ThresholdColors` 的着色口径；同一处错误在**采集层**还有一份，更严重。
+
+`MetricsCollector` 的 CPU 告警判定写的是 `if (snap.processCpuLoad > 0)`。用 `> 0` 而非
+`>= 0` 的后果不只是"不判等级"：`recordLevel()` 被整段跳过，于是 `cpu:process` 这个
+Prometheus 指标在**完全空载的服务器上整条不输出**。
+
+运维若写了 `absent(perfscope_alert{key="cpu:process"})` 之类的规则，会把一台空载的健康
+服务器判成"采集挂了"。把健康说成盲区，与把盲区说成健康是同样严重的错误——这条正是
+项目 README 里写明的原则。
+
+现在改为 `>= 0`（只排除负哨兵）。空载服会正常输出 `cpu:process 0`，即"健康"。
+
+系统 CPU 那处（`cpu:system`）同样修正。
+
+**这一处没有独立测试**：CPU 采集路径依赖 `sun.management.OperatingSystemMXBean`，
+在没有真实 JVM 指标的测试环境里构造不出来。它的正确性目前由 `ThresholdColorsTest`
+里那条 `cpuZeroIsARealReadingNotASentinel` 间接背书——两处遵循同一条原则
+（只排除负哨兵，`0.0` 是合法读数）。这是一个已知的覆盖缺口，不是遗漏。
+
 ### Fixed — 空载服务器的 CPU 被显示成"未采集"
 
 `ThresholdColors` 判 CPU 等级时用 `value <= 0` 判 UNKNOWN，把 `0.0` 也当成了哨兵。

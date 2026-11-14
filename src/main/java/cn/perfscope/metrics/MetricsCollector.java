@@ -1954,8 +1954,11 @@ public class MetricsCollector {
                 margin = ConfigManager.CPU_HYSTERESIS_DEFAULT;
             }
 
-            // 哨兵 -1 不参与告警判定（保持原有语义）；闩锁只在有效读数上推进
-            if (snap.processCpuLoad > 0) {
+            // 只排除负哨兵。0.0 是合法读数（空载服务器的 CPU 就是 0），用 > 0 会把它挡在
+            // 告警判定与 recordLevel 之外——后果不只是"不判等级"，而是 cpu:process 这个
+            // Prometheus 指标在空载服上整条不出现，运维用 absent() 检查会误以为采集挂了。
+            // 把健康说成盲区，与把盲区说成健康是同样严重的错误。
+            if (snap.processCpuLoad >= 0) {
                 processCpuLatched = latched(
                     processCpuLatched, snap.processCpuLoad,
                     cfg.cpu_processWarningThreshold, margin);
@@ -1968,7 +1971,7 @@ public class MetricsCollector {
                 // 若这里改用瞬时值判定，指标会比告警本身抖得多，Prometheus 侧反而更吵。
                 recordLevel(snap, "cpu:process", processCpuLatched ? 1 : 0);
             }
-            if (snap.systemCpuLoad > 0) {
+            if (snap.systemCpuLoad >= 0) {
                 systemCpuLatched = latched(
                     systemCpuLatched, snap.systemCpuLoad,
                     cfg.cpu_systemWarningThreshold, margin);
