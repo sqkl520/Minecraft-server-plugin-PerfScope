@@ -3,7 +3,7 @@
 本项目：**PerfScope** —— Minecraft 服务器性能监测插件（Paper 1.20.4+ / Purpur / Pufferfish / Folia / Leaves，Java 17）。
 后台定时采集性能快照 → 游戏内 17 个子命令一屏诊断 → HTML/TXT/JSON 报告导出 → ActionBar 实时监测 → 阈值告警。
 
-> **仓库**：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope> ｜ **版本**：`1.4.0`（当前正式版）｜ **上一个正式版**：`1.3.0`（`versions/PerfScope-1.3.0.jar`）｜ `[Unreleased]` 当前为空（v1.4 改动已全部归入 `[1.4.0]`）
+> **仓库**：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope> ｜ **版本**：`1.4.1`（当前正式版，补丁）｜ **上一个正式版**：`1.4.0`（`versions/PerfScope-1.4.0.jar`，带 `LinkageError` 缺陷）｜ `[Unreleased]` 当前为空
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/)。v1.2「找得到」开发周期已收尾，各段以 **Wave（开发波次）** 划分并标注对应提交哈希。
 
@@ -16,7 +16,34 @@
 
 ## [Unreleased]
 
-> v1.4.0 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
+> v1.4.1 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
+
+---
+
+## [1.4.1] — 2026-11-14 — 补丁版
+
+> 本节是给使用者看的：只有**改了什么、有什么影响**。
+
+**修掉一个会让 Prometheus 抓取"看起来像网络故障"的缺陷。**
+
+1.4.0 是第一个带 Prometheus 端点的版本，也就是第一个会真正被 Prometheus 抓取的版本。
+而它的请求处理只捕获 `Exception`：只要渲染路径抛出 `LinkageError`
+（某个类的链接失败、jlink 裁过的 JDK 缺 `jdk.httpserver` 模块等），整个请求线程会崩掉，
+**抓取方拿到的是连接重置**，客户端报 `HTTP/1.1 header parser received no bytes`。
+
+这个症状与"端点没起来""端口没开""防火墙挡了"完全一样，运维会顺着网络方向排查，
+而真实原因是一条渲染失败。日志里也只有一条线程崩溃，看不出是哪个请求。
+
+现在这类错误会被捕获并返回干净的 500，日志里有一条限频的 warning 带异常类名。
+
+**升级建议**：如果你在用 1.4.0 的 Prometheus 端点，建议换到 1.4.1。没有配置变更，
+没有行为变更，直接替换 jar 即可。
+
+**刻意不捕获 `Error` 基类**：`OutOfMemoryError` / `StackOverflowError` 之后 JVM 状态
+不可信，吞掉再继续服务只会把问题藏得更深——那种情况让线程退出是正确行为。
+
+本版其余改动都是**测试覆盖**，不改任何运行时行为：
+`PrometheusEndpoint` 补 55 个用例（此前零测试）、`HistoryFileStore` 写入路径补 21 个用例。
 
 ### Added — 测试：`PrometheusEndpoint`（v1.4.0 头号卖点此前零测试）
 

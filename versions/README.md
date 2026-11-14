@@ -7,7 +7,8 @@
 
 | 版本 | 文件 | 说明 |
 |---|---|---|
-| **1.4.0** | `PerfScope-1.4.0.jar` | **推荐使用**（最新已发布版本）。「可观测性」：Prometheus 指标端点（默认 `127.0.0.1:8940/metrics`，含逐告警 `perfscope_alert{key,module}` 指标——级别走值不走标签，序列恒定；健康也输出 0，`absent()` 才能区分"没告警"与"采集挂了"）；企业微信 / 飞书 / 钉钉群机器人（飞书/钉钉支持加签）；`/perfscope webhook status|test` 自检（三个国内平台业务失败也返回 HTTP 200，错误码在响应体里——HTTP 200 不等于成功）；日报新增 MSPT 尖峰 / 进程 CPU / 系统 CPU / GC 次数与时长；历史 CSV 7 列扩到 12 列（旧文件照常可读，缺列显示"未采集"而非 0）；`/perfscope trend` 报告数据缺口（把"这段时间没卡"与"这段时间根本没数"分开）。**行为变更**：`alerts.enabled` 默认值 `true` → `false`（告警改为选择加入），随包默认阈值同步重标定（`entities` 2000/3000 → 20000/30000、`chunks` 1500/2500 → 10000/15000）；你文件里已有的值不受影响。诊断规则修复 4 处口径：TPS 规则在 `tps15m == 0`（彻底冻结）与窗口全 0 时不再失声；内存泄漏规则在缺采窗口改为 SKIP 而非 CLEAN；热点区块严重线跟随配置的命中线。消息键：源码注册 778 个（`check-i18n.mjs` 实测，`--strict` 亦通过），编译进 jar 的 746 个（`verify-release-artifact.mjs` 按 class 常量池实测——两者口径不同，前者数 `put()` 调用，后者只认 `*Messages.java` 里的字面量键）。<br>sha256 `b34a77b5…`<br>GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.4.0> |
+| **1.4.1** | `PerfScope-1.4.1.jar` | **推荐使用**（最新已发布版本）。**补丁版**，只修一件事：Prometheus 端点的请求处理原先只捕获 `Exception`，渲染路径抛 `LinkageError`（类链接失败、jlink 裁过的 JDK 缺 `jdk.httpserver` 模块等）时整个请求线程崩掉，抓取方拿到的是**连接重置**（客户端报 `HTTP/1.1 header parser received no bytes`）——这个症状与"端点没起来""端口没开""防火墙挡了"完全一样，运维会顺着网络方向排查。现在返回干净的 500，日志里有一条限频 warning 带异常类名。字节码对比：1.4.0 的 `handle` 里 `LinkageError` 捕获条目 0 个，1.4.1 是 5 个。<br>**从 1.4.0 升级无需任何改动**，直接替换 jar；无配置变更、无行为变更。从 1.3.x 升级请先读仓库 README 的「升级注意」（`alerts.enabled` 默认值翻转等）。<br>其余改动全是测试覆盖：`PrometheusEndpoint` 补 55 个用例、`HistoryFileStore` 写入路径补 21 个用例。<br>sha256 `dec97a6a…`<br>GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.4.1> |
+| 1.4.0 | `PerfScope-1.4.0.jar` | 带 `LinkageError` 缺陷，建议换用 1.4.1。「可观测性」：Prometheus 指标端点（默认 `127.0.0.1:8940/metrics`，含逐告警 `perfscope_alert{key,module}` 指标——级别走值不走标签，序列恒定；健康也输出 0，`absent()` 才能区分"没告警"与"采集挂了"）；企业微信 / 飞书 / 钉钉群机器人（飞书/钉钉支持加签）；`/perfscope webhook status|test` 自检（三个国内平台业务失败也返回 HTTP 200，错误码在响应体里——HTTP 200 不等于成功）；日报新增 MSPT 尖峰 / 进程 CPU / 系统 CPU / GC 次数与时长；历史 CSV 7 列扩到 12 列（旧文件照常可读，缺列显示"未采集"而非 0）；`/perfscope trend` 报告数据缺口（把"这段时间没卡"与"这段时间根本没数"分开）。**行为变更**：`alerts.enabled` 默认值 `true` → `false`（告警改为选择加入），随包默认阈值同步重标定（`entities` 2000/3000 → 20000/30000、`chunks` 1500/2500 → 10000/15000）；你文件里已有的值不受影响。诊断规则修复 4 处口径：TPS 规则在 `tps15m == 0`（彻底冻结）与窗口全 0 时不再失声；内存泄漏规则在缺采窗口改为 SKIP 而非 CLEAN；热点区块严重线跟随配置的命中线。消息键：源码注册 778 个（`check-i18n.mjs` 实测，`--strict` 亦通过），编译进 jar 的 746 个（`verify-release-artifact.mjs` 按 class 常量池实测——两者口径不同，前者数 `put()` 调用，后者只认 `*Messages.java` 里的字面量键）。<br>sha256 `b34a77b5…`<br>GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.4.0> |
 | 1.3.0 | `PerfScope-1.3.0.jar` | 「可诊断性」：热点区块扫描改为分区增量（11,047 区块空闲服 A/B 实测：采集 `max` 78→41 ms、超 1 tick 周期 2/300→0/300；p95 33→30 ms，在噪声内）；采集耗时自监测（`/perfscope status` 给出 p50/p95/max）；控制台日志与消息层完整中英双语（**725** 键，`check-i18n.mjs --strict` 实测）；LICENSE/NOTICE 进 jar；非 Paper 系平台启动即拒绝；`update_interval` 钳制 5–1200；bStats 匿名统计正式生效（35061）。**Windows 上进程 CPU 因实测单次阻塞 171ms 而改为显示「未知」**。<br>GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.3.0> |
 | 1.2.1 | `PerfScope-1.2.1.jar` | 「说真话」：不新增功能，修正 v1.2.0 中说错/说假/静默失败之处（MSPT 极值捏造、Folia 假精确、诊断三态、告警生命周期、webhook 泄露、配置静默回退、历史异步写、性能自证纠错）。新增 `/status`、`/alerts`。<br>GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.2.1> |
 | 1.2.0 | `PerfScope-1.2.0.jar` | 智能诊断 + 热点定位 + 跨重启历史 + 消息层（Wave 8）。<br>GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.2.0> |
@@ -62,7 +63,16 @@ This directory holds **local** build artifacts; JARs are not tracked by git (exc
 `.gitignore`, with this `README.md` as the only exception). Use GitHub Releases for official
 downloads.
 
-**Latest released version: 1.4.0** (`PerfScope-1.4.0.jar`, "Observability" release).
+**Latest released version: 1.4.1** (`PerfScope-1.4.1.jar`, patch release).
+
+1.4.1 fixes one thing: the Prometheus endpoint's request handler only caught `Exception`, so a
+`LinkageError` in the render path (class-link failure, a jlink-trimmed JDK without
+`jdk.httpserver`, …) killed the request thread and the scraper got a **dropped connection**
+(`HTTP/1.1 header parser received no bytes`) — a symptom indistinguishable from "endpoint not
+running", "port closed" or "firewall". It now returns a clean 500 with a rate-limited warning in
+the log. Bytecode check: `handle` has 0 `LinkageError` catch entries in 1.4.0, 5 in 1.4.1.
+**Upgrading from 1.4.0 needs no changes** — just swap the jar. Everything else in this release is
+test coverage.
 
 ## How each archive maps to a tag
 
