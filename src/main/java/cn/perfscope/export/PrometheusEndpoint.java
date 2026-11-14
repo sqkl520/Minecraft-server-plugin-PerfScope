@@ -128,7 +128,7 @@ public final class PrometheusEndpoint {
                     "core.prometheus.exposed", boundAddress, authEnabled ? "auth" : "NO AUTH"));
             }
             return true;
-        } catch (Exception | LinkageError e) {
+        } catch (Exception e) {
             // LinkageError 覆盖"jlink 裁过 JDK、缺 jdk.httpserver 模块"这种情形
             server = null;
             boundAddress = null;
@@ -224,9 +224,17 @@ public final class PrometheusEndpoint {
                 return;
             }
             respond(ex, 200, body);
-        } catch (Exception e) {
+        } catch (Exception | LinkageError e) {
             // 异常绝不进响应体（会把内部路径/堆栈泄露给抓取方），只记一条 warning。
             // 限频：同一类失败每秒最多一条，避免抓取方重试把日志刷爆。
+            //
+            // 为什么带上 LinkageError：只 catch Exception 时，这类 Error 会击穿整个请求线程，
+            // 抓取方拿到的是连接重置（java.net.http 报 "HTTP/1.1 header parser received
+            // no bytes"），而不是 500。运维看到的形态与"端点没起来""网络不通"完全一样，
+            // 排查会走错方向。同项目 MetricsCollector.safeCollect 早已是这个口径。
+            //
+            // 刻意**不**抓 Error 基类：OutOfMemoryError / StackOverflowError 之后 JVM 状态
+            // 不可信，吞掉再继续服务只会把问题藏得更深——那种情况让线程死掉是正确行为。
             warnThrottled(e);
             try {
                 respond(ex, 500, "internal error\n");
@@ -337,7 +345,14 @@ public final class PrometheusEndpoint {
 
     private final AtomicLong lastWarnAtMs = new AtomicLong();
 
-    private void warnThrottled(Exception e) {
+    /**
+     * 限频记一条渲染失败。
+     *
+     * <p>参数是 {@link Throwable} 而非 {@link Exception}：调用方（{@code handle}）现在也接
+     * {@code LinkageError}，那不是 Exception 的子类。只取类名与首句，绝不记请求头
+     * （可能含 Bearer token）。</p>
+     */
+    private void warnThrottled(Throwable e) {
         long now = System.currentTimeMillis();
         long last = lastWarnAtMs.get();
         if (now - last < 1000L || !lastWarnAtMs.compareAndSet(last, now)) {

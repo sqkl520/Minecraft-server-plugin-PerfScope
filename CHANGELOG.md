@@ -61,19 +61,45 @@
 保留这 14 个用例（而不是删除）的理由：场景设计、断言内容、装配逻辑都是对的，
 只差一个可用的假服务端。将来若引入 MockBukkit，去掉 `@Disabled` 即可。
 
-### Notes — 一条真实的生产风险（本次发现，未修）
+### Fixed — `PrometheusEndpoint` 的 `LinkageError` 会击穿请求线程，客户端看到的是连接重置
 
-`PrometheusEndpoint.handle()` 的 `catch (Exception e)` **抓不到 `Error`**。
-如果 `buildContext()` 或 `MetricsTextRenderer.render()` 抛出 `Error`
-（`ExceptionInInitializerError`、`OutOfMemoryError`、`LinkageError` 等），
-请求线程会直接崩掉，抓取方拿到的是连接重置而不是 500。
+`handle()` 原来只 `catch (Exception e)`。如果 `buildContext()` 或
+`MetricsTextRenderer.render()` 抛出 `LinkageError` 的子类，请求线程整个崩掉，
+抓取方拿到的是连接重置——`java.net.http` 那句
+`HTTP/1.1 header parser received no bytes`。
 
-后果：Prometheus 端抓取会失败，但日志里只有一条线程崩溃 —— 与"端点没起来"或
-"网络不通"难以区分。建议改成 `catch (Exception | LinkageError e)`（与同项目
-`MetricsCollector.safeCollect` 的口径一致），至少对 `LinkageError` 返回 500。
+**为什么这值得修**：那个症状与"端点没起来""网络不通""防火墙挡了"完全一样。
+运维会顺着网络方向排查，而真实原因是一条渲染失败。日志里也只有一条线程崩溃，
+连不上是哪个请求、哪次渲染。
 
-未修原因：这需要改生产代码，且当前没有能复现它的测试环境（正是上面那 14 个
-`@Disabled` 挡住的路径）。等 MockBukkit 到位后一并处理。
+现在 `catch (Exception | LinkageError e)`，与同项目 `MetricsCollector.safeCollect`
+同口径。客户端收到干净的 500，日志里有限频的 warning 带异常类名。
+
+**刻意不抓 `Error` 基类**：`OutOfMemoryError` / `StackOverflowError` 之后 JVM 状态
+不可信，吞掉再继续服务只会把问题藏得更深——那种情况让线程死掉是正确行为。
+
+验证（本人实测）：把 `catch` 改回 `Exception`，新增用例立刻红在
+`header parser received no bytes`；改回来则通过。这条用例利用了本测试环境里
+`buildContext()` 必然抛 `ExceptionInInitializerError`（`LinkageError` 子类）这一事实
+——它恰好是验证 catch 口径的完美输入，不需要额外构造。
+
+### Notes — 为什么最终没有引入 MockBukkit
+
+上面那 14 个 `@Disabled` 用例（凡是要拿 200 响应体的）需要可用的假服务端。
+实测结论是**引入 MockBukkit 的代价高于收益**：
+
+1. **它要求 Java 21 编译**。本地仓库里的 `mockbukkit-v1.21` 三个版本
+   （4.33.0 / 4.45.0 / 4.116.3）字节码全是 major 65（Java 21），而项目锁定
+   `release 17`（major 61），编译直接报「class 文件版本 65.0，应为 61.0」。
+   要引入就得给 testCompile 单独放开到 21——而 `pom.xml` 里那个 `release 17`
+   的注释写明它是「防止在 JDK21 上误链接 java.version(17) 以上的 API」的保护，
+   放开等于削弱它。
+2. **版本对不上**。`mockbukkit-v1.21` 是为 Paper 1.21 API 写的，项目用
+   paper-api 1.20.4。即使编译过了，`Server` 接口的方法集也不同，测出来的绿不可信。
+3. **它会拖进 JUnit 6**（`junit-jupiter-api:6.0.3`），项目用 5.10.1。
+
+所以那 14 个用例保留为 `@Disabled` 而不是删除：场景设计、断言、装配都是对的，
+只差一块可用的假服务端。将来若有匹配 1.20.4 + Java 17 的方案，去掉注解即可。
 
 ### Added — 测试：`HistoryFileStore` 写入路径
 

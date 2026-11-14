@@ -551,6 +551,43 @@ class PrometheusEndpointHttpTest {
         assertFalse(ep.isRunning());
     }
 
+    // ==================== 3b. Error 不得击穿请求线程 ====================
+
+    /**
+     * 渲染路径抛出 {@code LinkageError} 时，客户端必须收到 <b>500</b> 而不是连接重置。
+     *
+     * <p><b>这条用例为什么能跑</b>（其余 14 条为 {@code @Disabled}）：本测试环境里
+     * {@code buildContext()} → {@code ServerCompat} 静态块 → {@code Bukkit.getBukkitVersion()}
+     * 必然抛 {@code ExceptionInInitializerError}（{@code LinkageError} 的子类）。这个"缺陷"
+     * 恰好是验证 catch 口径的完美输入——它是一类真实存在的 Error，不需要额外构造。</p>
+     *
+     * <p><b>它守的是什么</b>：只写 {@code catch (Exception e)} 时，这个 Error 会击穿整个请求
+     * 线程，抓取方看到的是 {@code java.net.http} 的 "HTTP/1.1 header parser received no
+     * bytes"，运维据此会去查网络/防火墙，而真正的原因是一条渲染失败。改成
+     * {@code catch (Exception | LinkageError e)} 之后变成明确的 500，日志里也有一条限频
+     * warning 指出异常类名。</p>
+     *
+     * <p><b>它不守什么</b>：不保证 200。本环境没有可用的服务端，渲染永远走不到成功路径；
+     * 200 路径需要 MockBukkit，见类注释。</p>
+     */
+    @Test
+    void renderFailureWithLinkageErrorReturns500InsteadOfDroppingTheConnection() throws Exception {
+        PrometheusEndpoint ep = startOnFreePort(config(0));
+        int port = epPort(ep);
+
+        HttpResponse<String> res = get(port, "/metrics");
+
+        assertEquals(500, res.statusCode(),
+            "a LinkageError in the render path must surface as 500, not as a dropped connection "
+            + "-- otherwise the operator sees a network-shaped symptom for an application bug");
+        assertEquals("internal error\n", res.body(),
+            "the body must stay terse: no stack trace, no class names, no version info");
+        assertTrue(ep.isRunning(),
+            "one failed render must not take the endpoint down; the next scrape still has to be served");
+        assertEquals(500, get(port, "/metrics").statusCode(),
+            "and it must stay a clean 500 on retry, not degrade into a dropped connection");
+    }
+
     // ==================== 4. 端口被占 ====================
 
     @Test
