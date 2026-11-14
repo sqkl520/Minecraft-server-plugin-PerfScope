@@ -141,6 +141,10 @@ class PrometheusEndpointHttpTest {
         // plugin.getLogger()（可直接注入）。只有"要拿到 200 响应体"的用例会走到 buildContext()，
         // 那里 ServerCompat 的静态初始化会抛 ExceptionInInitializerError（Error，handle() 的
         // catch (Exception) 抓不到），请求线程直接断连。那几个用例被单独标注为 @Disabled。
+        //
+        // 完整的评估（试过的三条路、为什么本地 MockBukkit 不行、将来怎么解、要验证什么）
+        // 写在 tools/KNOWN-TEST-LIMITS.md。那份文档的存在是为了让下一个人不必重新踩一遍，
+        // 也为了不让"测不了"被读成"不用测"。
         fakeServer = null;
     }
 
@@ -405,7 +409,7 @@ class PrometheusEndpointHttpTest {
     // ==================== 2. 真实 HTTP GET /metrics ====================
 
     @Test
-    @org.junit.jupiter.api.Disabled("需要 200 响应体：走到 buildContext() 会触发 ServerCompat 的静态初始化，而它在无真实 Bukkit 的环境里抛 ExceptionInInitializerError（属于 Error，handle() 的 catch (Exception) 抓不到），请求线程直接断连。覆盖它必须引入 MockBukkit——那是新依赖，需另行决定。见类注释与 CHANGELOG。")
+    @org.junit.jupiter.api.Disabled("需要 200 响应体：走到 buildContext() 会触发 ServerCompat 的静态初始化，而它在无真实 Bukkit 的环境里抛 ExceptionInInitializerError（属于 Error，handle() 的 catch (Exception) 抓不到），请求线程直接断连。覆盖它的完整评估见 tools/KNOWN-TEST-LIMITS.md（试过的三条路、为什么 MockBukkit 的现成版本不行、将来怎么解）。")
     void getMetricsReturns200WithTheExpositionContentType() throws Exception {
         PrometheusEndpoint ep = startOnFreePort(config(0));
         HttpResponse<String> r = get(epPort(ep), "/metrics");
@@ -425,7 +429,7 @@ class PrometheusEndpointHttpTest {
     }
 
     @Test
-    @org.junit.jupiter.api.Disabled("需要 200 响应体：走到 buildContext() 会触发 ServerCompat 的静态初始化，而它在无真实 Bukkit 的环境里抛 ExceptionInInitializerError（属于 Error，handle() 的 catch (Exception) 抓不到），请求线程直接断连。覆盖它必须引入 MockBukkit——那是新依赖，需另行决定。见类注释与 CHANGELOG。")
+    @org.junit.jupiter.api.Disabled("需要 200 响应体：走到 buildContext() 会触发 ServerCompat 的静态初始化，而它在无真实 Bukkit 的环境里抛 ExceptionInInitializerError（属于 Error，handle() 的 catch (Exception) 抓不到），请求线程直接断连。覆盖它的完整评估见 tools/KNOWN-TEST-LIMITS.md（试过的三条路、为什么 MockBukkit 的现成版本不行、将来怎么解）。")
     void bodyIsValidPrometheusTextFormat() throws Exception {
         PrometheusEndpoint ep = startOnFreePort(config(0));
         String body = get(epPort(ep), "/metrics").body();
@@ -449,7 +453,7 @@ class PrometheusEndpointHttpTest {
      * 值一旦在传输/解码环节被改写，服主 curl 出来的第一手数据就是错的。
      */
     @Test
-    @org.junit.jupiter.api.Disabled("需要 200 响应体：走到 buildContext() 会触发 ServerCompat 的静态初始化，而它在无真实 Bukkit 的环境里抛 ExceptionInInitializerError（属于 Error，handle() 的 catch (Exception) 抓不到），请求线程直接断连。覆盖它必须引入 MockBukkit——那是新依赖，需另行决定。见类注释与 CHANGELOG。")
+    @org.junit.jupiter.api.Disabled("需要 200 响应体：走到 buildContext() 会触发 ServerCompat 的静态初始化，而它在无真实 Bukkit 的环境里抛 ExceptionInInitializerError（属于 Error，handle() 的 catch (Exception) 抓不到），请求线程直接断连。覆盖它的完整评估见 tools/KNOWN-TEST-LIMITS.md（试过的三条路、为什么 MockBukkit 的现成版本不行、将来怎么解）。")
     void bodyContainsNoScientificNotation() throws Exception {
         PrometheusEndpoint ep = startOnFreePort(config(0));
         String body = get(epPort(ep), "/metrics").body();
@@ -470,7 +474,7 @@ class PrometheusEndpointHttpTest {
     }
 
     @Test
-    @org.junit.jupiter.api.Disabled("需要 200 响应体：走到 buildContext() 会触发 ServerCompat 的静态初始化，而它在无真实 Bukkit 的环境里抛 ExceptionInInitializerError（属于 Error，handle() 的 catch (Exception) 抓不到），请求线程直接断连。覆盖它必须引入 MockBukkit——那是新依赖，需另行决定。见类注释与 CHANGELOG。")
+    @org.junit.jupiter.api.Disabled("需要 200 响应体：走到 buildContext() 会触发 ServerCompat 的静态初始化，而它在无真实 Bukkit 的环境里抛 ExceptionInInitializerError（属于 Error，handle() 的 catch (Exception) 抓不到），请求线程直接断连。覆盖它的完整评估见 tools/KNOWN-TEST-LIMITS.md（试过的三条路、为什么 MockBukkit 的现成版本不行、将来怎么解）。")
     void bodyCarriesTheSnapshotValues() throws Exception {
         PrometheusEndpoint ep = startOnFreePort(config(0));
         String body = get(epPort(ep), "/metrics").body();
@@ -490,7 +494,7 @@ class PrometheusEndpointHttpTest {
     }
 
     @Test
-    @org.junit.jupiter.api.Disabled("需要 200 响应体：走到 buildContext() 会触发 ServerCompat 的静态初始化，而它在无真实 Bukkit 的环境里抛 ExceptionInInitializerError（属于 Error，handle() 的 catch (Exception) 抓不到），请求线程直接断连。覆盖它必须引入 MockBukkit——那是新依赖，需另行决定。见类注释与 CHANGELOG。")
+    @org.junit.jupiter.api.Disabled("需要 200 响应体：走到 buildContext() 会触发 ServerCompat 的静态初始化，而它在无真实 Bukkit 的环境里抛 ExceptionInInitializerError（属于 Error，handle() 的 catch (Exception) 抓不到），请求线程直接断连。覆盖它的完整评估见 tools/KNOWN-TEST-LIMITS.md（试过的三条路、为什么 MockBukkit 的现成版本不行、将来怎么解）。")
     void nullSnapshotStillServesTheHealthSignals() throws Exception {
         // 采集器缺失（或从未成功过）时端点不能 500：这三条元信息正是"指标冻住了"的唯一线索。
         ConfigManager.ConfigData cfg = config(0);
@@ -783,7 +787,7 @@ class PrometheusEndpointHttpTest {
     }
 
     @Test
-    @org.junit.jupiter.api.Disabled("需要 200 响应体：走到 buildContext() 会触发 ServerCompat 的静态初始化，而它在无真实 Bukkit 的环境里抛 ExceptionInInitializerError（属于 Error，handle() 的 catch (Exception) 抓不到），请求线程直接断连。覆盖它必须引入 MockBukkit——那是新依赖，需另行决定。见类注释与 CHANGELOG。")
+    @org.junit.jupiter.api.Disabled("需要 200 响应体：走到 buildContext() 会触发 ServerCompat 的静态初始化，而它在无真实 Bukkit 的环境里抛 ExceptionInInitializerError（属于 Error，handle() 的 catch (Exception) 抓不到），请求线程直接断连。覆盖它的完整评估见 tools/KNOWN-TEST-LIMITS.md（试过的三条路、为什么 MockBukkit 的现成版本不行、将来怎么解）。")
     void headReturns200WithNoBody() throws Exception {
         PrometheusEndpoint ep = startOnFreePort(config(0));
         HttpResponse<String> head = send(epPort(ep), "HEAD", "/metrics");
@@ -932,7 +936,7 @@ class PrometheusEndpointHttpTest {
      * 泄漏型失败——在 CI 上它表现为后续用例莫名 BindException，很难归因。</p>
      */
     @Test
-    @org.junit.jupiter.api.Disabled("需要 200 响应体：走到 buildContext() 会触发 ServerCompat 的静态初始化，而它在无真实 Bukkit 的环境里抛 ExceptionInInitializerError（属于 Error，handle() 的 catch (Exception) 抓不到），请求线程直接断连。覆盖它必须引入 MockBukkit——那是新依赖，需另行决定。见类注释与 CHANGELOG。")
+    @org.junit.jupiter.api.Disabled("需要 200 响应体：走到 buildContext() 会触发 ServerCompat 的静态初始化，而它在无真实 Bukkit 的环境里抛 ExceptionInInitializerError（属于 Error，handle() 的 catch (Exception) 抓不到），请求线程直接断连。覆盖它的完整评估见 tools/KNOWN-TEST-LIMITS.md（试过的三条路、为什么 MockBukkit 的现成版本不行、将来怎么解）。")
     void noListenerSurvivesAScrapeCycle() throws Exception {
         ConfigManager.ConfigData cfg = config(0);
         PrometheusEndpoint ep = startOnFreePort(cfg);
