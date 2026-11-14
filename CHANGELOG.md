@@ -3,7 +3,7 @@
 本项目：**PerfScope** —— Minecraft 服务器性能监测插件（Paper 1.20.4+ / Purpur / Pufferfish / Folia / Leaves，Java 17）。
 后台定时采集性能快照 → 游戏内 17 个子命令一屏诊断 → HTML/TXT/JSON 报告导出 → ActionBar 实时监测 → 阈值告警。
 
-> **仓库**：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope> ｜ **版本**：`1.4.2`（当前正式版，补丁）｜ **上一个正式版**：`1.4.1`（`versions/PerfScope-1.4.1.jar`）｜ `[Unreleased]` 当前为空
+> **仓库**：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope> ｜ **版本**：`1.4.3`（当前正式版，补丁）｜ **上一个正式版**：`1.4.2`（`versions/PerfScope-1.4.2.jar`）｜ `[Unreleased]` 当前为空
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/)。v1.2「找得到」开发周期已收尾，各段以 **Wave（开发波次）** 划分并标注对应提交哈希。
 
@@ -16,7 +16,45 @@
 
 ## [Unreleased]
 
-> v1.4.2 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
+> v1.4.3 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
+
+---
+
+## [1.4.3] — 2026-11-14 — 补丁版
+
+> 本节是给使用者看的：只有**改了什么、有什么影响**。
+
+**日报的「最低 TPS」永远报不出卡死。**
+
+1.4.2 修了三处"把 TPS 0 当未采集"的错误，漏了一处：
+`HistoryStore.lowestTpsSince()` —— 日报的「最低 TPS」和 `/perfscope history`
+的"最差时刻"共用这个查询。
+
+它用 `tps1m <= 0` 过滤样本。而 `tps1m` 没有 `-1` 哨兵（TPS 不可用时的采样整条不入
+历史），所以 `0` 只可能是**服务器真的冻结了**——那正是最差的时刻。一个专门找最低值的
+函数把它滤掉，等于保证永远报不出它。
+
+结果是：昨晚服务器卡死过，日报的最低温顺地写着「最低 18.5 TPS」。
+
+现在只排除负哨兵。求峰值的 `peakTpsSince` 保持过滤 0（0 不可能高于任何正值，滤不滤
+结果一样）——**同一个 0，求最小值时必须保留，求最大值时无关**，所以这次不能靠批量替换。
+
+### 顺带：一个新的开发期门禁
+
+新增 `tools/check-sentinels.mjs`，检查"哨兵字段有没有被拿 0 当判据"。
+
+这条门禁是因为 1.4.2 那类错误**在五处独立存在、全部靠人肉发现**才写的。它上线当天
+就抓到了上面这个第六处。
+
+门禁本身对使用者不可见，但它的意义是：这类"把健康说成毛病 / 把毛病说成健康"的判定，
+以后会在 CI 里被拦住，而不是等你发现日报数字不对。
+
+### 升级
+
+无配置变更、无行为变更（除上述修复），直接替换 jar 即可。从 1.3.x 升级请先读 README 的
+「升级注意」。
+
+---
 
 ### Added — L1 门禁：哨兵约定检查（`tools/check-sentinels.mjs`）
 

@@ -146,9 +146,9 @@ GC: 42 次 / 5.23 秒
 
 ## 安装
 
-> **下载**：[GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest)（最新正式版 **v1.4.2**，`PerfScope-1.4.2.jar`）
+> **下载**：[GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest)（最新正式版 **v1.4.3**，`PerfScope-1.4.3.jar`）
 
-> **版本注意**：本文档描述的就是 **v1.4.2** 的行为。1.4.2 是补丁版，修了三类"把健康说成毛病 / 把毛病说成健康"的判定错误（CPU 0 被当未采集、TPS 0 被当未采集、报告失败不说原因），无配置变更，可直接替换 jar。功能面（Prometheus 指标端点、`/perfscope webhook status|test`、企业微信 / 飞书 / 钉钉通道）自 1.4.0 起提供。`alerts.enabled` 默认值与 `entities` / `chunks` 默认阈值在 1.4.0 有变更，**从 1.3.x 升级前请先读下方「升级注意」**。
+> **版本注意**：本文档描述的就是 **v1.4.3** 的行为。1.4.x 是连续的补丁版，修的都是同一类问题：「把健康说成毛病 / 把毛病说成健康」的判定错误（CPU 0 与 TPS 0 被当成"未采集"）。无配置变更，可直接替换 jar。功能面（Prometheus 指标端点、`/perfscope webhook status|test`、企业微信 / 飞书 / 钉钉通道）自 1.4.0 起提供。`alerts.enabled` 默认值与 `entities` / `chunks` 默认阈值在 1.4.0 有变更，**从 1.3.x 升级前请先读下方「升级注意」**。
 
 1. 下载最新版本的 JAR 文件
 2. 放入服务器的 `plugins/` 目录

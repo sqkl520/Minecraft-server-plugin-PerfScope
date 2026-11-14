@@ -137,9 +137,9 @@ This is the `zh` output. With the shipped default `general.language: en` the sam
 
 ## Installation
 
-> **Download**: [GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest) (latest stable **v1.4.2**, `PerfScope-1.4.2.jar`)
+> **Download**: [GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest) (latest stable **v1.4.3**, `PerfScope-1.4.3.jar`)
 
-> **Version note**: this document describes **v1.4.2** behaviour. 1.4.2 is a patch release fixing three cases where a healthy reading was treated as missing data (or the reverse): CPU 0 counted as "not collected", TPS 0 filtered out of statistics so a frozen server read as healthy, and `/perfscope report` failing without saying why. No config changes — just swap the jar. The feature set (Prometheus metrics endpoint, `/perfscope webhook status|test`, WeCom / Feishu / DingTalk channels) has been available since 1.4.0. The `alerts.enabled` default and the `entities` / `chunks` default thresholds changed in 1.4.0, so **read "Upgrade notes" below before upgrading from 1.3.x**.
+> **Version note**: this document describes **v1.4.3** behaviour. The 1.4.x line is a series of patch releases fixing one class of bug: a healthy reading treated as missing data, or the reverse (CPU 0 and TPS 0 mistaken for "not collected"). No config changes — just swap the jar. The feature set (Prometheus metrics endpoint, `/perfscope webhook status|test`, WeCom / Feishu / DingTalk channels) has been available since 1.4.0. The `alerts.enabled` default and the `entities` / `chunks` default thresholds changed in 1.4.0, so **read "Upgrade notes" below before upgrading from 1.3.x**.
 
 1. Download the latest JAR file
 2. Place it in your server's `plugins/` directory
