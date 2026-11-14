@@ -137,9 +137,9 @@ This is the `zh` output. With the shipped default `general.language: en` the sam
 
 ## Installation
 
-> **Download**: [GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest) (latest stable **v1.4.1**, `PerfScope-1.4.1.jar`)
+> **Download**: [GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest) (latest stable **v1.4.2**, `PerfScope-1.4.2.jar`)
 
-> **Version note**: this document describes **v1.4.1** behaviour. 1.4.1 is a patch release that only fixes the Prometheus endpoint returning a dropped connection instead of a 500 on render failure — no config changes, no behaviour changes, just swap the jar. The feature set (Prometheus metrics endpoint, `/perfscope webhook status|test`, WeCom / Feishu / DingTalk channels) has been available since 1.4.0. The `alerts.enabled` default and the `entities` / `chunks` default thresholds changed in 1.4.0, so **read "Upgrade notes" below before upgrading from 1.3.x**.
+> **Version note**: this document describes **v1.4.2** behaviour. 1.4.2 is a patch release fixing three cases where a healthy reading was treated as missing data (or the reverse): CPU 0 counted as "not collected", TPS 0 filtered out of statistics so a frozen server read as healthy, and `/perfscope report` failing without saying why. No config changes — just swap the jar. The feature set (Prometheus metrics endpoint, `/perfscope webhook status|test`, WeCom / Feishu / DingTalk channels) has been available since 1.4.0. The `alerts.enabled` default and the `entities` / `chunks` default thresholds changed in 1.4.0, so **read "Upgrade notes" below before upgrading from 1.3.x**.
 
 1. Download the latest JAR file
 2. Place it in your server's `plugins/` directory
@@ -155,7 +155,7 @@ This is the `zh` output. With the shipped default `general.language: en` the sam
 >
 > **Neither layer uploads**: player names, world names, coordinates, chat content, plugin lists, config file contents, alert text, or server addresses. It can be disabled in `plugins/bStats/config.yml` or via `general.bstats-enabled: false` in this plugin's config.yml.
 
-## Upgrade notes (1.3.0 → 1.4.0; nothing to do for 1.4.0 → 1.4.1)
+## Upgrade notes (1.3.0 → 1.4.0; nothing to do when upgrading between 1.4.x)
 
 Going from 1.3.0 to 1.4.0, **these are the only changes that alter existing behaviour — everything else is new features or fixes**:
 

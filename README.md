@@ -146,9 +146,9 @@ GC: 42 次 / 5.23 秒
 
 ## 安装
 
-> **下载**：[GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest)（最新正式版 **v1.4.1**，`PerfScope-1.4.1.jar`）
+> **下载**：[GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest)（最新正式版 **v1.4.2**，`PerfScope-1.4.2.jar`）
 
-> **版本注意**：本文档描述的就是 **v1.4.1** 的行为。1.4.1 是补丁版，只修了 Prometheus 端点在渲染失败时"抛连接重置而不是 500"的缺陷，无配置变更、无行为变更，可直接替换 jar。功能面（Prometheus 指标端点、`/perfscope webhook status|test`、企业微信 / 飞书 / 钉钉通道）自 1.4.0 起提供。`alerts.enabled` 默认值与 `entities` / `chunks` 默认阈值在 1.4.0 有变更，**从 1.3.x 升级前请先读下方「升级注意」**。
+> **版本注意**：本文档描述的就是 **v1.4.2** 的行为。1.4.2 是补丁版，修了三类"把健康说成毛病 / 把毛病说成健康"的判定错误（CPU 0 被当未采集、TPS 0 被当未采集、报告失败不说原因），无配置变更，可直接替换 jar。功能面（Prometheus 指标端点、`/perfscope webhook status|test`、企业微信 / 飞书 / 钉钉通道）自 1.4.0 起提供。`alerts.enabled` 默认值与 `entities` / `chunks` 默认阈值在 1.4.0 有变更，**从 1.3.x 升级前请先读下方「升级注意」**。
 
 1. 下载最新版本的 JAR 文件
 2. 放入服务器的 `plugins/` 目录
@@ -164,7 +164,7 @@ GC: 42 次 / 5.23 秒
 >
 > **两层都不会上传**：玩家名、世界名、坐标、聊天内容、插件列表、配置文件内容、告警文本、服务器地址。可在 `plugins/bStats/config.yml` 或本插件 config.yml 的 `general.bstats-enabled: false` 关闭。
 
-## 升级注意（1.3.0 → 1.4.0；1.4.0 → 1.4.1 无需任何改动）
+## 升级注意（1.3.0 → 1.4.0；1.4.x 之间升级无需任何改动）
 
 从 1.3.0 升级到 1.4.0 时，**会改变现有行为的只有下面几条；其余都是新增功能与修复**：
 

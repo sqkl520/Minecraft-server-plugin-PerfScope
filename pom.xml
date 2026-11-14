@@ -6,7 +6,7 @@
 
     <groupId>cn.perfscope</groupId>
     <artifactId>PerfScope</artifactId>
-    <version>1.4.1</version>
+    <version>1.4.2</version>
     <packaging>jar</packaging>
 
     <name>PerfScope</name>
