@@ -18,6 +18,63 @@
 
 > v1.4.0 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
 
+### Added — 测试：`PrometheusEndpoint`（v1.4.0 头号卖点此前零测试）
+
+`PrometheusEndpoint` 有 370 行、是 README 的头号卖点，但此前**零测试**：没有单测、
+`check-scenarios.mjs` 里 `prometheus` 命中数为 0、harness 无相关场景。1.4.0 的验收
+只到「class 在 jar 里」这一步，从没真正启动过一次监听。
+
+新增两个测试类，共 55 个用例（10 + 14 跳过，见下）：
+
+**`PrometheusEndpointLogicTest`（31 个，全绿）** —— 不需要 socket 的部分：
+- `constantTimeEquals` 8 个：等长/不等长、首/中/末字节差、空串、多字节 UTF-8、
+  **字节长度与字符长度不一致**（`"a"` vs `"中"`、`"é"` vs `"aa"`）、孤立代理对
+- `isLoopback` 6 个：`127.0.0.1` / `::1` / 大小写 `localhost`、拒绝 `0.0.0.0` / 私网 /
+  DNS 名、null / 空串 / 纯空白、**不 trim**、以及钉住 `127.0.0.2` 这个已知局限（不修）
+- `authorized` 11 个：token 为空/缺失时放行、未发布配置、缺 header、正确/错误/缺前缀/
+  错 scheme、token 与 header 各自 trim、header 名大小写不敏感，外加 3 个走 `handle`
+  的接线用例（401 带 `WWW-Authenticate` 且不回显凭据、鉴权前的 404、405 带 `Allow`）
+- `daemonFactory` 4 个：守护线程、`perfscope-metrics-` 前缀、序号递增
+
+**`PrometheusEndpointHttpTest`（24 个：10 绿 + 14 明确跳过）** —— 真实 socket 层：
+起真 `HttpServer`、用 `java.net.http.HttpClient` 发真请求。已覆盖：绑定成功与
+`boundAddress()`、`start()` 可重复调用、`stop()` 释放端口与幂等、`stop()` 未启动时安全、
+端口被占时干净失败且 `failureReason()` 有内容、9940 的定向提示与其他端口不同、
+鉴权矩阵、`disabled` 时既不监听也不报错。
+
+### Notes — 14 个 HTTP 用例为什么是 `@Disabled` 而不是删掉
+
+要拿到 200 响应体就得走 `buildContext()`，它调 `ServerCompat.getServerName()`。
+`ServerCompat` 的静态块第一行是 `Bukkit.getBukkitVersion()`，直接解引用 `Bukkit.server`。
+在没有真实服务端时它抛 `ExceptionInInitializerError`，而这个类是 `Error`——
+`handle()` 的 `catch (Exception)` 抓不到，请求线程直接断连（客户端看到
+`header parser received no bytes`）。
+
+试过三条造假 `Bukkit.server` 的路，全部失败，原因是同一个鸡生蛋：
+
+1. `Proxy.newProxyInstance(Server.class, …)` —— 创建 Proxy 要解析接口方法签名，
+   触发 `org.bukkit.generator.structure.StructureType` 的静态块，而它第一行就是
+   `Bukkit.server.getRegistry(...)`，此时 `Bukkit.server` 还是 null
+2. `Unsafe.allocateInstance(Server.class)` —— `Server` 是接口，抛 `InstantiationException`
+3. 反射直接写 `Bukkit.server` —— 字段类型是 `Server`，仍需要一个实例，回到 1 或 2
+
+保留这 14 个用例（而不是删除）的理由：场景设计、断言内容、装配逻辑都是对的，
+只差一个可用的假服务端。将来若引入 MockBukkit，去掉 `@Disabled` 即可。
+
+### Notes — 一条真实的生产风险（本次发现，未修）
+
+`PrometheusEndpoint.handle()` 的 `catch (Exception e)` **抓不到 `Error`**。
+如果 `buildContext()` 或 `MetricsTextRenderer.render()` 抛出 `Error`
+（`ExceptionInInitializerError`、`OutOfMemoryError`、`LinkageError` 等），
+请求线程会直接崩掉，抓取方拿到的是连接重置而不是 500。
+
+后果：Prometheus 端抓取会失败，但日志里只有一条线程崩溃 —— 与"端点没起来"或
+"网络不通"难以区分。建议改成 `catch (Exception | LinkageError e)`（与同项目
+`MetricsCollector.safeCollect` 的口径一致），至少对 `LinkageError` 返回 500。
+
+未修原因：这需要改生产代码，且当前没有能复现它的测试环境（正是上面那 14 个
+`@Disabled` 挡住的路径）。等 MockBukkit 到位后一并处理。
+
 ### Added — 测试：`HistoryFileStore` 写入路径
 
 - 新增 `src/test/java/cn/perfscope/history/HistoryFileStoreWriteTest.java`，21 个用例，补上
