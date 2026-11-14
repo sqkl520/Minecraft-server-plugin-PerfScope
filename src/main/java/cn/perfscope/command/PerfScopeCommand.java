@@ -1419,7 +1419,14 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 sender.sendMessage(Component.text(Messages.get("report-generated") + path, GREEN)); // 9A-24
             }
         } else {
-            sender.sendMessage(Component.text(Messages.get("report-failed"), RED));
+            // 失败时补一句真实原因：四种失败（无快照 / 目录不可用 / 渲染异常 / 文件名耗尽）
+            // 的处置方式完全不同，只说"报告生成失败"会把排查成本全推给用户。
+            // 原因可能为 null（理论上只在并发时序下出现），那时退回原来那一句。
+            String reason = reportGen.failureReason();
+            sender.sendMessage(reason == null || reason.isBlank()
+                ? Component.text(Messages.get("report-failed"), RED)
+                : Component.text(Messages.get("report-failed"), RED)
+                    .append(Component.text(" " + reason, GRAY)));
         }
     }
 

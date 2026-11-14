@@ -40,6 +40,7 @@ import java.util.Collections;
 import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.CountDownLatch;
@@ -57,6 +58,7 @@ import java.util.stream.Stream;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -827,6 +829,45 @@ class ReportGeneratorTest {
         assertFalse(logged("Failed to generate"),
             "the render path must not even be entered without a snapshot: a \"generate-failed\" warning here "
                 + "means the code tried to render a placeholder snapshot instead of bailing out");
+    }
+
+    /**
+     * 失败时 {@code failureReason()} 必须说清楚是哪一种失败。
+     *
+     * <p><b>为什么这条值得存在</b>：{@code /perfscope report} 失败时原来只打印一句
+     * "报告生成失败"。但真实原因有四种，处置方式完全不同——等采集、修目录权限、报 bug、
+     * 清旧文件。只说"失败"等于把排查成本全推给用户，而这个插件的主打能力就是"一屏诊断"。</p>
+     *
+     * <p>这里覆盖两种可确定复现的原因：没有快照、目录不可用。渲染异常与文件名耗尽
+     * 需要更复杂的构造（分别要一个必然抛异常的渲染路径、以及 100 次同名碰撞），
+     * 未在此覆盖——但四条写入点用的是同一套 {@code lastFailureReason} 机制。</p>
+     */
+    @Test
+    void failureReasonNamesTheActualCauseInsteadOfAGenericFailure(@TempDir Path temp) throws Exception {
+        ReportGenerator gen = generator(temp);
+
+        // 成功之前从没试过 → 没有原因可报
+        assertNull(gen.failureReason(), "before any attempt there is nothing to report");
+
+        assertNull(gen.generateSpecific("html"));
+        String noSnapshot = gen.failureReason();
+        assertNotNull(noSnapshot, "a failed generation must leave a reason behind");
+        assertTrue(noSnapshot.toLowerCase(Locale.ROOT).contains("snapshot")
+                || noSnapshot.contains("快照"),
+            "the reason must name the actual cause (no snapshot), not just say it failed: " + noSnapshot);
+
+        // 换一个原因：有快照但目录不可用（用普通文件占住 reports 这个路径）
+        ReportGenerator gen2 = generator(temp, richSnapshot(19.98));
+        Path reportsPath = reportsDir(temp);
+        Files.deleteIfExists(reportsPath);
+        Files.writeString(reportsPath, "not a directory", StandardCharsets.UTF_8);
+
+        assertNull(gen2.generateSpecific("html"), "an unusable reports path must fail closed");
+        String dirUnusable = gen2.failureReason();
+        assertNotNull(dirUnusable);
+        assertNotEquals(noSnapshot, dirUnusable,
+            "the two causes must be distinguishable - a user told 'no snapshot' will wait, "
+            + "one told 'directory unusable' will fix permissions; same message for both is useless");
     }
 
     /**

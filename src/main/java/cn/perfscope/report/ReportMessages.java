@@ -208,6 +208,23 @@ public final class ReportMessages {
         put(en, zh, "report.log.name-collision",
             "[PerfScope] Report file name still colliding after {0} retries ({1}); this report was abandoned",
             "[PerfScope] 报告文件名重试 {0} 次仍冲突（{1}），本次报告已放弃");
+        // 给用户看的失败原因（进聊天栏，不是日志）。四种失败处置方式完全不同，
+        // 只说"报告生成失败"会把排查成本推给用户：等采集 / 修目录权限 / 报 bug / 清旧文件。
+        put(en, zh, "report.fail.no-snapshot",
+            "no snapshot collected yet - wait for the first sampling round",
+            "尚未采集到快照，等首轮采集完成后再试");
+        put(en, zh, "report.fail.dir-unusable",
+            "the reports directory is missing or not writable: {0}",
+            "报告目录不存在或不可写: {0}");
+        put(en, zh, "report.fail.render",
+            "rendering the {0} report threw {1}",
+            "渲染{0}报告时抛出 {1}");
+        put(en, zh, "report.fail.write",
+            "writing the report file threw {0}",
+            "写入报告文件时抛出 {0}");
+        put(en, zh, "report.fail.name-collision",
+            "could not find a free file name after {0} attempts - old reports may be blocking it",
+            "重试 {0} 次都没有可用文件名，可能是旧报告占满了");
         put(en, zh, "report.log.clean-limit",
             "[PerfScope] Cleanup cap reached ({0} reports); remaining expired files will be handled on the next run",
             "[PerfScope] 单次清理已达上限 {0} 个报告，剩余超期文件将在下次清理时处理");

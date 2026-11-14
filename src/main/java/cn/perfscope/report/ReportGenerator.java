@@ -65,6 +65,21 @@ public class ReportGenerator {
     // v1.2 A8：报告层阈值统一改由 ThresholdColors 读 config 判定
     private final ThresholdColors thresholdColors;
 
+    /**
+     * 最近一次生成失败的原因（null = 上次成功或尚未尝试）。
+     *
+     * <p><b>为什么需要它</b>：{@code /perfscope report} 失败时原来只说一句"报告生成失败"，
+     * 而真实原因有四种——没有快照、目录不可用、渲染抛异常、文件名连撞 {@code MAX}-次。
+     * 四者的处置完全不同（先等等采集 / 修权限 / 报 bug / 清目录），用户却拿到同一句话，
+     * 只能去翻服务端日志。这个插件的主打能力是"一屏全量诊断"，它自己的导出失败时
+     * 说不出原因，是自相矛盾的。</p>
+     *
+     * <p>只在生成线程写、命令线程读，值是一次性字符串引用，故用 {@code volatile} 足够；
+     * 不要求严格时序——最坏情况是用户看到上一条失败原因，而那次失败的真正原因在
+     * 日志里仍然完整。</p>
+     */
+    private volatile String lastFailureReason;
+
     // P0-11：线程安全的日期格式化器（SimpleDateFormat 非线程安全，已删除）
     private static final DateTimeFormatter FILE_TS = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss-SSS");
     /** f-s05-sec-03：本插件报告文件的完整名字形态（与 {@link #FILE_TS} + {@link #writeReportAtomically} 对齐）。 */
@@ -184,12 +199,16 @@ public class ReportGenerator {
      */
     private String generateSpecificOnExecutor(String format) {
         MetricsSnapshot snap = collector.getLatest();
-        if (snap == null) return null;
+        if (snap == null) {
+            lastFailureReason = Messages.get("report.fail.no-snapshot");
+            return null;
+        }
 
         List<MetricsSnapshot> history = collector.getHistory();
 
         // B5（RT-02 自愈）：写入前确保 reports/ 目录存在且可写（构造器只建过一次，运行中被删即永久失败）
         if (!ensureReportDir()) {
+            lastFailureReason = Messages.get("report.fail.dir-unusable", reportDir.getAbsolutePath());
             return null;
         }
 
@@ -203,6 +222,8 @@ public class ReportGenerator {
             };
         } catch (Throwable t) {
             // P0-11 兜底：极端精简端缺 Gson 等运行时异常同样返回 null
+            lastFailureReason = Messages.get("report.fail.render", ext.toUpperCase(Locale.ROOT),
+                describe(t));
             plugin.getLogger().warning(Messages.get("report.log.generate-failed",
                 ext.toUpperCase(Locale.ROOT), t.getMessage()));
             return null;
@@ -212,6 +233,8 @@ public class ReportGenerator {
         if (file == null) {
             return null;
         }
+        // 成功即清空：下次失败若没写原因（理论上不会），也不会把陈年旧因当成新的
+        lastFailureReason = null;
 
         // 清理旧报告
         cleanOldReports();
@@ -242,18 +265,55 @@ public class ReportGenerator {
                 // 正常碰撞（同毫秒/同秒内并发生成，或旧文件残留）：换名重试
                 continue;
             } catch (IOException e) {
+                lastFailureReason = Messages.get("report.fail.write", describe(e));
                 plugin.getLogger().warning(Messages.get("report.log.generate-failed",
                     extension.toUpperCase(Locale.ROOT), e.getMessage()));
                 return null;
             } catch (Throwable t) {
+                lastFailureReason = Messages.get("report.fail.write", describe(t));
                 plugin.getLogger().warning(Messages.get("report.log.generate-failed",
                     extension.toUpperCase(Locale.ROOT), t.getMessage()));
                 return null;
             }
         }
+        lastFailureReason = Messages.get("report.fail.name-collision", MAX_FILE_NAME_RETRIES);
         plugin.getLogger().warning(Messages.get("report.log.name-collision",
             MAX_FILE_NAME_RETRIES, base + "." + extension));
         return null;
+    }
+
+    /**
+     * 最近一次生成失败的原因（null = 上次成功或尚未尝试）。
+     *
+     * <p>供命令层在"报告生成失败"后面补一句真实原因。四种失败各有不同处置方式，
+     * 只说"失败"会把排查成本推给用户。</p>
+     */
+    public String failureReason() {
+        return lastFailureReason;
+    }
+
+    /**
+     * 异常 → 一行可读描述（类名 + 首段消息，去掉换行）。
+     *
+     * <p>只取形状不取堆栈：这条文本会进游戏内聊天栏，多行会把后续输出吞掉。
+     * 完整堆栈仍然只在日志里。</p>
+     */
+    private static String describe(Throwable t) {
+        if (t == null) {
+            return "unknown";
+        }
+        String msg = t.getMessage();
+        if (msg == null || msg.isBlank()) {
+            return t.getClass().getSimpleName();
+        }
+        int nl = msg.indexOf('\n');
+        if (nl >= 0) {
+            msg = msg.substring(0, nl);
+        }
+        if (msg.length() > 120) {
+            msg = msg.substring(0, 120) + "…";
+        }
+        return t.getClass().getSimpleName() + ": " + msg;
     }
 
     /** 9A-10 #4：格式归一化（与旧 switch 的 case 集合保持一致：html / json / txt|text / 其它 → txt）。 */
