@@ -163,6 +163,14 @@ if ($null -ne $node) {
     Invoke-Step 'L1 product docs (no sentence particle)' {
         & $node (Join-Path $PSScriptRoot 'check-docs.mjs') '--repo' $RepoRoot
     }
+    # Sentinel convention. The same bug ("0 means missing" when the real sentinel is -1)
+    # was found in FIVE independent places in v1.4.2's run-up, all by hand. This gate makes
+    # the sixth one automatic. A field either has a -1 sentinel or it does not -- comparing
+    # it against 0 has to match that, and a wrong comparison hides the healthiest state
+    # (idle CPU reads "unknown") or the worst one (a frozen server reports "min TPS 18.0").
+    Invoke-Step 'L1 sentinel convention (0 vs -1)' {
+        & $node (Join-Path $PSScriptRoot 'check-sentinels.mjs') '--repo' $RepoRoot
+    }
 } else {
     Write-Step 'static gates need node -- skipped' 'WARN'
 }

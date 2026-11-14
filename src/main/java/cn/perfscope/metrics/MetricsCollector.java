@@ -1669,7 +1669,7 @@ public class MetricsCollector {
 
     /** Bukkit: 通过 TPS 反推近似 MSPT（满 TPS 时语义"估算不可用"，置 -1 而非 0） */
     private void collectMSPT_TPSFallback(MetricsSnapshot snap) {
-        if (snap.tps1m > 0 && snap.tps1m < 20) {
+        if (snap.tps1m > 0 && snap.tps1m < 20) {  // @sentinel-ok TPS 反推 MSPT：必须排除 0，否则 1000/0 = Infinity；else 分支显式置 -1 表示未采集
             snap.msptAvg = round2(1000.0 / snap.tps1m);
         } else {
             snap.msptAvg = -1;

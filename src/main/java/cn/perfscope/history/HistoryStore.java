@@ -330,7 +330,7 @@ public final class HistoryStore {
     public HistorySample peakTpsSince(long sinceMs) {
         HistorySample best = null;
         for (HistorySample s : snapshotAll()) {
-            if (s.timestamp() < sinceMs || s.tps1m() <= 0) {
+            if (s.timestamp() < sinceMs || s.tps1m() <= 0) {  // @sentinel-ok peakTpsSince 求峰值：0 不可能高于任何正值，过滤它与不过滤结果相同
                 continue;
             }
             if (best == null || s.tps1m() > best.tps1m()) {
@@ -341,10 +341,21 @@ public final class HistoryStore {
     }
 
     /** 窗口内 tps1m 最低的样本（"最差的时刻"，日报用）；无有效样本返回 null。过滤规则见类注释。 */
+    /**
+     * 窗口内 tps1m 最低的样本（"最差的时刻"，日报用）；无有效样本返回 null。
+     *
+     * <p><b>为什么这里不能过滤 {@code 0}</b>：{@code tps1m} 没有 -1 哨兵——采集层直接写
+     * {@code Bukkit.getTPS()}，TPS 不可用时的快照整条不入环（见 {@link #record} 的污染防护）。
+     * 所以环里的 {@code 0} 只可能是"服务器真的冻结了"，而那正是<b>最差</b>的时刻——
+     * 一个找最低值的函数把它滤掉，等于保证永远报不出最坏情况。</p>
+     *
+     * <p>同一批修过的还有 {@code /perfscope trend} 的最低 TPS、日报的 p95 与超阈时长，
+     * 三处是同一个错误的三个实例，都因为"0 = 未采集"这个错误假设。</p>
+     */
     public HistorySample lowestTpsSince(long sinceMs) {
         HistorySample worst = null;
         for (HistorySample s : snapshotAll()) {
-            if (s.timestamp() < sinceMs || s.tps1m() <= 0) {
+            if (s.timestamp() < sinceMs || s.tps1m() < 0) {
                 continue;
             }
             if (worst == null || s.tps1m() < worst.tps1m()) {
@@ -358,7 +369,7 @@ public final class HistoryStore {
     public HistorySample peakEntitiesSince(long sinceMs) {
         HistorySample best = null;
         for (HistorySample s : snapshotAll()) {
-            if (s.timestamp() < sinceMs || s.totalEntities() <= 0) {
+            if (s.timestamp() < sinceMs || s.totalEntities() <= 0) {  // @sentinel-ok peakEntitiesSince 求峰值：理由同上
                 continue;
             }
             if (best == null || s.totalEntities() > best.totalEntities()) {
@@ -372,7 +383,7 @@ public final class HistoryStore {
     public HistorySample peakHeapSince(long sinceMs) {
         HistorySample best = null;
         for (HistorySample s : snapshotAll()) {
-            if (s.timestamp() < sinceMs || s.heapUsagePercent() <= 0) {
+            if (s.timestamp() < sinceMs || s.heapUsagePercent() <= 0) {  // @sentinel-ok peakHeapSince 求峰值：理由同上
                 continue;
             }
             if (best == null || s.heapUsagePercent() > best.heapUsagePercent()) {

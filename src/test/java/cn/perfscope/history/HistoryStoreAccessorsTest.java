@@ -312,6 +312,84 @@ class HistoryStoreAccessorsTest {
 
     // ==================== 辅助 ====================
 
+    // ==================== lowestTpsSince：0 是最差，不是缺失 ====================
+
+    /**
+     * {@code lowestTpsSince}（"最差的时刻"）必须能把 {@code tps1m == 0} 报出来。
+     *
+     * <p><b>这条守的是什么</b>：{@code tps1m} 没有 -1 哨兵（采集层直接写
+     * {@code Bukkit.getTPS()}，TPS 不可用时的样本整条不入环）。所以 {@code 0} 只可能是
+     * "服务器真的冻结了"——而那正是最差的时刻。一个专门找最低值的函数把它滤掉，
+     * 等于保证永远报不出最坏情况。</p>
+     *
+     * <p>日报的「最低 TPS」和 {@code /perfscope history} 的"最差时刻"都走这个方法，
+     * 所以这个错误会同时污染两处展示。v1.4.2 修过 {@code /perfscope trend} 的同类问题，
+     * 这是同一条数据链上的另一处。</p>
+     */
+    @Test
+    void lowestTpsSinceReportsZeroBecauseZeroIsTheWorstReading() {
+        long now = System.currentTimeMillis();
+        long step = MINUTE;
+        List<HistorySample> samples = List.of(
+            tpsSample(now - 3 * step, 19.9),
+            tpsSample(now - 2 * step, 0.0),    // 卡死
+            tpsSample(now - 1 * step, 18.5),
+            tpsSample(now, 20.0));
+
+        HistoryStore store = HistoryFixtures.seeded(HistoryFixtures.config(), samples);
+        HistorySample worst = store.lowestTpsSince(0L);
+
+        assertNotNull(worst, "there are valid samples in the window");
+        assertEquals(0.0, worst.tps1m(), 1e-9,
+            "0 TPS is a frozen server - the single worst moment. Filtering it out means "
+                + "'lowest TPS' can never report a crash");
+    }
+
+    /**
+     * 而 {@code peakTpsSince}（"最好的时刻"）过滤 0 是<b>对的</b>——0 不可能高于任何正值。
+     *
+     * <p>两条一起看才说明白：同一个 0，在求最小值时是必须保留的，在求最大值时是无关的。
+     * 所以修复不能靠"把所有 {@code <= 0} 都改成 {@code < 0}"批量替换。</p>
+     */
+    @Test
+    void peakTpsSinceIsUnaffectedByZeroEitherWay() {
+        long now = System.currentTimeMillis();
+        long step = MINUTE;
+        List<HistorySample> samples = List.of(
+            tpsSample(now - 2 * step, 0.0),
+            tpsSample(now - 1 * step, 19.5),
+            tpsSample(now, 19.9));
+
+        HistoryStore store = HistoryFixtures.seeded(HistoryFixtures.config(), samples);
+        HistorySample best = store.peakTpsSince(0L);
+
+        assertNotNull(best);
+        assertEquals(19.9, best.tps1m(), 1e-9,
+            "the peak is 19.9 regardless of whether the 0 sample is filtered");
+    }
+
+    /** 负哨兵仍然必须被排除（-1 才是"未采集"）。 */
+    @Test
+    void lowestTpsSinceStillSkipsNegativeSentinel() {
+        long now = System.currentTimeMillis();
+        long step = MINUTE;
+        List<HistorySample> samples = List.of(
+            tpsSample(now - 2 * step, -1.0),   // 哨兵：不该被当成"最差"
+            tpsSample(now - 1 * step, 18.0),
+            tpsSample(now, 19.5));
+
+        HistoryStore store = HistoryFixtures.seeded(HistoryFixtures.config(), samples);
+        HistorySample worst = store.lowestTpsSince(0L);
+
+        assertNotNull(worst);
+        assertEquals(18.0, worst.tps1m(), 1e-9,
+            "-1 is 'not collected', not a reading; it must not win the minimum");
+    }
+
+    private static HistorySample tpsSample(long ts, double tps) {
+        return new HistorySample(ts, tps, 10.0, 50, 1, 100, 500);
+    }
+
     private static HistorySample sample(long ts) {
         return new HistorySample(ts, 20.0, 10.0, 50, 1, 100, 500);
     }

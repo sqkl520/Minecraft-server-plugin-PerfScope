@@ -631,7 +631,7 @@ public class ReportGenerator {
                 .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
                 .limit(15)
                 .forEach(entry -> {
-                    double pct = snap.totalEntities > 0 ?
+                    double pct = snap.totalEntities > 0 ?  // @sentinel-ok 判断"有没有实体可以展示"，不是哨兵判断
                         (double) entry.getValue() / snap.totalEntities * 100 : 0;
                     html.append("<tr><td>").append(escapeHtml(entry.getKey())).append("</td><td>")
                         .append(entry.getValue()).append("</td><td>")
@@ -790,7 +790,7 @@ public class ReportGenerator {
                 .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
                 .limit(10)
                 .forEach(entry -> {
-                    double pct = snap.totalEntities > 0 ?
+                    double pct = snap.totalEntities > 0 ?  // @sentinel-ok 判断"有没有实体可以展示"，不是哨兵判断
                         (double) entry.getValue() / snap.totalEntities * 100 : 0;
                     sb.append(Messages.get("report.txt.entity-row",
                         entry.getKey(), entry.getValue(), String.format(java.util.Locale.ROOT, "%.1f", pct))).append("\n");

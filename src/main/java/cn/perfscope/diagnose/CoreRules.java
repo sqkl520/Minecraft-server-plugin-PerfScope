@@ -167,7 +167,7 @@ public final class CoreRules {
             // 覆盖判据已保证 window.size() >= MIN_SAMPLES，缺采 > 0 时这里一律先返回。
             int missing = 0;
             for (HistorySample s : window) {
-                if (s.heapUsagePercent() <= 0) {
+                if (s.heapUsagePercent() <= 0) {  // @sentinel-ok heapUsagePercent 的 0 确实是"未采集"：采集层在 heapMax<=0 时写 0（见 MetricsCollector:1875）
                     missing++;
                 }
             }

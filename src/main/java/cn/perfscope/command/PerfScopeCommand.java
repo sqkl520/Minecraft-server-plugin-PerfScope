@@ -482,7 +482,7 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             for (int i = start; i < history.size(); i++) {
                 MetricsSnapshot sample = history.get(i);
                 double tps = sample.tps1m;
-                if (sample.unavailable.contains(MetricsSnapshot.MODULE_TPS) || tps <= 0) {
+                if (sample.unavailable.contains(MetricsSnapshot.MODULE_TPS) || tps <= 0) {  // @sentinel-ok 不参与统计，只是判断"这条样本的 TPS 不可用"；配合 unavailable 集合使用
                     trend = trend.append(Component.text("?", GRAY));
                 } else {
                     switch (thresholdColors.tpsTrendBucket(tps)) {
@@ -498,10 +498,10 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
 
         // 对应 MSPT 推算（9A-6：TPS=0 是服务器完全冻结时的合法读数，除零会打印 "Infinityms"，
         // 而那正是最需要读数的事故现场——必须单独处理而不是让它显示成无穷大）
-        if (snap.tps1m > 0 && snap.tps1m < 20) {
+        if (snap.tps1m > 0 && snap.tps1m < 20) {  // @sentinel-ok 推算等效 MSPT 前必须排除 0，否则 1000/0 = Infinity 会直接打到用户眼前
             double expectedMspt = 1000.0 / snap.tps1m;
             sender.sendMessage(Component.text(Messages.get("cmd.tps.equivalent-mspt", String.format(java.util.Locale.ROOT, "%.1f", expectedMspt)), GRAY));
-        } else if (snap.tps1m <= 0) {
+        } else if (snap.tps1m <= 0) {  // @sentinel-ok 0 TPS 走"服务器无响应"专门分支并显示红字，不做除法；这是有意的
             sender.sendMessage(Component.text(Messages.get("cmd.tps.equivalent-mspt-unresponsive"), RED));
         }
     }
@@ -835,7 +835,7 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             thresholdColors.levelOf(ThresholdColors.Metric.PLAYERS, pct));
         sender.sendMessage(Component.text("  [" + pBar + "] " + pct + "%", pctColor));
 
-        if (snap.playerCount > 0) {
+        if (snap.playerCount > 0) {  // @sentinel-ok 判断"有没有玩家可以列出来"，不是哨兵判断
             sender.sendMessage(Component.text(""));
             sender.sendMessage(Component.text(Messages.get("cmd.players.list-title"), GRAY));
             Bukkit.getOnlinePlayers().forEach(p -> {
@@ -1182,7 +1182,7 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                     minTpsAt = s;
                 }
             }
-            if (s.heapUsagePercent() > 0 && s.heapUsagePercent() > peakHeap) {
+            if (s.heapUsagePercent() > 0 && s.heapUsagePercent() > peakHeap) {  // @sentinel-ok 求堆占用峰值：0 不可能高于任何正值，过滤它与不过滤结果相同
                 peakHeap = s.heapUsagePercent();
                 peakHeapAt = s;
             }
