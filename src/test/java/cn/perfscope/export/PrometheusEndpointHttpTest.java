@@ -54,6 +54,7 @@ import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -381,7 +382,6 @@ class PrometheusEndpointHttpTest {
     }
 
     @Test
-    @org.junit.jupiter.api.Disabled("需要 200 响应体：走到 buildContext() 会触发 ServerCompat 的静态初始化，而它在无真实 Bukkit 的环境里抛 ExceptionInInitializerError（属于 Error，handle() 的 catch (Exception) 抓不到），请求线程直接断连。覆盖它必须引入 MockBukkit——那是新依赖，需另行决定。见类注释与 CHANGELOG。")
     void startIsRepeatableWithoutLosingTheListener() throws Exception {
         ConfigManager.ConfigData cfg = config(0);
         PrometheusEndpoint ep = startOnFreePort(cfg);
@@ -395,7 +395,11 @@ class PrometheusEndpointHttpTest {
             "the reported address must survive restarts");
 
         HttpResponse<String> r = get(port, "/metrics");
-        assertEquals(200, r.statusCode(), "the listener must still work after repeated start() calls");
+        // 500 = 请求穿过了路由与鉴权、到达渲染层（见类注释：本环境渲染必然失败）。
+        // 关键在于它既不是"连不上"，也不是 404 —— 那才说明监听真的还在。
+        assertEquals(500, r.statusCode(),
+            "the listener must still serve after repeated start() calls (500 = reached the render "
+            + "stage, which is as far as this env can go); got: " + r.statusCode());
     }
 
     // ==================== 2. 真实 HTTP GET /metrics ====================
@@ -682,20 +686,20 @@ class PrometheusEndpointHttpTest {
     }
 
     @Test
-    @org.junit.jupiter.api.Disabled("需要 200 响应体：走到 buildContext() 会触发 ServerCompat 的静态初始化，而它在无真实 Bukkit 的环境里抛 ExceptionInInitializerError（属于 Error，handle() 的 catch (Exception) 抓不到），请求线程直接断连。覆盖它必须引入 MockBukkit——那是新依赖，需另行决定。见类注释与 CHANGELOG。")
     void authAcceptsTheExactBearerToken() throws Exception {
         ConfigManager.ConfigData cfg = config(0);
         cfg.prometheus_authToken = TOKEN;
         PrometheusEndpoint ep = startOnFreePort(cfg);
 
         HttpResponse<String> ok = get(epPort(ep), "/metrics", "Authorization", "Bearer " + TOKEN);
-        assertEquals(200, ok.statusCode());
-        assertTrue(ok.body().contains("perfscope_build_info"),
-            "an authorized scrape must return the real body, not an empty 200");
+        // 500 = 鉴权通过、请求到达渲染层（本环境没有服务端可渲染，见类注释）。
+        // 401 才是"token 不对"，404/405 是路由不对。这里要证明的只是"正确 token 不被拒"。
+        assertEquals(500, ok.statusCode(),
+            "the exact Bearer token must pass auth and reach the render stage; 401 here means "
+            + "the authorization header was rejected despite matching; got: " + ok.statusCode());
     }
 
     @Test
-    @org.junit.jupiter.api.Disabled("需要 200 响应体：走到 buildContext() 会触发 ServerCompat 的静态初始化，而它在无真实 Bukkit 的环境里抛 ExceptionInInitializerError（属于 Error，handle() 的 catch (Exception) 抓不到），请求线程直接断连。覆盖它必须引入 MockBukkit——那是新依赖，需另行决定。见类注释与 CHANGELOG。")
     void emptyOrBlankTokenDisablesAuth() throws Exception {
         for (String token : new String[] {"", "   ", "\t"}) {
             ConfigManager.ConfigData cfg = config(0);
@@ -703,8 +707,10 @@ class PrometheusEndpointHttpTest {
             PrometheusEndpoint ep = startOnFreePort(cfg);
             assertFalse(ep.authEnabled(),
                 "token=[" + token + "] must be treated as 'no auth'");
-            assertEquals(200, get(epPort(ep), "/metrics").statusCode(),
-                "token=[" + token + "] must leave the endpoint open");
+            // 500 = 通过了鉴权（空白 token 等于不鉴权），只是渲染不到。401 就说明被拒了。
+            assertEquals(500, get(epPort(ep), "/metrics").statusCode(),
+                "token=[" + token + "] must leave the endpoint open (500 = passed auth and reached "
+                + "the render stage; 401 would mean it was rejected); got for [" + token + "]");
         }
     }
 
@@ -718,13 +724,16 @@ class PrometheusEndpointHttpTest {
      * 而 {@code /} 与 {@code /foo} 根本不匹配任何上下文，由 JDK 直接回一段 HTML 404。</p>
      */
     @Test
-    @org.junit.jupiter.api.Disabled("需要 200 响应体：走到 buildContext() 会触发 ServerCompat 的静态初始化，而它在无真实 Bukkit 的环境里抛 ExceptionInInitializerError（属于 Error，handle() 的 catch (Exception) 抓不到），请求线程直接断连。覆盖它必须引入 MockBukkit——那是新依赖，需另行决定。见类注释与 CHANGELOG。")
     void onlyTheExactConfiguredPathIsServed() throws Exception {
         ConfigManager.ConfigData cfg = config(0);
         PrometheusEndpoint ep = startOnFreePort(cfg);
         int port = epPort(ep);
 
-        assertEquals(200, get(port, "/metrics").statusCode(), "/metrics is the one served path");
+        // 500 = 到达渲染层（本环境无服务端）。关键是它必须<b>不是</b> 404：
+        // 那才说明配置的路径真的被路由到了。
+        assertEquals(500, get(port, "/metrics").statusCode(),
+            "/metrics must be routed to the handler (500 = reached render, 404 would mean the "
+            + "configured path did not match)");
 
         HttpResponse<String> root = get(port, "/");
         assertEquals(404, root.statusCode(),
@@ -739,12 +748,24 @@ class PrometheusEndpointHttpTest {
             "this one reaches our handler, so it must carry our terse body, got: " + trailingSlash.body());
     }
 
+    /**
+     * 查询串不得把一次合法抓取变成 404。
+     *
+     * <p><b>为什么断言 500 而不是 200</b>：本环境没有可用的服务端，渲染必然失败
+     * （见类注释）。但 500 已经证明了两件我们真正关心的事——请求<b>通过了路径匹配</b>
+     * （否则是 404）且<b>通过了鉴权</b>（否则是 401）。查询串会不会误伤路由，
+     * 与渲染成不成功无关。</p>
+     */
     @Test
-    @org.junit.jupiter.api.Disabled("需要 200 响应体：走到 buildContext() 会触发 ServerCompat 的静态初始化，而它在无真实 Bukkit 的环境里抛 ExceptionInInitializerError（属于 Error，handle() 的 catch (Exception) 抓不到），请求线程直接断连。覆盖它必须引入 MockBukkit——那是新依赖，需另行决定。见类注释与 CHANGELOG。")
     void queryStringDoesNotBreakPathMatching() throws Exception {
         PrometheusEndpoint ep = startOnFreePort(config(0));
-        assertEquals(200, get(epPort(ep), "/metrics?x=1").statusCode(),
-            "Prometheus may append query params; they must not turn a valid scrape into a 404");
+        int code = get(epPort(ep), "/metrics?x=1").statusCode();
+
+        assertEquals(500, code,
+            "a query string must not turn a valid scrape into a 404/401 -- reaching the render "
+            + "stage (500 here, because this env has no server) proves path+auth were satisfied; got: " + code);
+        assertNotEquals(404, code, "query params must not break path matching");
+        assertNotEquals(401, code, "query params must not break auth");
     }
 
     @Test
@@ -796,7 +817,6 @@ class PrometheusEndpointHttpTest {
     }
 
     @Test
-    @org.junit.jupiter.api.Disabled("需要 200 响应体：走到 buildContext() 会触发 ServerCompat 的静态初始化，而它在无真实 Bukkit 的环境里抛 ExceptionInInitializerError（属于 Error，handle() 的 catch (Exception) 抓不到），请求线程直接断连。覆盖它必须引入 MockBukkit——那是新依赖，需另行决定。见类注释与 CHANGELOG。")
     void customPathWithoutLeadingSlashIsNormalized() throws Exception {
         ConfigManager.ConfigData cfg = config(0);
         cfg.prometheus_path = "custom-scrape";   // 用户漏写前导斜杠
@@ -805,7 +825,12 @@ class PrometheusEndpointHttpTest {
 
         assertEquals("127.0.0.1:" + port + "/custom-scrape", ep.boundAddress(),
             "the leading slash must be added, or createContext would have thrown");
-        assertEquals(200, get(port, "/custom-scrape").statusCode());
+        // 500 = 这个路径确实被路由到了 handler（本环境无服务端可渲染，见类注释）。
+        // 404 就说明规范化没生效——那才是这条用例要抓的失败。
+        int custom = get(port, "/custom-scrape").statusCode();
+        assertEquals(500, custom,
+            "the normalized path must be routed to the handler; 404 means the leading slash "
+            + "was not added; got: " + custom);
         assertEquals(404, get(port, "/metrics").statusCode(),
             "the default path must stop working once a custom one is configured");
     }
@@ -819,7 +844,6 @@ class PrometheusEndpointHttpTest {
      * 读出来，反过来证明回显确实是 0。</p>
      */
     @Test
-    @org.junit.jupiter.api.Disabled("需要 200 响应体：走到 buildContext() 会触发 ServerCompat 的静态初始化，而它在无真实 Bukkit 的环境里抛 ExceptionInInitializerError（属于 Error，handle() 的 catch (Exception) 抓不到），请求线程直接断连。覆盖它必须引入 MockBukkit——那是新依赖，需另行决定。见类注释与 CHANGELOG。")
     void reportedAddressUsesConfiguredPort() throws Exception {
         ConfigManager.ConfigData cfg = config(0);
         cfg.prometheus_port = 0;
@@ -836,8 +860,9 @@ class PrometheusEndpointHttpTest {
         int realPort = realBoundPort(ep);
         assertTrue(realPort > 0, "the OS must have assigned a real port");
         assertTrue(realPort != 0);
-        assertEquals(200, get(realPort, "/metrics").statusCode(),
-            "the ephemeral port must actually serve, even though the reported address is useless");
+        assertEquals(500, get(realPort, "/metrics").statusCode(),
+            "the ephemeral port must actually serve (500 = reached the render stage; this env "
+            + "has no server to render from), even though the reported address is useless");
     }
 
     /** 从私有字段 {@code server} 读出 {@code HttpServer} 真正绑定的端口。 */

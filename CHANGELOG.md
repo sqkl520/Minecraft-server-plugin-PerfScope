@@ -42,7 +42,7 @@
 端口被占时干净失败且 `failureReason()` 有内容、9940 的定向提示与其他端口不同、
 鉴权矩阵、`disabled` 时既不监听也不报错。
 
-### Notes — 14 个 HTTP 用例为什么是 `@Disabled` 而不是删掉
+### Notes — HTTP 用例里 7 个 `@Disabled` 的由来，以及另外 7 个是怎么救回来的
 
 要拿到 200 响应体就得走 `buildContext()`，它调 `ServerCompat.getServerName()`。
 `ServerCompat` 的静态块第一行是 `Bukkit.getBukkitVersion()`，直接解引用 `Bukkit.server`。
@@ -57,6 +57,22 @@
    `Bukkit.server.getRegistry(...)`，此时 `Bukkit.server` 还是 null
 2. `Unsafe.allocateInstance(Server.class)` —— `Server` 是接口，抛 `InstantiationException`
 3. 反射直接写 `Bukkit.server` —— 字段类型是 `Server`，仍需要一个实例，回到 1 或 2
+
+**初版把这 14 个用例整批标了 `@Disabled`，后来发现其中 7 个并不需要 200。**
+
+关键在于：`handle()` 的判断顺序是 404 → 405 → 401 → 渲染。**500 已经证明了
+"通过了路径匹配、通过了鉴权、到达渲染层"**——而路径匹配、鉴权、查询串处理、
+自定义路径规范化这些行为，与渲染成不成功无关。把断言从 `200` 改成 `500`
+（并额外断言 `!= 404` / `!= 401`），这 7 个用例就活了：
+
+`queryStringDoesNotBreakPathMatching`、`startIsRepeatableWithoutLosingTheListener`、
+`reportedAddressUsesConfiguredPort`、`authAcceptsTheExactBearerToken`、
+`emptyOrBlankTokenDisablesAuth`、`onlyTheExactConfiguredPathIsServed`、
+`customPathWithoutLeadingSlashIsNormalized`
+
+留着的 7 个是真的必须看到 200 响应体才能验证：Prometheus 文本格式合规、无科学计数法、
+快照值穿透 HTTP 层、`Content-Type` 头、HEAD 无 body、null 快照下的健康信号、
+一次抓取周期后无监听残留。没有响应体就无从断言。
 
 保留这 14 个用例（而不是删除）的理由：场景设计、断言内容、装配逻辑都是对的，
 只差一个可用的假服务端。将来若引入 MockBukkit，去掉 `@Disabled` 即可。
