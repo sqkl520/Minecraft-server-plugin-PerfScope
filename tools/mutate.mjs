@@ -316,6 +316,42 @@ const MUTATIONS = [
             + '历史告警退化成原始 key 展示（而 chunks 从没有全服枚举）',
         expect: 'MetricKeyParsingTest',
     },
+    {
+        id: 'M31',
+        file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
+        from: '        long ref = last > 0L ? last : startedAtMs;',
+        to: '        long ref = last;',
+        desc: 'isJvmStale 去掉「从未采集时退回 startedAtMs」——now-0 恒大于任何阈值，'
+            + '插件每次启动都报「JVM 指标已停止更新 56 年」，服主学会无视这条警告',
+        expect: 'StalenessQueryTest',
+    },
+    {
+        id: 'M32',
+        file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
+        from: '        return System.currentTimeMillis() - startedAtMs > Math.max(WARMUP_WINDOW_MS, staleThresholdMs());',
+        to: '        return System.currentTimeMillis() - startedAtMs > WARMUP_WINDOW_MS;',
+        desc: 'isJvmStale 只比宽限期不取 max —— update_interval=100 的服务器在 10 秒后就报 stale，'
+            + '比它自己的采集节拍（15 秒）还急，每轮误报一次',
+        expect: 'StalenessQueryTest',
+    },
+    {
+        id: 'M33',
+        file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
+        from: '        return Math.max(3000L, intervalMs * 3L);',
+        to: '        return intervalMs * 3L;',
+        desc: 'staleThresholdMs 去掉 3000ms 下界 —— update_interval=1 时判定窗口只有 150ms，'
+            + '20 tick/s 的服务端偶发一次调度抖动就报「采集已停止」',
+        expect: 'StalenessQueryTest',
+    },
+    {
+        id: 'M34',
+        file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
+        from: '        return jvm == null ? 0L : jvm.timestamp;',
+        to: '        return jvm == null ? System.currentTimeMillis() : jvm.timestamp;',
+        desc: 'jvmSnapshotTimestamp 在无快照时返回「现在」而不是 0 —— '
+            + '看门狗报出一个看起来像「刚刚」的时刻，掩盖了「从来没采到过」',
+        expect: 'StalenessQueryTest',
+    },
 ];
 
 // ---------------------------------------------------------------------------
