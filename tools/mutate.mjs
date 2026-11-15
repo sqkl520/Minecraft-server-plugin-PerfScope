@@ -163,6 +163,33 @@ const MUTATIONS = [
             + '只看 unavailable 的 40 处消费点仍然把它当健康',
         expect: 'SnapshotSubsetInvariantTest',
     },
+    {
+        id: 'M14',
+        file: 'src/main/java/cn/perfscope/compat/SchedulerAdapter.java',
+        from: '            return bukkitTask != null || foliaTask != null;',
+        to: '            return true;',
+        desc: 'isActive 恒返回 true —— noop 句柄也报告「已启动」，'
+            + '采集/告警/探针全部静默停摆且控制台无迹象',
+        expect: 'TaskHandleContractTest',
+    },
+    {
+        id: 'M15',
+        file: 'src/main/java/cn/perfscope/compat/SchedulerAdapter.java',
+        from: '                } catch (Exception | LinkageError e) {',
+        to: '                } catch (Exception e) {',
+        desc: 'Bukkit 分支把 catch 从 Exception|LinkageError 缩回 Exception —— '
+            + 'Folia 上类缺失的 NoClassDefFoundError 会在关服路径冒泡',
+        expect: 'TaskHandleContractTest',
+    },
+    {
+        id: 'M16',
+        file: 'src/main/java/cn/perfscope/compat/SchedulerAdapter.java',
+        from: '            if (foliaTask != null) {',
+        to: '            if (false) {',
+        desc: 'Folia 路径的 cancel 分支拆掉 —— Folia 句柄永不取消，'
+            + 'reload 后旧任务残留并与新实例同时跑',
+        expect: 'TaskHandleContractTest',
+    },
 ];
 
 // ---------------------------------------------------------------------------
