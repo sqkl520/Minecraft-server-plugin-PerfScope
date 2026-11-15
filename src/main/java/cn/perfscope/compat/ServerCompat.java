@@ -73,10 +73,12 @@ public final class ServerCompat {
     private static volatile String msptUnavailableReasonKey;
     /** 9A-1：运行期探针是否已定案（一旦降级即置位，之后调用直接返回 false，不重复采样）。 */
     private static volatile boolean runtimeProbed;
-    /** 9A-1：连续"实测全零"次数——达到 {@link #ZERO_SAMPLE_CONFIRMATIONS} 才降级，防一次瞬态误判。 */
+    /**
+     * 9A-1：连续"实测全零"次数——达到
+     * {@link MsptCapabilityState#ZERO_SAMPLE_CONFIRMATIONS} 才降级，防一次瞬态误判。
+     * 判定逻辑在 {@link MsptCapabilityState}，本字段只是它在线上 volatile 存储的镜像。
+     */
     private static volatile int zeroSampleStreak;
-    /** 9A-1：确认阈值（同一服务端 tick 计时不动是稳定事实，两次采样足以定案）。 */
-    private static final int ZERO_SAMPLE_CONFIRMATIONS = 2;
     /** 9A-1：运行期探针延迟（tick）——默认 100 tick ≈ 5 秒，即采集首周期（20 tick）之后数个周期。 */
     private static final long RUNTIME_PROBE_DELAY_TICKS = 100L;
     /** Paper TileEntity 计数 API 是否可用 */
@@ -248,8 +250,13 @@ public final class ServerCompat {
      * 且一旦定案（可用 / 不可用）就不再采样，reload 不会重复探测。</p>
      *
      * <p><b>两次确认</b>：非 Folia 分支看到全零时<b>不立即降级</b>——首次采样命中空窗口是可能的，
-     * 故要求连续 {@link #ZERO_SAMPLE_CONFIRMATIONS} 次全零才定案（调用方按周期重试即可）。
+     * 故要求连续 {@link MsptCapabilityState#ZERO_SAMPLE_CONFIRMATIONS} 次全零才定案（调用方按周期重试即可）。
      * 这样既能揭穿"方法在但恒空"的分支，又不会因为一次瞬态把健康 Paper 误判成不可用。</p>
+     *
+     * <p><b>判定逻辑在哪</b>：全部在 {@link MsptCapabilityState}（纯状态机，零 Bukkit / 零 Messages
+     * 依赖，因而可单测）。本方法只剩"取样本 → 调状态机 → 写回 volatile → 按 {@link MsptCapabilityState.Event}
+     * 打日志"四步。之所以要拆：这段判定此前零测试，而它的 7 条不变量被破坏时不会崩溃也不会报错，
+     * 只让能力位或控制台文案变得不诚实。</p>
      *
      * <p><b>调用位置要求</b>：必须"首周期之后"——刚 enable 时 tick 采样窗口尚未填充，
      * 全零是正常现象而非"不可用"。本类不自己挂任务（不引入调度依赖），
@@ -264,74 +271,63 @@ public final class ServerCompat {
         }
         Logger log = logger != null ? logger : Logger.getLogger("PerfScope");
 
-        if (isFolia) {
-            runtimeProbed = true;
-            boolean wasAvailable = PAPER_MSPT_AVAILABLE || PAPER_AVG_TICK_AVAILABLE;
-            PAPER_MSPT_AVAILABLE = false;
-            PAPER_AVG_TICK_AVAILABLE = false;
-            msptUnavailableReasonKey = "compat.mspt.folia-no-global-tick";
-            if (wasAvailable) {
-                // 只有"此前被误判为可用"时才需要解释——否则是噪音
-                log.info("[PerfScope] " + Messages.get("compat.mspt.folia-no-global-tick") + ", MSPT marked unavailable");
-            } else {
-                log.info("[PerfScope] " + Messages.get("compat.mspt.folia-no-global-tick")
-                    + Messages.get("compat.mspt.tps-scope-note"));
-            }
-            return;
+        // 非 Folia 才取样本。isFolia 由调用方传入，不能改成读 isFolia()——
+        // 详见 MsptCapabilityState#transition 的 isFolia 参数说明。
+        // 方法不存在（静态探测已 false）则不重复尝试；m == null 说明静态探测与实测不一致
+        // （类加载器被替换等），按不可用处理。
+        // 两级都无条件采样：原实现在判定 `bad` 之前就取了 avgBad，哪怕一级已成功也照样调用
+        // getAverageTickTime()。这里保持同样的反射调用序列，行为零变更。
+        boolean primarySampleOk = false;
+        boolean avgTickOk = false;
+        if (!isFolia) {
+            Method tick = TICK_TIMES_METHOD_PRESENT ? lookupServerMethod("getTickTimes") : null;
+            Method avg = AVG_TICK_METHOD_PRESENT ? lookupServerMethod("getAverageTickTime") : null;
+            primarySampleOk = tick != null && MsptCapabilityState.hasPositiveTickSample(invokeTickArray(tick));
+            avgTickOk = avg != null && invokeAvgTick(avg) > 0.0;
         }
 
-        // 非 Folia：实测。方法不存在（静态探测已 false）则不重复尝试
-        boolean wasPrimaryAvailable = PAPER_MSPT_AVAILABLE;
-        boolean bad = false;
-        if (TICK_TIMES_METHOD_PRESENT) {
-            Method m = lookupServerMethod("getTickTimes");
-            // m == null 说明静态探测与实测不一致（类加载器被替换等），按不可用处理
-            if (m == null || !hasPositiveTickSample(invokeTickArray(m))) {
-                bad = true;
+        MsptCapabilityState before = MsptCapabilityState.current(
+            PAPER_MSPT_AVAILABLE, PAPER_AVG_TICK_AVAILABLE, msptUnavailableReasonKey,
+            runtimeProbed, zeroSampleStreak);
+        MsptCapabilityState.Result result = before.transition(
+            isFolia, TICK_TIMES_METHOD_PRESENT, AVG_TICK_METHOD_PRESENT, primarySampleOk, avgTickOk);
+
+        // 单次写回：避免"字段改了一半"的中间态被并发读者看到。
+        PAPER_MSPT_AVAILABLE = result.state.msptAvailable;
+        PAPER_AVG_TICK_AVAILABLE = result.state.avgTickAvailable;
+        msptUnavailableReasonKey = result.state.reasonKey;
+        runtimeProbed = result.state.probed;
+        zeroSampleStreak = result.state.zeroSampleStreak;
+
+        logTransition(log, result);
+    }
+
+    /**
+     * 按 {@link MsptCapabilityState.Event} 渲染并打印探针日志。
+     *
+     * <p>渲染留在这里（而不是状态机里）的两个原因：状态机不许依赖 {@code Messages}（否则测试
+     * 加载不了它）；而"读时渲染"这条约定要求 {@code Messages.get} 在调用点发生，不能缓存。
+     * 键名与各分支的调用时机与原实现逐条对应。</p>
+     */
+    private static void logTransition(Logger log, MsptCapabilityState.Result result) {
+        switch (result.event) {
+            case FOLIA_EXPLAINED -> log.info("[PerfScope] "
+                + Messages.get("compat.mspt.folia-no-global-tick") + ", MSPT marked unavailable");
+            case FOLIA_QUIET -> log.info("[PerfScope] " + Messages.get("compat.mspt.folia-no-global-tick")
+                + Messages.get("compat.mspt.tps-scope-note"));
+            case DEGRADED_TO_AVG -> {
+                if (result.announce) {
+                    log.info(Messages.get("compat.mspt.degraded-to-avg"));
+                }
             }
-        } else {
-            bad = true;   // 一级方法都不在，只能看二级
-        }
-        boolean avgBad;
-        if (AVG_TICK_METHOD_PRESENT) {
-            Method m = lookupServerMethod("getAverageTickTime");
-            avgBad = m == null || !(invokeAvgTick(m) > 0.0);
-        } else {
-            avgBad = true;
-        }
-        if (!bad) {
-            // 一级实测有非零样本 → 能力确认，定案（不再采样，避免抖动）
-            runtimeProbed = true;
-            zeroSampleStreak = 0;
-            msptUnavailableReasonKey = null;
-            return;
-        }
-        // 一级不可用（全零或方法缺失）。可能是"采样窗口尚未填充"的瞬态——
-        // 统一要求连续 ZERO_SAMPLE_CONFIRMATIONS 次异常才定案，避免把健康 Paper 误判成不可用。
-        // 注：探针只由单一调度线程执行，此处 ++ 无并发竞争。
-        int streak = zeroSampleStreak + 1;
-        zeroSampleStreak = streak;
-        if (streak < ZERO_SAMPLE_CONFIRMATIONS) {
-            return;   // 等下一次调用（armRuntimeProbe 已安排重试）
-        }
-        runtimeProbed = true;
-        if (!avgBad) {
-            // 一级实测恒空、但二级有值：只降一级，仍算"精确"（getAverageTickTime 非估算 API）。
-            // 二级能力位保持 true，msptUnavailableReason 依契约置 null（可用时无原因）。
-            PAPER_MSPT_AVAILABLE = false;
-            msptUnavailableReasonKey = null;
-            if (wasPrimaryAvailable) {
-                log.info(Messages.get("compat.mspt.degraded-to-avg"));
+            case MARKED_UNAVAILABLE -> {
+                if (result.announce) {
+                    log.info(Messages.get("compat.mspt.marked-unavailable",
+                        MsptCapabilityState.ZERO_SAMPLE_CONFIRMATIONS));
+                }
             }
-            return;
-        }
-        // 两级都空：定案为不可用
-        boolean wasAvailable = PAPER_MSPT_AVAILABLE || PAPER_AVG_TICK_AVAILABLE;
-        PAPER_MSPT_AVAILABLE = false;
-        PAPER_AVG_TICK_AVAILABLE = false;
-        msptUnavailableReasonKey = "compat.mspt.tick-times-empty";
-        if (wasAvailable) {
-            log.info(Messages.get("compat.mspt.marked-unavailable", ZERO_SAMPLE_CONFIRMATIONS));
+            default -> {   // NONE / CONFIRMED_EXACT：原实现这两条路径都不打日志
+            }
         }
     }
 
@@ -411,18 +407,6 @@ public final class ServerCompat {
         } catch (Throwable t) {
             return 0.0;
         }
-    }
-
-    private static boolean hasPositiveTickSample(long[] arr) {
-        if (arr == null || arr.length == 0) {
-            return false;
-        }
-        for (long t : arr) {
-            if (t > 0L) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /**

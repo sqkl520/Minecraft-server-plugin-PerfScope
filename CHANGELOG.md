@@ -18,6 +18,30 @@
 
 > v1.4.4 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
 
+### Refactored — MSPT 探针判定逻辑抽成可测状态机（行为零变更）
+
+`ServerCompat.probeRuntimeAvailability` 的 76 行判定逻辑此前**零测试**：`ServerCompat` 的
+`<clinit>` 要 `Bukkit.getBukkitVersion()`（解引用 `Bukkit.server`，单测 JVM 里是 null），
+任何触碰都在 `ExceptionInInitializerError` 上炸掉。而它决定的 7 条不变量破坏后**不崩溃、不报错**，
+只让能力位或控制台文案变得不诚实（Folia 上宣称"精确采集"、健康 Paper 被一次空窗口永久降级、
+两级降级被并成双降、报告层拿到空原因）。
+
+- 新增 `compat/MsptCapabilityState`（266 行）：不可变状态 + 纯转移函数 `transition(...)`，
+  产出新状态与 `Event`（`FOLIA_QUIET` / `FOLIA_EXPLAINED` / `CONFIRMED_EXACT` /
+  `DEGRADED_TO_AVG` / `MARKED_UNAVAILABLE` / `NONE`）+ `announce` 门控。
+  **零 `org.bukkit.*`、零 `Messages` 依赖**，故可在普通 JUnit JVM 里加载。
+- `ZERO_SAMPLE_CONFIRMATIONS` 移入新类；`hasPositiveTickSample(long[])` 一并搬入（纯函数，此前也无测试）。
+- `probeRuntimeAvailability` 缩为 33 行：取样本 → 调状态机 → 单次写回 volatile → 按 `Event` 打日志。
+  日志渲染（`Messages.get` 的四处调用、键名、调用时机）仍留在 `ServerCompat.logTransition`。
+- 新增 `MsptCapabilityStateTest`（13 个用例），锁住 7 条不变量 + 一级成功路径 + `hasPositiveTickSample`。
+- 等价性验证：把原判定逻辑逐行转录为 oracle，与新状态机做 2048 组输入 × 4 轮的差分比对，
+  能力位 / `reasonKey` / `probed` / `streak` / 日志分支五个维度 **0 处不一致**。
+- 保留的调用序列：原实现先取两级样本、之后才判定，一级成功时也照样调用过
+  `getAverageTickTime()`；改写后仍是无条件两级采样，反射调用顺序与改动前一致。
+- 变异验证：对状态机注入 15 个破坏性变异（含四个等价性靶点：`isFolia` 入参、
+  一级成功只写三个字段、`wasPrimaryAvailable` 与 `wasAvailable` 不合并、`probed` 先于分支），
+  全部被测试杀死。
+
 ### Fixed — Folia 上 MSPT 被错标成「采集失败」（子集契约缺执法者）
 
 `MetricsSnapshot` 的三个"为什么不可用"集合有一条写死在字段 javadoc 里的契约：

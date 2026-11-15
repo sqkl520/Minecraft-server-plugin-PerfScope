@@ -344,7 +344,9 @@ class MsptSpikeRuleTest {
         assertNotNull(spikeOnly);
         assertNotNull(pressure);
 
-        assertEquals(150.0, 150.0);
+        assertTrue(spikeOnly.detail().contains("150"),
+            "the spike-only detail must show the peak that triggered it (150ms), otherwise the "
+                + "reader cannot tell which sample is being cited, got: " + spikeOnly.detail());
         assertFalse(spikeOnly.detail().equals(pressure.detail()),
             "the two conclusions carry different severity, so their evidence text must differ");
         assertTrue(pressure.detail().contains("60"),

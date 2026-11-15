@@ -144,6 +144,7 @@ class MetricsTextRendererTest {
     @Test
     void metricNamesAreValid() {
         String out = MetricsTextRenderer.render(snap(), ctx());
+        requireSampleLines(out);
         for (String line : out.split("\n")) {
             if (line.isEmpty() || line.startsWith("#")) {
                 continue;
@@ -152,6 +153,26 @@ class MetricsTextRendererTest {
             assertTrue(name.matches("[a-zA-Z_:][a-zA-Z0-9_:]*"),
                 "invalid metric name: " + name);
         }
+    }
+
+    /**
+     * 守卫：断言输出里**至少有一行样本**（非注释、非空）。
+     *
+     * <p><b>为什么这个守卫是必须的</b>：下面两个用例都是"逐行校验样本行"的循环。
+     * 若 {@code render()} 因回归返回空串、或只输出 HELP/TYPE 注释行，循环体一次都不执行，
+     * 断言<b>从不运行</b>——两个用例双双全绿，而实际是什么都没渲染。</p>
+     *
+     * <p>当前之所以没出事，全靠夹具凑巧：{@code snap()} 填了 14 个字段且 {@code unavailable}
+     * 为空，所以必然有样本行。但那是「夹具碰巧」，不是「断言保证」。夹具一改窄，
+     * 这些用例就会静默失去意义。</p>
+     */
+    private static void requireSampleLines(String out) {
+        long sampleLines = out.lines()
+            .filter(l -> !l.isEmpty() && !l.startsWith("#"))
+            .count();
+        assertTrue(sampleLines > 0,
+            "输出里一行样本都没有，下面的逐行校验会一次都不执行（恒真的空转）——"
+                + "要么 render() 回归了，要么 snap() 夹具变窄了。实际输出：\n" + out);
     }
 
     // ==================== 哨兵与特殊值 ====================
@@ -215,6 +236,7 @@ class MetricsTextRendererTest {
         MetricsSnapshot s = snap();
         s.timestamp = 1_794_350_258_230L;   // 毫秒时间戳，最容易触发 E 记法
         String out = MetricsTextRenderer.render(s, ctx());
+        requireSampleLines(out);
 
         for (String line : out.split("\n")) {
             if (line.isEmpty() || line.startsWith("#")) {
