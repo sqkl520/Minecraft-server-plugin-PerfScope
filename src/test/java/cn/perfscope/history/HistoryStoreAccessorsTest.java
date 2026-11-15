@@ -386,6 +386,79 @@ class HistoryStoreAccessorsTest {
             "-1 is 'not collected', not a reading; it must not win the minimum");
     }
 
+    // ==================== peakXxxSince：必须真的是最大值 ====================
+
+    /**
+     * 四个 {@code peakXxxSince} 必须返回<b>最大</b>的那条，不是第一条、不是最小。
+     *
+     * <p><b>为什么这条值得单独写</b>：现有测试只覆盖了"哨兵值怎么显示"（{@code -1} 不打印
+     * 成读数），<b>没有一条断言返回值是最大值</b>。实测过：把 {@code peakHeapSince} 的
+     * {@code >} 改成 {@code <}（求峰值变成求谷值），498 个用例一个都不红。</p>
+     *
+     * <p>后果：日报的「峰值内存」「最严重单次尖峰」会显示成<b>最轻</b>的那一刻——
+     * 把最坏时报成最好时。这正是这个项目一直在修的那类"静默失真"。</p>
+     */
+    @Test
+    void peakHelpersReturnTheMaximumNotTheMinimumOrFirst() {
+        long now = System.currentTimeMillis();
+        long step = MINUTE;
+        // 三条样本，中间那条是峰值；首尾都更小 —— 这样"返回第一个"和"返回最小"都会错
+        List<HistorySample> samples = List.of(
+            sampleWith(now - 2 * step, 30, 100.0, 20.0, 10.0),
+            sampleWith(now - 1 * step, 95, 500.0, 80.0, 60.0),
+            sampleWith(now, 40, 200.0, 30.0, 20.0));
+
+        HistoryStore store = HistoryFixtures.seeded(HistoryFixtures.config(), samples);
+
+        HistorySample heap = store.peakHeapSince(0L);
+        assertNotNull(heap);
+        assertEquals(95, heap.heapUsagePercent(),
+            "peakHeapSince must return the highest heap reading (95), not the first (30) or the lowest (30)");
+
+        HistorySample spike = store.peakMsptSpikeSince(0L);
+        assertNotNull(spike);
+        assertEquals(500.0, spike.msptMax(), 1e-9,
+            "peakMsptSpikeSince must return the worst single tick (500ms), not the mildest");
+
+        HistorySample cpu = store.peakProcessCpuSince(0L);
+        assertNotNull(cpu);
+        assertEquals(80.0, cpu.cpuProcess(), 1e-9,
+            "peakProcessCpuSince must return the highest CPU (80), not the first or the lowest");
+
+        HistorySample sysCpu = store.peakSystemCpuSince(0L);
+        assertNotNull(sysCpu);
+        assertEquals(60.0, sysCpu.cpuSystem(), 1e-9,
+            "peakSystemCpuSince must return the highest system CPU (60)");
+    }
+
+    /** 实体峰值同理（它走的是另一条分支，单独钉）。 */
+    @Test
+    void peakEntitiesReturnsTheMaximum() {
+        long now = System.currentTimeMillis();
+        long step = MINUTE;
+        List<HistorySample> samples = List.of(
+            entitySample(now - 2 * step, 100),
+            entitySample(now - 1 * step, 900),
+            entitySample(now, 250));
+
+        HistoryStore store = HistoryFixtures.seeded(HistoryFixtures.config(), samples);
+        HistorySample peak = store.peakEntitiesSince(0L);
+
+        assertNotNull(peak);
+        assertEquals(900, peak.totalEntities(),
+            "peakEntitiesSince must return the highest entity count (900), not the first or the lowest");
+    }
+
+    private static HistorySample sampleWith(long ts, int heap, double msptMax,
+                                            double cpuProcess, double cpuSystem) {
+        return new HistorySample(ts, 20.0, 10.0, heap, 1, 100, 500,
+            msptMax, cpuProcess, cpuSystem, HistorySample.NO_LONG, HistorySample.NO_LONG);
+    }
+
+    private static HistorySample entitySample(long ts, int entities) {
+        return new HistorySample(ts, 20.0, 10.0, 50, 1, entities, 500);
+    }
+
     private static HistorySample tpsSample(long ts, double tps) {
         return new HistorySample(ts, tps, 10.0, 50, 1, 100, 500);
     }
