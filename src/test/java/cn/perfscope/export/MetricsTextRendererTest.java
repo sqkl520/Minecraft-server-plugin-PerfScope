@@ -400,9 +400,13 @@ class MetricsTextRendererTest {
         for (String metric : new String[] {
             "perfscope_tps", "perfscope_heap_used_bytes", "perfscope_gc_collections_total",
             "perfscope_entities", "perfscope_chunks_loaded", "perfscope_players_online"}) {
-            assertFalse(out.contains(" " + metric + "{") || out.contains("\n" + metric + " "),
+            // 样本行形如 `metric{...} value` 或 `metric value`，且总是行首（前面是 \n 或字符串开头）。
+            // 不能只查 " metric{"——换行后面不是空格。
+            assertFalse(out.contains("\n" + metric + "{") || out.contains("\n" + metric + " "),
                 "metric '" + metric + "' must be absent (not zero) when its module is unavailable: "
                     + "a 0 reads as a real sample in Prometheus, and 'TPS 0' reads as 'server frozen'");
+            assertFalse(out.contains("# HELP " + metric + " "),
+                "a group that is not emitted must not leave its HELP/TYPE header behind either: " + metric);
         }
 
         // module_available 这一组本身必须还在——它正是告诉抓取方"别信这些缺失"的
