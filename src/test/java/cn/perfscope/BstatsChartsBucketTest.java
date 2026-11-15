@@ -78,13 +78,16 @@ class BstatsChartsBucketTest {
      * {@code "50000+"}。后果是 bStats 后台那张图读不出大服与小服的差别——
      * 而它存在的唯一目的就是回答"大服到底有多大"。</p>
      *
-     * <p>这条断言的写法是"同一批玩家数在两个桶下给出不同标签"：只要有人把玩家数
-     * 改回实体桶，它立刻红。</p>
+     * <p><b>这条曾写错过一次，值得记下</b>：第一版在测试里自己声明了两个数组
+     * （{@code entityBuckets} / {@code playerBuckets}）然后断言它们对不同数值给不同标签——
+     * 那是<b>自证</b>，完全不碰生产代码。变异验证当场揭穿：把 {@code register()} 里
+     * 的 {@code PLAYER_BUCKETS} 改回 {@code ENTITY_BUCKETS}，测试<b>照样绿</b>。
+     * 现在改为读生产类的<b>私有常量</b>，改动才会传到断言上。</p>
      */
     @Test
     void playerCountMustNotUseTheEntityBuckets() {
-        int[] entityBuckets = {0, 100, 500, 1000, 2500, 5000, 10000, 25000, 50000};
-        int[] playerBuckets = {0, 5, 10, 20, 50, 100, 200};
+        int[] entityBuckets = privateBuckets("ENTITY_BUCKETS");
+        int[] playerBuckets = privateBuckets("PLAYER_BUCKETS");
 
         assertNotEquals(
             BstatsCharts.bucket(30, entityBuckets, "50000+"),
@@ -98,6 +101,19 @@ class BstatsChartsBucketTest {
             "对照：实体桶对 30 的标签是 100——这正是玩家数不该用的那个桶");
     }
 
+    /** 读取生产类的私有分桶常量；改名时当场炸，而不是静默读到空数组。 */
+    private static int[] privateBuckets(String fieldName) {
+        try {
+            java.lang.reflect.Field f = BstatsCharts.class.getDeclaredField(fieldName);
+            f.setAccessible(true);
+            return (int[]) f.get(null);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(
+                "读不到 " + fieldName + "：分桶常量被改名或删除了？本测试必须在常量缺失时响亮失败，"
+                    + "否则它会退化成「自己声明数组、自己断言」的自证", e);
+        }
+    }
+
     /**
      * 手机版服务器常见的几十人规模必须能被玩家桶区分开。
      *
@@ -107,7 +123,7 @@ class BstatsChartsBucketTest {
      */
     @Test
     void playerBucketsDistinguishSmallServerSizes() {
-        int[] playerBuckets = {0, 5, 10, 20, 50, 100, 200};
+        int[] playerBuckets = privateBuckets("PLAYER_BUCKETS");
         assertNotEquals(BstatsCharts.bucket(3, playerBuckets, "200+"),
             BstatsCharts.bucket(8, playerBuckets, "200+"),
             "3 人与 8 人必须落进不同档——否则小服之间的差别也读不出来");
@@ -120,7 +136,7 @@ class BstatsChartsBucketTest {
     /** 玩家桶的溢出档标签是 "200+"，不是实体桶的 "50000+"。 */
     @Test
     void playerOverflowLabelMatchesItsScale() {
-        int[] playerBuckets = {0, 5, 10, 20, 50, 100, 200};
+        int[] playerBuckets = privateBuckets("PLAYER_BUCKETS");
         assertEquals("200+", BstatsCharts.bucket(500, playerBuckets, "200+"),
             "溢出标签必须与桶的量级匹配：玩家数写「50000+」会让后台标签荒谬");
     }
