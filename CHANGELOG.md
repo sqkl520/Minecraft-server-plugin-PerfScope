@@ -18,6 +18,22 @@
 
 > v1.4.4 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
 
+### Fixed — 钉住 maven-jar-plugin 版本（本地与 CI 构建出的 jar 不同字节）
+
+`pom.xml` 从没声明过 `maven-jar-plugin`，于是本地与 CI 各取各自 Maven 的默认版本：
+本地 3.4.1、CI 3.5.0。同一个 tag 构建出的两个 jar，`META-INF/MANIFEST.MF` 不同——
+CI 那份多一行 `Java-Version: 17`，`Created-By` 的版本号也不同。
+
+后果不是功能错误，是 **sha256 对不上**：发布产物与实际验证过的那个不是同一份字节。
+而「可复现构建」正是本项目 v1.3.0 起的一条发布门禁，
+`verify-release-artifact.mjs` 的第 [1] 项就在比这个。
+
+发现方式：发布 v1.4.4 前把 GitHub Release 上的 jar 下载回来与本地归档比 sha256，
+得到 `7771cddd…` vs `06cd287a…`。逐条目比对（94 个 entry）确认内容全等，
+唯一差异就在 MANIFEST —— 于是定位到插件版本未钉。
+
+与 `pom.xml` 里 surefire 那条注释同源：**不钉版本 = 把构建结果交给环境决定**。
+
 ---
 
 ## [1.4.4] — 2026-11-15 — 补丁版

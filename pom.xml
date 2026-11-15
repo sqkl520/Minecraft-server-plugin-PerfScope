@@ -105,6 +105,17 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.2.5</version>
             </plugin>
+            <!-- 2026-11-15：钉住 jar plugin 版本。不钉时本地与 CI 各取各自 Maven 的默认
+                 （实测本地 3.4.1、CI 3.5.0），于是同一个 tag 构建出的两个 jar 的
+                 META-INF/MANIFEST.MF 不同：CI 那份多一行 Java-Version、Created-By 版本号也不同。
+                 后果不是功能错误，是 sha256 对不上——发布产物与实际验证过的那个不是同一份字节，
+                 而"可复现构建"正是本项目 v1.3.0 起的一条发布门禁。
+                 与上面 surefire 那条同源：不钉版本 = 把构建结果交给环境决定。 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.1</version>
+            </plugin>
             <!-- maven-shade-plugin（回归仅服务 bStats 匿名统计，最小化配置）：
                  落点用独立前缀 cn.perfscope.shaded.bstats —— 绝不使用 cn.perfscope.lib.*，
                  保持 v1.0.0 事故指纹前缀零命中（release-check.ps1 与 CI 门禁原样作证）。
