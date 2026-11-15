@@ -135,6 +135,23 @@ const MUTATIONS = [
             + 'DailySummaryService 拿到 -1 后行为未定义',
         expect: 'HhMmTimeParsingTest',
     },
+    {
+        id: 'M11',
+        file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
+        from: '        checkSubsetContracts(snap);',
+        to: '',
+        desc: '拆掉 freezeCollections 的契约校验 —— 子集被破坏的快照会被原样发布出去',
+        expect: 'SnapshotSubsetInvariantTest',
+    },
+    {
+        id: 'M12',
+        file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
+        from: 'requireSubset(snap.platformSkipped, snap.disabledModules, "platformSkipped", "disabledModules",',
+        to: 'requireSubset(snap.platformSkipped, snap.unavailable, "platformSkipped", "unavailable",',
+        desc: '把 platformSkipped 的父集合从 disabledModules 放宽成 unavailable ——'
+            + '恰好绕过 Folia MSPT 那个真实漏洞，是「看起来对但拦不住」的典型',
+        expect: 'SnapshotSubsetInvariantTest',
+    },
 ];
 
 // ---------------------------------------------------------------------------
