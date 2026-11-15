@@ -159,6 +159,13 @@ class AlertCatalogTest {
      * <p>这一档的模板是 {@code {0}}=世界名、{@code {1}}=值，{@code argsFor} 的顺序因此不同。
      * 若有人把三个分支统一成一种顺序（正是 BLOCKER-1 的修法思路），
      * 这一档或上一档必然有一档丢东西。</p>
+     *
+     * <p><b>为什么要额外断言"不走兜底"</b>：这条用例最初只断言"正文含世界名与数值"。
+     * 变异验证发现 {@code needsScope} 改成恒 {@code false} 时它<b>照样绿</b>——
+     * 因为键缺失会落进 {@code message()} 的兜底分支，而兜底文案
+     * （{@code "entities_world warning (nether): 5000"}）<b>恰好也含世界名</b>。
+     * 于是"世界维度告警走的是 {@code .scoped} 模板"这件事，此前没有任何断言。
+     * 后果：用户看到的是英文结构化兜底而不是本地化文案——切了中文仍然是英文。</p>
      */
     @Test
     void scopedAlertMessageCarriesBothWorldAndValue() {
@@ -171,6 +178,27 @@ class AlertCatalogTest {
             "世界维度告警必须带数值，got: " + msg);
         assertTrue(msg.contains("nether"),
             "世界维度告警必须带世界名，否则服主不知道是哪个世界出的问题，got: " + msg);
+        assertNotEquals(
+            "entities_world warning (nether): 5000",
+            msg,
+            "不得落进 message() 的结构化兜底：那说明 .scoped 模板没被用到，"
+                + "用户看到的是英文兜底而不是本地化文案（切中文也仍是英文）");
+    }
+
+    /**
+     * 世界维度告警的<b>标题</b>同样必须走 {@code .scoped} 模板，不得落进兜底。
+     *
+     * <p>恢复通知是 {@code title + 已恢复}。若标题落进兜底，
+     * 中文服主会看到 {@code "entities_world warning 已恢复正常"}——半英半中的拼接，
+     * 而这条通知的作用正是让人确认"问题真的过去了"。</p>
+     */
+    @Test
+    void scopedAlertTitleIsLocalizedNotFallback() {
+        Alert world = Alert.measured("entities:world:nether", Alert.LEVEL_WARNING, 5000, "entities", 0L);
+        String title = AlertCatalog.title(world);
+        assertNotEquals("entities_world warning", title,
+            "标题不得落进 title() 的结构化兜底：恢复通知会变成半英半中的拼接。got: " + title);
+        assertFalse(title.isEmpty(), "标题不得为空");
     }
 
     /**
