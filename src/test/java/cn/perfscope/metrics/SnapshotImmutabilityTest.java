@@ -70,9 +70,13 @@ class SnapshotImmutabilityTest {
         s.topEntityChunks = new ArrayList<>(List.of(
             new ChunkHotspot("world", 1, 2, 900, "ZOMBIE", 720)));
 
-        s.unavailable = new LinkedHashSet<>(Set.of("gc"));
+        // 四个"为什么不可用"集合必须是契约自洽的样本：freezeCollections 现在会在发布前校验
+        // platformSkipped ⊆ disabledModules ⊆ unavailable 与 warmingUp ⊆ unavailable，
+        // 一张违反契约的样本根本走不到"检查是否不可变"那一步。
+        // 本类测的是"能不能改"，契约本身由 SnapshotSubsetInvariantTest 负责。
+        s.unavailable = new LinkedHashSet<>(Set.of("gc", "jvm", "entities"));
         s.warmingUp = new LinkedHashSet<>(Set.of("jvm"));
-        s.disabledModules = new LinkedHashSet<>(Set.of("gc"));
+        s.disabledModules = new LinkedHashSet<>(Set.of("gc", "entities"));
         s.platformSkipped = new LinkedHashSet<>(Set.of("entities"));
         return s;
     }

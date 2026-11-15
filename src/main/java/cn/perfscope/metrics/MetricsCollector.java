@@ -581,6 +581,9 @@ public class MetricsCollector {
      * 顺序打乱；这里用 {@code LinkedHashMap} 复制再包 unmodifiable，既防篡改又保留插入序。</p>
      */
     private static void freezeCollections(MetricsSnapshot snap) {
+        // 契约校验必须在拷贝之前：拷贝之后查的是副本，与检查"即将发布的那一份"是否同一对象
+        // 就取决于实现细节了。在源头查，"检查过的东西"与"发布出去的东西"按定义同一份。
+        checkSubsetContracts(snap);
         snap.entitiesByType = freezeMap(snap.entitiesByType);
         snap.entitiesByWorld = freezeMap(snap.entitiesByWorld);
         snap.chunksByWorld = freezeMap(snap.chunksByWorld);
@@ -607,6 +610,52 @@ public class MetricsCollector {
             return Map.of();
         }
         return Collections.unmodifiableMap(new LinkedHashMap<>(source));
+    }
+
+    /**
+     * 校验三个"为什么不可用"集合之间的子集契约（v1.4.5）。
+     *
+     * <p>契约写在 {@link MetricsSnapshot} 的字段 javadoc 里：
+     * {@code platformSkipped ⊆ disabledModules ⊆ unavailable}，另有
+     * {@code warmingUp ⊆ unavailable}。此前这四条<b>只有注释没有执法者</b>——五处写入点各写各的
+     * {@code add}，审计用 4 种方式破坏它们、526 个用例全绿。</p>
+     *
+     * <p><b>后果不是崩溃而是错标</b>，所以更该拦：{@code PerfScopeCommand} 的模块状态列按
+     * {@code platformSkipped → disabledModules → warmingUp → unavailable} 顺序判定，
+     * 任一子集漏标就掉进下一档——Folia 上明明写着「平台限制（跨 region 聚合不可靠，已自动跳过）」，
+     * 漏标后变成红色的「采集失败」，服主会去查日志、重装插件，而真正的原因在平台本身。
+     * 反向的多标会让 {@code MetricsTextRenderer} 整组隐去或渲染出假 0。</p>
+     *
+     * <p><b>为什么抛 {@link IllegalStateException} 而不是只打日志</b>：这是采集器内部的
+     * 自身一致性错误，不是用户配置问题，也不是可恢复的运行时状况。静默修补会让写错的采集代码
+     * 永远得不到纠正；打日志则会在默认日志级别下被淹没。抛在 {@code freezeCollections}——
+     * 快照发布的唯一出口——能让它在 CI 与开发期立刻暴露。生产环境里它会被
+     * {@code collectSync} 的任务边界接住并按模块级故障上报，不会拖垮采集循环。</p>
+     *
+     * @throws IllegalStateException 任一子集关系被违反，消息里点明集合名与多出的成员
+     */
+    private static void checkSubsetContracts(MetricsSnapshot snap) {
+        requireSubset(snap.disabledModules, snap.unavailable, "disabledModules", "unavailable",
+            "这些模块会被展示层渲染成「已禁用」，而其余 40 处判定只看 unavailable，"
+                + "于是 /metrics 会输出它们的 0 值——健康与盲点被互换");
+        requireSubset(snap.platformSkipped, snap.disabledModules, "platformSkipped", "disabledModules",
+            "展示层按 platformSkipped → disabledModules → unavailable 的顺序判定，"
+                + "漏标 disabledModules 会让平台限制掉进下一档，显示成红色的「采集失败」");
+        requireSubset(snap.warmingUp, snap.unavailable, "warmingUp", "unavailable",
+            "warmingUp 不在 unavailable 里时，预热中的模块会渲染成「健康」——首轮未就绪被当成正常");
+    }
+
+    /** {@code child ⊆ parent} 不成立时抛出，消息里列出多出的成员。 */
+    private static void requireSubset(Set<String> child, Set<String> parent,
+                                      String childName, String parentName, String why) {
+        if (child == null || parent == null || parent.containsAll(child)) {
+            return;
+        }
+        Set<String> extra = new LinkedHashSet<>(child);
+        extra.removeAll(parent);
+        throw new IllegalStateException(
+            "MetricsSnapshot 子集契约 " + childName + " ⊆ " + parentName + " 被违反：多出 " + extra
+                + "。" + why + "。修复点在采集侧——写 " + childName + " 时必须同时写 " + parentName + "。");
     }
 
     /**
@@ -1573,6 +1622,13 @@ public class MetricsCollector {
                 snap.msptMax = -1;
                 snap.msptSource = MetricsSnapshot.MSPT_SOURCE_UNKNOWN;
                 snap.unavailable.add(MetricsSnapshot.MODULE_MSPT);
+                // 9B-3 契约 platformSkipped ⊆ disabledModules ⊆ unavailable：
+                // Folia 的 getTickTimes/getAverageTickTime 方法都在但恒返回全零，属"平台使该指标
+                // 不可信"，与 entities/chunks 的跨 region 聚合不可靠同类。此前只标了 unavailable，
+                // 于是 /perfscope status 按 platformSkipped → disabledModules → warmingUp 顺序判定时
+                // 一路落空，渲染成红色的「采集失败」——把平台限制误报成故障。
+                snap.disabledModules.add(MetricsSnapshot.MODULE_MSPT);
+                snap.platformSkipped.add(MetricsSnapshot.MODULE_MSPT);
                 return;
             }
             collectMSPT_TPSFallback(snap);   // 纯 Bukkit/Spigot：全服 TPS 反推仍合理
