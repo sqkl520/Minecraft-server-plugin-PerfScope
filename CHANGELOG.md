@@ -3,7 +3,7 @@
 本项目：**PerfScope** —— Minecraft 服务器性能监测插件（Paper 1.20.4+ / Purpur / Pufferfish / Folia / Leaves，Java 17）。
 后台定时采集性能快照 → 游戏内 17 个子命令一屏诊断 → HTML/TXT/JSON 报告导出 → ActionBar 实时监测 → 阈值告警。
 
-> **仓库**：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope> ｜ **版本**：`1.4.3`（当前正式版，补丁）｜ **上一个正式版**：`1.4.2`（`versions/PerfScope-1.4.2.jar`）｜ `[Unreleased]` 当前为空
+> **仓库**：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope> ｜ **版本**：`1.4.4`（当前正式版，补丁）｜ **上一个正式版**：`1.4.3`（`versions/PerfScope-1.4.3.jar`）｜ `[Unreleased]` 当前为空
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/)。v1.2「找得到」开发周期已收尾，各段以 **Wave（开发波次）** 划分并标注对应提交哈希。
 
@@ -16,7 +16,49 @@
 
 ## [Unreleased]
 
-> v1.4.3 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
+> v1.4.4 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
+
+---
+
+## [1.4.4] — 2026-11-15 — 补丁版
+
+> 本节是给使用者看的：只有**改了什么、有什么影响**。
+
+**两个修复，第一个是致命的。**
+
+### 1. 模块关掉时，`/metrics` 仍然报 0（致命）
+
+如果你在 `config.yml` 里把某个模块关了（例如 `tps.enabled: false`），
+`/metrics` **不会**把那一组指标藏起来，而是发出 `perfscope_tps{period="1m"} 0`。
+
+Grafana 上这读作「服务器 TPS 归零、彻底冻结」——而真实原因只是你自己关了那个模块。
+任何 `perfscope_tps < 15` 的告警规则，在这种服上会**永久 firing**。
+一个"以防万一配的"安全规则变成永久噪音，然后被静音，然后真正出事时没人看。
+
+同样地：Folia 上 `perfscope_entities 0` 是「一个实体都没有」的硬断言；
+关掉内存模块后 `perfscope_heap_used_bytes 0` 是「JVM 一点内存都不用」。
+
+现在模块不可用时**整组指标不输出**。缺行让 Grafana 显示 gap——这正是 README 一直
+承诺的行为（"缺行比画一条贴底的假线诚实"），此前只有 CPU/MSPT 做到了。
+
+### 2. `/perfscope trend` 的数据缺口永远是 60 秒
+
+如果你把 `history.sample-interval-seconds` 调大过（比如 300 秒），trend 会把**每一对**
+相邻样本都报成"数据缺口"——判据硬用 60 秒算，而实际间隔是 300 秒。
+现在它读你配的值。
+
+### 顺带：CI 与门禁的修复（对使用者不可见）
+
+- CI 自 11-09 起 57 次运行全部失败，原因是配置兼容检查在 CI 环境找不到"上一个发布的基线"
+  （`versions/*.jar` 被 gitignore）。现在从上一个 release tag 读。**这也是为什么
+  1.4.0～1.4.3 的 GitHub Release 一直没有生成。**
+- 三个检查脚本 `node tools/xxx.mjs` 直接跑会因默认路径多拼一层而失败，现已修正。
+
+### 升级
+
+无配置变更、无行为变更（除上述修复），直接替换 jar 即可。
+
+---
 
 ### Fixed — `/perfscope trend` 的数据缺口判据永远是 60 秒
 

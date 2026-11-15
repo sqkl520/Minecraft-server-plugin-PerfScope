@@ -7,7 +7,21 @@
 
 | 版本 | 文件 | 说明 |
 |---|---|---|
-| **1.4.3** | `PerfScope-1.4.3.jar` | **推荐使用**（最新已发布版本）。**补丁版**：日报的「最低 TPS」与 `/perfscope history` 的「最差时刻」永远报不出卡死。
+| **1.4.4** | `PerfScope-1.4.4.jar` | **推荐使用**（最新已发布版本）。**补丁版**，两个修复：
+
+① **致命**：模块关掉时 `/metrics` 仍报 0。`tps.enabled: false` 会发出 `perfscope_tps 0`，
+Grafana 读作"服务器冻结"，任何 `perfscope_tps < 15` 的告警在这种服上永久 firing。
+现在模块不可用时整组指标不输出，缺行让 Grafana 显示 gap——这正是 README 一直承诺的行为，
+此前只有 CPU/MSPT 做到。
+
+② `/perfscope trend` 的数据缺口判据永远是 60 秒（switch 缺 case），把 `sample-interval-seconds`
+调大过的服刷满假缺口。
+
+顺带修了 CI（自 11-09 起 57 次全红，导致 1.4.0～1.4.3 的 GitHub Release 从未生成）与三个门禁的默认路径。
+<br>无配置变更、无行为变更（除上述修复）。<br>
+sha256 `06cd287a…`<br>
+GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.4.4> |
+| 1.4.3 | `PerfScope-1.4.3.jar` | **补丁版**：日报的「最低 TPS」与 `/perfscope history` 的「最差时刻」永远报不出卡死。
 `HistoryStore.lowestTpsSince()` 用 `tps1m <= 0` 过滤样本，而 `tps1m` 没有 -1 哨兵（TPS 不可用时的采样整条不入历史），
 所以 `0` 只可能是服务器真的冻结了——那正是最差的时刻。昨晚卡死过，日报却温顺地写「最低 18.5 TPS」。
 现在只排除负哨兵。求峰值的 `peakTpsSince` 保持过滤 0（0 不可能高于任何正值）——同一个 0，求最小值时必须保留、
