@@ -327,9 +327,13 @@ const MUTATIONS = [
     },
     {
         id: 'M32',
+        // 860 行（isJvmStale）与 2284 行（isStale）的返回语句文本完全相同，
+        // 所以必须带上前一行的 `long ref = ...` 才能唯一定位到 isJvmStale。
         file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
-        from: '        return System.currentTimeMillis() - startedAtMs > Math.max(WARMUP_WINDOW_MS, staleThresholdMs());',
-        to: '        return System.currentTimeMillis() - startedAtMs > WARMUP_WINDOW_MS;',
+        from: '        long ref = last > 0L ? last : startedAtMs;\n'
+            + '        return System.currentTimeMillis() - ref > Math.max(WARMUP_WINDOW_MS, staleThresholdMs());',
+        to: '        long ref = last > 0L ? last : startedAtMs;\n'
+            + '        return System.currentTimeMillis() - ref > WARMUP_WINDOW_MS;',
         desc: 'isJvmStale 只比宽限期不取 max —— update_interval=100 的服务器在 10 秒后就报 stale，'
             + '比它自己的采集节拍（15 秒）还急，每轮误报一次',
         expect: 'StalenessQueryTest',
