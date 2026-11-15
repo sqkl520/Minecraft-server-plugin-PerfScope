@@ -33,7 +33,7 @@ const argOf = (name, dflt) => {
   const i = argv.indexOf(name);
   return i >= 0 && i + 1 < argv.length ? argv[i + 1] : dflt;
 };
-const REPO = path.resolve(argOf('--repo', path.join(HERE, '..', 'PerfScope')));
+const REPO = path.resolve(argOf('--repo', path.join(HERE, '..')));
 const STRICT = argv.includes('--strict');
 const AS_JSON = argv.includes('--json');
 const SRC = path.join(REPO, 'src', 'main', 'java');

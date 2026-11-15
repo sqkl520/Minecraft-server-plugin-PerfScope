@@ -54,14 +54,37 @@ const AS_JSON = argv.includes('--json');
 const STRICT = argv.includes('--strict');
 const ONLY = argOf('--scenario', '');
 
-const REPO = path.resolve(argOf('--repo', path.join(HERE, '..', 'PerfScope')));
-const HARNESS = path.resolve(argOf('--harness', path.join(HERE, '..', '..', 'testharness')));
+const REPO = path.resolve(argOf('--repo', path.join(HERE, '..')));
+
+/**
+ * 找 testharness 目录：从仓库根逐层向上找，最多 4 层。
+ *
+ * <p>它不在仓库里，也不总在固定的相对位置 —— 本项目实际布局是
+ * {@code <Server plugin>/testharness}，而仓库在 {@code <Server plugin>/PerfScope/PerfScope}，
+ * 也就是要往上 3 层。原先硬编码 {@code HERE/../../testharness}（2 层），差一层。</p>
+ *
+ * <p>向上找而不是写死层数，是因为这个脚本不该在别人换了目录结构时静默给一个空结果。</p>
+ */
+function findHarness() {
+  let dir = REPO;
+  for (let i = 0; i < 4; i++) {
+    const candidate = path.join(dir, 'testharness');
+    if (fs.existsSync(path.join(candidate, 'tests', 'scenarios'))) return candidate;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return path.join(REPO, '..', '..', 'testharness');   // 找不到时给一个可能的位置用于报错
+}
+
+const HARNESS = path.resolve(argOf('--harness', findHarness()));
 const SCEN_DIR = path.join(HARNESS, 'tests', 'scenarios');
 const SRC = path.join(REPO, 'src', 'main', 'java');
 
 if (!fs.existsSync(SCEN_DIR)) {
   console.error(`ERROR: scenario directory not found: ${SCEN_DIR}`);
-  console.error('       pass --harness <testharness dir>; it lives beside the plugin parent folder');
+  console.error('       searched up to 4 levels above the repo root for a "testharness" folder.');
+  console.error('       pass --harness <testharness dir> to point at it explicitly.');
   process.exit(2);
 }
 

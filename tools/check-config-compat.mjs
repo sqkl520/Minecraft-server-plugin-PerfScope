@@ -44,7 +44,7 @@ const argOf = (name, dflt) => {
 };
 const AS_JSON = argv.includes('--json');
 
-const REPO = path.resolve(argOf('--repo', path.join(HERE, '..', 'PerfScope')));
+const REPO = path.resolve(argOf('--repo', path.join(HERE, '..')));
 const SRC_CONFIG = path.join(REPO, 'src', 'main', 'resources', 'config.yml');
 const CONFIG_MANAGER = path.join(REPO, 'src', 'main', 'java', 'cn', 'perfscope', 'config', 'ConfigManager.java');
 
