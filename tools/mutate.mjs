@@ -190,6 +190,24 @@ const MUTATIONS = [
             + 'reload 后旧任务残留并与新实例同时跑',
         expect: 'TaskHandleContractTest',
     },
+    {
+        id: 'M17',
+        file: 'src/main/java/cn/perfscope/compat/FoliaSchedulerBridge.java',
+        from: '        return ignored -> task.run();',
+        to: '        return ignored -> { };',
+        desc: 'wrap 返回空 Consumer —— Folia 上所有定时任务空转，'
+            + '采集/告警/探针全停，而调度器与日志都显示正常（最隐蔽的失效形态）',
+        expect: 'FoliaSchedulerBridgeContractTest',
+    },
+    {
+        id: 'M18',
+        file: 'src/main/java/cn/perfscope/compat/FoliaSchedulerBridge.java',
+        from: '        ((ScheduledTask) scheduledTask).cancel();',
+        to: '        if (scheduledTask instanceof ScheduledTask st) { st.cancel(); }',
+        desc: 'cancel 加防御性 instanceof 检查后静默 return —— '
+            + '把「句柄来源不对」从可见失败变成无声的功能停用（javadoc 明确要求抛）',
+        expect: 'FoliaSchedulerBridgeContractTest',
+    },
 ];
 
 // ---------------------------------------------------------------------------
