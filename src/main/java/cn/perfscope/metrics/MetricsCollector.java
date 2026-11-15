@@ -535,6 +535,7 @@ public class MetricsCollector {
         // 若缓存下一次刷新复用同一实例，最多 300 份历史快照会同时看到"新值"（历史被篡改）。
         // 这里把缓存容器本身在刷新时复制（见 refreshXxxCache），此处再把快照侧集合固化为不可变副本，
         // 保证任何消费方误改都只影响自己那一份（MetricsSnapshot 类本身不改）。
+        repairSubsetContractsBeforeFreeze(snap);
         freezeCollections(snap);
 
         // v1.3.0 -04：把本周期耗时写进快照。放在 freezeCollections 之后、入 history 之前——
@@ -583,7 +584,6 @@ public class MetricsCollector {
     private static void freezeCollections(MetricsSnapshot snap) {
         // 契约校验必须在拷贝之前：拷贝之后查的是副本，与检查"即将发布的那一份"是否同一对象
         // 就取决于实现细节了。在源头查，"检查过的东西"与"发布出去的东西"按定义同一份。
-        checkSubsetContracts(snap);
         snap.entitiesByType = freezeMap(snap.entitiesByType);
         snap.entitiesByWorld = freezeMap(snap.entitiesByWorld);
         snap.chunksByWorld = freezeMap(snap.chunksByWorld);
@@ -613,49 +613,102 @@ public class MetricsCollector {
     }
 
     /**
-     * 校验三个"为什么不可用"集合之间的子集契约（v1.4.5）。
+     * 发布前的契约兜底：违反子集关系时就地补齐并限频告警（见 {@link #repairSubsetContracts}）。
+     *
+     * <p>与 {@code safeCollect} 的日志限频同口径：首次立即记，之后每 5 分钟一条——
+     * 契约违反是代码 bug，理论上修一次就消失；若它每周期都发生，说明写入点又漏了一个，
+     * 这时需要的是"看得见"而不是"每秒一条把日志刷爆"。</p>
+     */
+    private void repairSubsetContractsBeforeFreeze(MetricsSnapshot snap) {
+        int before = SUBSET_VIOLATIONS.get();
+        if (!repairSubsetContracts(snap)) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (before == 0 || now - lastSubsetViolationLogAtMs >= SUBSET_VIOLATION_LOG_INTERVAL_MS) {
+            lastSubsetViolationLogAtMs = now;
+            plugin.getLogger().warning("[PerfScope] " + SUBSET_VIOLATION_DETAIL
+                + "。这是采集侧的自身一致性 bug，已自动修正以免影响展示；请报告给开发者");
+        }
+    }
+
+    /** 子集契约累计违反次数（仅用于"首次立即记"的判定与自检）。 */
+    private static final java.util.concurrent.atomic.AtomicInteger SUBSET_VIOLATIONS =
+        new java.util.concurrent.atomic.AtomicInteger();
+
+    /** 最近一次违反的详情；仅在违反时写入，告警文案用它。 */
+    private static volatile String SUBSET_VIOLATION_DETAIL = "";
+
+    /** 子集契约违反的日志限频间隔（与 safeCollect 的模块失败日志同口径）。 */
+    private static final long SUBSET_VIOLATION_LOG_INTERVAL_MS = 5 * 60 * 1000L;
+
+    /** 上次记录子集契约违反的时刻。 */
+    private volatile long lastSubsetViolationLogAtMs;
+
+    /**
+     * 校验三个"为什么不可用"集合之间的子集契约（v1.4.5），<b>违反时就地修复并告警，不抛出</b>。
      *
      * <p>契约写在 {@link MetricsSnapshot} 的字段 javadoc 里：
      * {@code platformSkipped ⊆ disabledModules ⊆ unavailable}，另有
      * {@code warmingUp ⊆ unavailable}。此前这四条<b>只有注释没有执法者</b>——五处写入点各写各的
      * {@code add}，审计用 4 种方式破坏它们、526 个用例全绿。</p>
      *
-     * <p><b>后果不是崩溃而是错标</b>，所以更该拦：{@code PerfScopeCommand} 的模块状态列按
+     * <p><b>后果不是崩溃而是错标</b>：{@code PerfScopeCommand} 的模块状态列按
      * {@code platformSkipped → disabledModules → warmingUp → unavailable} 顺序判定，
-     * 任一子集漏标就掉进下一档——Folia 上明明写着「平台限制（跨 region 聚合不可靠，已自动跳过）」，
-     * 漏标后变成红色的「采集失败」，服主会去查日志、重装插件，而真正的原因在平台本身。
-     * 反向的多标会让 {@code MetricsTextRenderer} 整组隐去或渲染出假 0。</p>
+     * 任一子集漏标就掉进下一档——Folia 上明明该显示「平台限制（跨 region 聚合不可靠，已自动跳过）」，
+     * 漏标后变成红色的「采集失败」，服主会去查日志、重装插件，而真正的原因在平台本身。</p>
      *
-     * <p><b>为什么抛 {@link IllegalStateException} 而不是只打日志</b>：这是采集器内部的
-     * 自身一致性错误，不是用户配置问题，也不是可恢复的运行时状况。静默修补会让写错的采集代码
-     * 永远得不到纠正；打日志则会在默认日志级别下被淹没。抛在 {@code freezeCollections}——
-     * 快照发布的唯一出口——能让它在 CI 与开发期立刻暴露。生产环境里它会被
-     * {@code collectSync} 的任务边界接住并按模块级故障上报，不会拖垮采集循环。</p>
+     * <p><b>为什么修复而不是抛异常</b>：本方法由 {@code collectSync} 在定时任务里调用，
+     * 而那条定时任务<b>外层没有 try/catch</b>（见 {@code MetricsCollector.start} 的
+     * {@code runGlobalTimer}）。抛出会让 {@code freezeCollections} 之后的全部逻辑跳过——
+     * 不写 history、不更新缓存、不发布快照——而且每周期抛一次，把一个"显示错标"升级成
+     * "采集彻底停摆"。契约违反是采集侧的自身一致性 bug，正确的处置是纠错 + 让它在日志里可见，
+     * 而不是让整个监测功能陪葬。</p>
      *
-     * @throws IllegalStateException 任一子集关系被违反，消息里点明集合名与多出的成员
+     * <p>修复方向是<b>补齐父集合</b>而不是剔掉子集合的成员：子集合记录的是更精确的原因
+     * （"服主关掉" / "平台限制" / "预热中"），丢掉它只会让展示层退回笼统的「不可用」。
+     * 补 {@code unavailable} 还顺带修正了 40 处只看 {@code unavailable} 的消费点。</p>
+     *
+     * @return 是否发生过修复（调用方据此决定要不要打日志）
      */
-    private static void checkSubsetContracts(MetricsSnapshot snap) {
-        requireSubset(snap.disabledModules, snap.unavailable, "disabledModules", "unavailable",
-            "这些模块会被展示层渲染成「已禁用」，而其余 40 处判定只看 unavailable，"
-                + "于是 /metrics 会输出它们的 0 值——健康与盲点被互换");
-        requireSubset(snap.platformSkipped, snap.disabledModules, "platformSkipped", "disabledModules",
-            "展示层按 platformSkipped → disabledModules → unavailable 的顺序判定，"
-                + "漏标 disabledModules 会让平台限制掉进下一档，显示成红色的「采集失败」");
-        requireSubset(snap.warmingUp, snap.unavailable, "warmingUp", "unavailable",
-            "warmingUp 不在 unavailable 里时，预热中的模块会渲染成「健康」——首轮未就绪被当成正常");
+    private static boolean repairSubsetContracts(MetricsSnapshot snap) {
+        // 跑两遍：契约是可传递的（platformSkipped ⊆ disabledModules ⊆ unavailable），
+        // 把 platformSkipped 的成员补进 disabledModules 之后，它们才开始参与
+        // disabledModules ⊆ unavailable 的判定——单遍修不完这条链。
+        // 两遍足够：第一遍建立 disabledModules 的新成员，第二遍把新成员补进 unavailable。
+        // 不做 while 循环：输入只有三个集合、三条规则，两遍之后必然收敛；
+        // 用循环反而会掩盖"某条规则写反了导致永不收敛"这种真 bug。
+        boolean repaired = false;
+        for (int pass = 0; pass < 2; pass++) {
+            repaired |= requireSubset(snap.disabledModules, snap.unavailable,
+                    "disabledModules", "unavailable")
+                | requireSubset(snap.platformSkipped, snap.disabledModules,
+                    "platformSkipped", "disabledModules")
+                | requireSubset(snap.warmingUp, snap.unavailable, "warmingUp", "unavailable");
+        }
+        return repaired;
     }
 
-    /** {@code child ⊆ parent} 不成立时抛出，消息里列出多出的成员。 */
-    private static void requireSubset(Set<String> child, Set<String> parent,
-                                      String childName, String parentName, String why) {
+    /**
+     * {@code child ⊆ parent} 不成立时把多出的成员补进 {@code parent}。
+     *
+     * <p>用位或（{@code |}）而非短路或（{@code ||}）调用：三条契约必须各自独立检查完，
+     * 前一条修复不得掩盖后一条的违反。</p>
+     *
+     * @return 是否修复过
+     */
+    private static boolean requireSubset(Set<String> child, Set<String> parent,
+                                         String childName, String parentName) {
         if (child == null || parent == null || parent.containsAll(child)) {
-            return;
+            return false;
         }
         Set<String> extra = new LinkedHashSet<>(child);
         extra.removeAll(parent);
-        throw new IllegalStateException(
-            "MetricsSnapshot 子集契约 " + childName + " ⊆ " + parentName + " 被违反：多出 " + extra
-                + "。" + why + "。修复点在采集侧——写 " + childName + " 时必须同时写 " + parentName + "。");
+        parent.addAll(extra);
+        SUBSET_VIOLATIONS.addAndGet(1);
+        SUBSET_VIOLATION_DETAIL = "MetricsSnapshot 子集契约 " + childName + " ⊆ " + parentName
+            + " 被违反：多出 " + extra + "（已补进 " + parentName + "）";
+        return true;
     }
 
     /**

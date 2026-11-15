@@ -114,7 +114,7 @@ class SnapshotSubsetInvariantTest {
         MetricsSnapshot snap = snapshot();
         snap.unavailable.add(MetricsSnapshot.MODULE_MSPT);
         snap.platformSkipped.add(MetricsSnapshot.MODULE_MSPT);   // 忘了 disabledModules
-        assertViolation(snap, "platformSkipped", "disabledModules");
+        assertRepaired(snap, "platformSkipped", "disabledModules");
     }
 
     /** {@code platformSkipped} 成员不在 {@code unavailable} 里同样违反契约（两级都断）。 */
@@ -122,7 +122,7 @@ class SnapshotSubsetInvariantTest {
     void platformSkippedOutsideUnavailableIsRejected() {
         MetricsSnapshot snap = snapshot();
         snap.platformSkipped.add(MetricsSnapshot.MODULE_ENTITIES);
-        assertViolation(snap, "platformSkipped", "disabledModules");
+        assertRepaired(snap, "platformSkipped", "disabledModules");
     }
 
     /** 破坏 {@code disabledModules ⊆ unavailable}：标了禁用却没标不可用。 */
@@ -130,7 +130,7 @@ class SnapshotSubsetInvariantTest {
     void disabledModulesOutsideUnavailableIsRejected() {
         MetricsSnapshot snap = snapshot();
         snap.disabledModules.add(MetricsSnapshot.MODULE_MEMORY);
-        assertViolation(snap, "disabledModules", "unavailable");
+        assertRepaired(snap, "disabledModules", "unavailable");
     }
 
     /**
@@ -143,17 +143,41 @@ class SnapshotSubsetInvariantTest {
     void warmingUpOutsideUnavailableIsRejected() {
         MetricsSnapshot snap = snapshot();
         snap.warmingUp.add(MetricsSnapshot.MODULE_CPU);
-        assertViolation(snap, "warmingUp", "unavailable");
+        assertRepaired(snap, "warmingUp", "unavailable");
+    }
+
+    /**
+     * 契约是<b>可传递</b>的：把 {@code platformSkipped} 的成员补进 {@code disabledModules} 后，
+     * 它们才开始参与 {@code disabledModules ⊆ unavailable} 的判定——一遍修不完整条链。
+     *
+     * <p>这条用例专杀"单遍实现"：初始状态只 add 了 {@code platformSkipped}，两个父集合都缺它。
+     * 单遍修复先补 {@code disabledModules} 就返回，{@code disabledModules} 里的新成员永远进不了
+     * {@code unavailable}——而 {@code PerfScopeCommand} 只看后者的那 40 处消费点仍然把它当健康。</p>
+     */
+    @Test
+    void transitiveChainIsRepairedInOneCall() {
+        MetricsSnapshot snap = snapshot();
+        snap.platformSkipped.add(MetricsSnapshot.MODULE_ENTITIES);   // 两级父集合都缺它
+        assertRepaired(snap, "platformSkipped", "disabledModules");
+        assertTrue(snap.unavailable.contains(MetricsSnapshot.MODULE_ENTITIES),
+            "传递修复必须一路补到 unavailable：否则 disabledModules ⊆ unavailable 仍被违反，"
+                + "而只看 unavailable 的 40 处消费点会把这个模块当成健康");
+        assertTrue(snap.disabledModules.contains(MetricsSnapshot.MODULE_ENTITIES));
     }
 
     /**
      * 空快照合法：四条关系对空集恒真，不得误报。
      *
-     * <p>没有这一条，一个"只要集合不为空就炸"的实现也能过上面全部断言。</p>
+     * <p>没有这一条，一个"只要集合不为空就炸"的实现也能过上面全部断言。
+     * 同时锁住"合法输入返回 false"——否则日志会被无意义的修复告警刷满。</p>
      */
     @Test
     void emptySnapshotPassesContracts() {
         MetricsSnapshot snap = snapshot();
+        boolean repaired = (Boolean) TestObjects.invoke(MetricsCollector.class,
+            "repairSubsetContracts", new Class<?>[]{MetricsSnapshot.class}, snap);
+        assertFalse(repaired, "空快照没有任何契约违反，不该报告修复过");
+        assertContracts(snap);
         freeze(snap);
         assertContracts(snap);
         assertTrue(snap.unavailable.isEmpty());
@@ -208,33 +232,22 @@ class SnapshotSubsetInvariantTest {
     }
 
     /**
-     * 断言 {@code freeze} 因违反 {@code child ⊆ parent} 而抛出。
+     * 断言 {@code repairSubsetContracts} 把 {@code child ⊆ parent} 的违反修好。
      *
-     * <p>接受两种拦截形式：{@link IllegalStateException}（生产期兜底）或
-     * {@link AssertionError}（开发期断言）。刻意不锁死具体异常类型——
-     * 那是实现细节，而"必须被拦下"才是契约。</p>
+     * <p><b>为什么测"修复"而不是"抛出"</b>：本方法由 {@code collectSync} 在定时任务里调用，
+     * 那条定时任务外层没有 try/catch（{@code start()} 的 {@code runGlobalTimer}）。
+     * 抛出会让 {@code freezeCollections} 之后的全部逻辑跳过——不写 history、不更新缓存、
+     * 不发布快照——每周期抛一次，把一个"显示错标"升级成"采集彻底停摆"。
+     * 所以契约违反的处置是<b>纠错 + 让它在日志里可见</b>。</p>
      */
-    private static void assertViolation(MetricsSnapshot snap, String child, String parent) {
-        Set<String> childSet = setOf(snap, child);
-        Set<String> parentSet = setOf(snap, parent);
-        Throwable thrown = null;
-        try {
-            freeze(snap);
-        } catch (IllegalStateException | AssertionError e) {
-            thrown = e;
-        }
-        if (thrown == null) {
-            assertFalse(true,
-                "契约 " + child + " ⊆ " + parent + " 被违反，但 freezeCollections 静默放行了。"
-                    + "违反的成员：" + minus(childSet, parentSet)
-                    + " —— 这张快照会被原样发布出去");
-        }
-        String msg = String.valueOf(thrown.getMessage());
-        assertTrue(msg.contains(child) || msg.contains(parent),
-            "拦截时的消息必须点出违反的是哪条契约（实际：" + msg + "）");
+    private static void assertRepaired(MetricsSnapshot snap, String child, String parent) {
+        boolean repaired = (Boolean) TestObjects.invoke(MetricsCollector.class,
+            "repairSubsetContracts", new Class<?>[]{MetricsSnapshot.class}, snap);
+        assertTrue(repaired, "契约 " + child + " ⊆ " + parent + " 被违反，但未被修复");
+        assertContracts(snap);
     }
 
-    /** 按名字取集合字段，只为让 {@link #assertViolation} 的调用处能传字符串。 */
+    /** 按名字取集合字段，只为让 {@link #assertRepaired} 的调用处能传字符串。 */
     private static Set<String> setOf(MetricsSnapshot snap, String name) {
         @SuppressWarnings("unchecked")
         Set<String> s = (Set<String>) TestObjects.getField(MetricsSnapshot.class, snap, name);

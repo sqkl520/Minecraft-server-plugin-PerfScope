@@ -138,7 +138,7 @@ const MUTATIONS = [
     {
         id: 'M11',
         file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
-        from: '        checkSubsetContracts(snap);',
+        from: '        repairSubsetContractsBeforeFreeze(snap);',
         to: '',
         desc: '拆掉 freezeCollections 的契约校验 —— 子集被破坏的快照会被原样发布出去',
         expect: 'SnapshotSubsetInvariantTest',
@@ -146,8 +146,10 @@ const MUTATIONS = [
     {
         id: 'M12',
         file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
-        from: 'requireSubset(snap.platformSkipped, snap.disabledModules, "platformSkipped", "disabledModules",',
-        to: 'requireSubset(snap.platformSkipped, snap.unavailable, "platformSkipped", "unavailable",',
+        from: '                | requireSubset(snap.platformSkipped, snap.disabledModules,\n'
+            + '                    "platformSkipped", "disabledModules")',
+        to: '                | requireSubset(snap.platformSkipped, snap.unavailable,\n'
+            + '                    "platformSkipped", "unavailable")',
         desc: '把 platformSkipped 的父集合从 disabledModules 放宽成 unavailable ——'
             + '恰好绕过 Folia MSPT 那个真实漏洞，是「看起来对但拦不住」的典型',
         expect: 'SnapshotSubsetInvariantTest',
@@ -155,11 +157,10 @@ const MUTATIONS = [
     {
         id: 'M13',
         file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
-        from: '                snap.disabledModules.add(MetricsSnapshot.MODULE_MSPT);\n'
-            + '                snap.platformSkipped.add(MetricsSnapshot.MODULE_MSPT);',
-        to: '',
-        desc: '退回 Folia MSPT 的旧写法（只标 unavailable）—— 契约校验会当场拦下，'
-            + '这正是修复前真实存在的状态',
+        from: '        for (int pass = 0; pass < 2; pass++) {',
+        to: '        for (int pass = 0; pass < 1; pass++) {',
+        desc: '把级联修复从两遍砍成一编 —— platformSkipped 的新成员进不了 unavailable，'
+            + '只看 unavailable 的 40 处消费点仍然把它当健康',
         expect: 'SnapshotSubsetInvariantTest',
     },
 ];
