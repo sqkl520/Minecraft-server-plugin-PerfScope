@@ -152,6 +152,16 @@ const MUTATIONS = [
             + '恰好绕过 Folia MSPT 那个真实漏洞，是「看起来对但拦不住」的典型',
         expect: 'SnapshotSubsetInvariantTest',
     },
+    {
+        id: 'M13',
+        file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
+        from: '                snap.disabledModules.add(MetricsSnapshot.MODULE_MSPT);\n'
+            + '                snap.platformSkipped.add(MetricsSnapshot.MODULE_MSPT);',
+        to: '',
+        desc: '退回 Folia MSPT 的旧写法（只标 unavailable）—— 契约校验会当场拦下，'
+            + '这正是修复前真实存在的状态',
+        expect: 'SnapshotSubsetInvariantTest',
+    },
 ];
 
 // ---------------------------------------------------------------------------
