@@ -60,6 +60,20 @@ final class BstatsCharts {
     /** 已加载区块数量级分桶的边界（上界含）。最后一桶为 "100000+"。 */
     private static final int[] CHUNK_BUCKETS = {0, 100, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000};
 
+    /**
+     * 玩家数分桶的边界（上界含）。最后一桶为 "200+"。
+     *
+     * <p><b>为什么必须有自己的一套</b>：此前 {@code peak_players_bucket} 复用了
+     * {@link #ENTITY_BUCKETS}，于是玩家数 0–100 全被合并成同一条柱子、溢出标签写
+     * {@code "50000+"}。后果是 bStats 后台那张图<b>读不出大服与小服的差别</b>——
+     * 而这张图存在的唯一目的就是回答"大服到底有多大"（见类注释）。
+     * 这类错误零异常、零日志，只在遥测后台的图形上体现，属于"数据不可信但没人查"的典型。</p>
+     *
+     * <p>边界取自 Minecraft 实际可及的量级：原版服务器在线人数很少超过 20，
+     * 大型服务器（Hypixel 量级之外）通常 200 以内，故 200 作为溢出档已足够区分。</p>
+     */
+    private static final int[] PLAYER_BUCKETS = {0, 5, 10, 20, 50, 100, 200};
+
     private BstatsCharts() {
     }
 
@@ -122,7 +136,7 @@ final class BstatsCharts {
         }));
         addSafely(metrics, plugin, () -> new SimpleBarChart("peak_players_bucket", () -> {
             MetricsSnapshot snap = collector.getLatest();
-            return snap == null ? Map.of() : single(bucket(snap.playerCount, ENTITY_BUCKETS, "50000+"));
+            return snap == null ? Map.of() : single(bucket(snap.playerCount, PLAYER_BUCKETS, "200+"));
         }));
         addSafely(metrics, plugin, () -> new SimpleBarChart("heap_max_mb_bucket", () -> {
             MetricsSnapshot snap = collector.getLatest();

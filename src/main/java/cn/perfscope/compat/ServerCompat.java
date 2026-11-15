@@ -292,7 +292,14 @@ public final class ServerCompat {
         MsptCapabilityState.Result result = before.transition(
             isFolia, TICK_TIMES_METHOD_PRESENT, AVG_TICK_METHOD_PRESENT, primarySampleOk, avgTickOk);
 
-        // 单次写回：避免"字段改了一半"的中间态被并发读者看到。
+        // 写回 volatile 字段。**这不是原子的**：五个 volatile 写之间没有内存屏障把它们绑成一个，
+        // 并发读者仍可能看到"能力位已降但原因键还是旧的"这类中间态（窗口是纳秒级）。
+        // 之所以接受：真实跨线程读者只有三个（报告线程的 msptUnavailableCause、
+        // Prometheus 线程的 isTpsGlobalScope、bStats 线程的 getServerName），
+        // 它们最坏只影响一行标注文案，而把五个字段收进一个 volatile 不可变对象会让
+        // 43 处既有读点全部改成 getter——那正是本类第 57-58 行 javadoc 明确要避免的。
+        // 若将来这个窗口的后果变严重（例如某读者据它做分支决策），正确的修法是收进一个
+        // volatile 快照对象，而不是在这里加 synchronized。
         PAPER_MSPT_AVAILABLE = result.state.msptAvailable;
         PAPER_AVG_TICK_AVAILABLE = result.state.avgTickAvailable;
         msptUnavailableReasonKey = result.state.reasonKey;

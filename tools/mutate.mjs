@@ -278,6 +278,42 @@ const MUTATIONS = [
             + '在 tick 计时恒零的 Paper 分支上宣称「精确」',
         expect: 'MsptCapabilityStateTest',
     },
+    {
+        id: 'M27',
+        file: 'src/main/java/cn/perfscope/BstatsCharts.java',
+        from: '            return snap == null ? Map.of() : single(bucket(snap.playerCount, PLAYER_BUCKETS, "200+"));',
+        to: '            return snap == null ? Map.of() : single(bucket(snap.playerCount, ENTITY_BUCKETS, "50000+"));',
+        desc: '退回真实存在过的 bug：玩家数复用实体桶 —— 0-100 玩家合并成一档、'
+            + '溢出标签写「50000+」，bStats 后台读不出大服与小服的差别（零异常零日志）',
+        expect: 'BstatsChartsBucketTest',
+    },
+    {
+        id: 'M28',
+        file: 'src/main/java/cn/perfscope/alert/Metric.java',
+        from: '            case "entities" -> rest.startsWith("world:") ? ENTITIES_WORLD : ENTITIES;',
+        to: '            case "entities" -> ENTITIES;',
+        desc: 'entities 不再判世界维度 —— 单世界数字被当成全服数字，'
+            + '服主会按一个世界的实体数去优化整个服务器',
+        expect: 'MetricKeyParsingTest',
+    },
+    {
+        id: 'M29',
+        file: 'src/main/java/cn/perfscope/alert/Metric.java',
+        from: '        int i = key.indexOf(\':\');',
+        to: '        int i = key.lastIndexOf(\':\');',
+        desc: '按最后一个冒号切分 —— 世界名含冒号的历史数据（entities:world:my:coloned:world）'
+            + '会被解析成错的指标或 null',
+        expect: 'MetricKeyParsingTest',
+    },
+    {
+        id: 'M30',
+        file: 'src/main/java/cn/perfscope/alert/Metric.java',
+        from: '            case "chunks" -> CHUNKS_WORLD;',
+        to: '            case "chunks" -> rest.startsWith("world:") ? CHUNKS_WORLD : null;',
+        desc: 'chunks 加全服口径判断后对 chunks:global 返回 null —— '
+            + '历史告警退化成原始 key 展示（而 chunks 从没有全服枚举）',
+        expect: 'MetricKeyParsingTest',
+    },
 ];
 
 // ---------------------------------------------------------------------------
