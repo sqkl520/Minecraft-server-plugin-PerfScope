@@ -5,13 +5,10 @@
  */
 package cn.perfscope.config;
 
-import cn.perfscope.PerfScope;
-import cn.perfscope.support.AlertFixtures;
+import cn.perfscope.support.ConfigFixtures;
 import cn.perfscope.support.TestObjects;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-
-import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -44,50 +41,22 @@ class UpdateIntervalValidationTest {
      * 造一个能调 {@code validateThresholds} 的 ConfigManager。
      *
      * <p>只需要 {@code plugin}（只为 {@code getLogger()}）——{@code validateThresholds} 的全部
-     * 副作用都写在传入的 {@code ConfigData} 上，不读 Bukkit、不写盘。</p>
+     * 副作用都写在传入的 {@code ConfigData} 上，不读 Bukkit、不写盘。装配细节见
+     * {@link ConfigFixtures#manager(String)}。</p>
      */
     private static ConfigManager manager() {
-        PerfScope p = AlertFixtures.barePlugin(Logger.getLogger("pscope-update-interval-test"));
-        return new ConfigManager(p);
+        return ConfigFixtures.manager("pscope-update-interval-test");
     }
 
     /** 一份"其余项全部合法"的配置，保证断言只反映 update_interval 这一项。 */
     private static ConfigManager.ConfigData validConfig(int interval) {
-        ConfigManager.ConfigData c = new ConfigManager.ConfigData();
+        ConfigManager.ConfigData c = ConfigFixtures.validConfig();
         c.general_updateInterval = interval;
-        c.general_language = "en";
-        c.tps_warningThreshold = 18.0;
-        c.tps_criticalThreshold = 15.0;
-        c.mspt_warningThreshold = 45.0;
-        c.mspt_criticalThreshold = 50.0;
-        c.players_warningThreshold = 90;
-        c.players_criticalThreshold = 98;
-        c.entities_totalWarningThreshold = 20000;
-        c.entities_totalCriticalThreshold = 30000;
-        c.chunks_loadedWarningThreshold = 10000;
-        c.chunks_loadedCriticalThreshold = 15000;
-        c.memory_heapWarningThreshold = 85;
-        c.memory_heapCriticalThreshold = 95;
-        c.cpu_processWarningThreshold = 80.0;
-        c.cpu_systemWarningThreshold = 90.0;
-        c.cpu_hysteresisMargin = 5.0;
-        c.alerts_cooldownSeconds = 300;
-        c.alerts_debounceCycles = 3;
-        c.alerts_dailySummaryTime = "08:00";
-        c.alerts_webhookType = "discord";
-        c.history_sampleIntervalSeconds = 60;
-        c.history_persistRetentionDays = 7;
-        c.hotspots_sampleEveryCycles = 30;
-        c.hotspots_chunkWarningThreshold = 200;
-        c.hotspots_scanShards = 10;
-        c.prometheus_port = 8940;
-        c.prometheus_path = "/metrics";
         return c;
     }
 
     private static void validate(ConfigManager cm, ConfigManager.ConfigData cfg) {
-        TestObjects.invoke(cm, "validateThresholds",
-            new Class<?>[]{ConfigManager.ConfigData.class}, cfg);
+        ConfigFixtures.validate(cm, cfg);
     }
 
     /** 低于下限（1 tick = 每 tick 全量采集）→ 必须被写成 20。 */

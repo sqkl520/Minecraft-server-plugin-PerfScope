@@ -5,9 +5,7 @@
  */
 package cn.perfscope.config;
 
-import cn.perfscope.PerfScope;
-import cn.perfscope.support.AlertFixtures;
-import cn.perfscope.support.TestObjects;
+import cn.perfscope.support.ConfigFixtures;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -56,8 +54,7 @@ class ThresholdPairZeroValidationTest {
 
     /** 只装 {@code plugin}（validateThresholds 只用它取 logger），不启动 Bukkit。 */
     private static ConfigManager manager(Logger logger) {
-        PerfScope p = AlertFixtures.barePlugin(logger);
-        return new ConfigManager(p);
+        return ConfigFixtures.manager(logger);
     }
 
     private static ConfigManager manager() {
@@ -66,41 +63,11 @@ class ThresholdPairZeroValidationTest {
 
     /** 其余项全部合法的配置；断言只反映被测的那一对阈值。 */
     private static ConfigManager.ConfigData validConfig() {
-        ConfigManager.ConfigData c = new ConfigManager.ConfigData();
-        c.general_updateInterval = 20;
-        c.general_language = "en";
-        c.tps_warningThreshold = 18.0;
-        c.tps_criticalThreshold = 15.0;
-        c.mspt_warningThreshold = 45.0;
-        c.mspt_criticalThreshold = 50.0;
-        c.players_warningThreshold = 90;
-        c.players_criticalThreshold = 98;
-        c.entities_totalWarningThreshold = 20000;
-        c.entities_totalCriticalThreshold = 30000;
-        c.chunks_loadedWarningThreshold = 10000;
-        c.chunks_loadedCriticalThreshold = 15000;
-        c.memory_heapWarningThreshold = 85;
-        c.memory_heapCriticalThreshold = 95;
-        c.cpu_processWarningThreshold = 80.0;
-        c.cpu_systemWarningThreshold = 90.0;
-        c.cpu_hysteresisMargin = 5.0;
-        c.alerts_cooldownSeconds = 300;
-        c.alerts_debounceCycles = 3;
-        c.alerts_dailySummaryTime = "08:00";
-        c.alerts_webhookType = "discord";
-        c.history_sampleIntervalSeconds = 60;
-        c.history_persistRetentionDays = 7;
-        c.hotspots_sampleEveryCycles = 30;
-        c.hotspots_chunkWarningThreshold = 200;
-        c.hotspots_scanShards = 10;
-        c.prometheus_port = 8940;
-        c.prometheus_path = "/metrics";
-        return c;
+        return ConfigFixtures.validConfig();
     }
 
     private static void validate(ConfigManager cm, ConfigManager.ConfigData cfg) {
-        TestObjects.invoke(cm, "validateThresholds",
-            new Class<?>[]{ConfigManager.ConfigData.class}, cfg);
+        ConfigFixtures.validate(cm, cfg);
     }
 
     private static ConfigManager.ConfigData validated(ConfigManager.ConfigData cfg) throws Exception {
