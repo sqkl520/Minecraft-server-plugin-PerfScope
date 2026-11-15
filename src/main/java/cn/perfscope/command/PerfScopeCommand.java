@@ -1155,63 +1155,19 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
 
         HistorySample oldest = samples.get(0);
         HistorySample latest = samples.get(samples.size() - 1);
-        double minTps = Double.MAX_VALUE;
-        HistorySample minTpsAt = null;
-        int peakHeap = -1;
-        HistorySample peakHeapAt = null;
-        double sumTps = 0;
-        int tpsCount = 0;
-        // v1.4：新增三指标的窗口极值/累计（全部按 -1 哨兵过滤，见下方逐处）
-        HistorySample peakMsptAt = null;
-        HistorySample peakCpuAt = null;
-        long gcTimeDeltaMs = 0L;
-        long gcCountDelta = 0L;
-        boolean gcSeen = false;
-        boolean gcAnyRecorded = false;
-        long prevGcTime = HistorySample.NO_LONG;
-        long prevGcCount = HistorySample.NO_LONG;
-        for (HistorySample s : samples) {
-            // tps1m 没有 -1 哨兵（TPS 不可用时的快照整条不入环），所以 0 是真实的
-            // "服务器冻结"，是最该被看见的最低值。用 > 0 把它滤掉，trend 会报"最低 18.0"
-            // 而实际卡死过——那是伪造历史。只排除负哨兵与物理上不可能的上界。
-            if (s.tps1m() >= 0 && s.tps1m() <= 20.5) {
-                sumTps += s.tps1m();
-                tpsCount++;
-                if (s.tps1m() < minTps) {
-                    minTps = s.tps1m();
-                    minTpsAt = s;
-                }
-            }
-            if (s.heapUsagePercent() > 0 && s.heapUsagePercent() > peakHeap) {  // @sentinel-ok 求堆占用峰值：0 不可能高于任何正值，过滤它与不过滤结果相同
-                peakHeap = s.heapUsagePercent();
-                peakHeapAt = s;
-            }
-            // 尖峰：msptMax <= 0 是"未采集"（TPS 反推/avg-only 路径），不能当 0 比较——否则
-            // 一个未采集的 0 会永远赢不了真实尖峰，看起来像"从没尖峰过"，其实是无数据。
-            if (s.msptMax() > 0 && (peakMsptAt == null || s.msptMax() > peakMsptAt.msptMax())) {
-                peakMsptAt = s;
-            }
-            // CPU：0.0 是合法读数，只排除负哨兵
-            if (s.cpuProcess() >= 0 && (peakCpuAt == null || s.cpuProcess() > peakCpuAt.cpuProcess())) {
-                peakCpuAt = s;
-            }
-            // GC 是累计量：逐对取正差累加。静态差（last-first）在重启后会算出一个负数或偏小的假值，
-            // 而 GC 计数在重启时归零正是最常见的场景——按相邻样本增量累加才能跨重启仍然正确。
-            if (s.gcTime() != HistorySample.NO_LONG && s.gcCount() != HistorySample.NO_LONG) {
-                gcAnyRecorded = true;
-                boolean hasPrev = prevGcTime != HistorySample.NO_LONG;
-                // 计数器回退 = 进程重启（累计量归零）。这一对差值无意义，跳过；
-                // prev 会被更新到新基线，于是重启后的增量照常累加。
-                boolean reset = hasPrev && (s.gcTime() < prevGcTime || s.gcCount() < prevGcCount);
-                if (hasPrev && !reset) {
-                    gcTimeDeltaMs += s.gcTime() - prevGcTime;
-                    gcCountDelta += s.gcCount() - prevGcCount;
-                    gcSeen = true;
-                }
-                prevGcTime = s.gcTime();
-                prevGcCount = s.gcCount();
-            }
-        }
+        TrendStats st = computeTrendStats(samples);
+        HistorySample minTpsAt = st.minTpsAt();
+        double minTps = st.minTps();
+        int tpsCount = st.tpsCount();
+        double sumTps = st.sumTps();
+        HistorySample peakHeapAt = st.peakHeapAt();
+        int peakHeap = st.peakHeap();
+        HistorySample peakMsptAt = st.peakMsptAt();
+        HistorySample peakCpuAt = st.peakCpuAt();
+        boolean gcSeen = st.gcSeen();
+        boolean gcAnyRecorded = st.gcAnyRecorded();
+        long gcCountDelta = st.gcCountDelta();
+        long gcTimeDeltaMs = st.gcTimeDeltaMs();
         if (tpsCount > 0) {
             sender.sendMessage(goldLabel(Messages.get("cmd.label.avg-tps"))
                 .append(Component.text(String.format(java.util.Locale.ROOT, "%.2f", sumTps / tpsCount), WHITE))
@@ -1248,6 +1204,108 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         sender.sendMessage(Component.text(Messages.get("cmd.trend.coverage",
             formatTrendTime(oldest.timestamp()), formatTrendTime(latest.timestamp())), GRAY));
         showTrendGaps(sender, samples, sinceMs);
+    }
+
+    /**
+     * {@code /perfscope trend} 的窗口统计（一次遍历算出六组量）。
+     *
+     * <p><b>为什么把它从 {@code showTrend} 里抽出来</b>：这段逻辑原本是内联在命令方法里的
+     * 60 行，五个判据手抄一遍（最小 TPS / 峰值堆 / 峰值尖峰 / 峰值 CPU / GC 逐对增量）。
+     * 它零测试覆盖——一轮可维护性审计实测：把其中任意一条判据改坏（最小 TPS 滤掉 0、
+     * 删掉 GC 重启守卫、峰值 CPU 把 0 当哨兵、峰值尖峰允许 0），<b>505 个用例全绿</b>。</p>
+     *
+     * <p>也就是说 v1.4.2 / v1.4.3 修的"把最坏报成最好"那类 bug，<b>在命令层可以原样复发</b>
+     * ——库层（{@code HistoryStore} 的 helper）修过、测过，命令层这份手抄的没有。</p>
+     *
+     * <p>抽成纯静态函数后可以直接用三条样本驱动它断言，与 {@code HistoryStore.gapsOf}
+     * 是同一个思路（那份也是先抽出来才有测试）。</p>
+     *
+     * <p><b>判据逐条说明</b>（每条都对应一次真实事故或实测发现）：</p>
+     * <ul>
+     *   <li><b>TPS</b>：{@code tps1m} 没有 -1 哨兵（采集层直接写 {@code Bukkit.getTPS()}，
+     *       TPS 不可用时的快照整条不入环），所以 {@code 0} 是真实的"服务器冻结"，
+     *       是最该被看见的最低值。只排除负哨兵与物理上不可能的上界 20.5。</li>
+     *   <li><b>堆峰值</b>：{@code 0} 不可能高于任何正值，过滤它与不过滤结果相同。</li>
+     *   <li><b>MSPT 尖峰</b>：{@code msptMax <= 0} 才是"未采集"（TPS 反推/avg-only 路径），
+     *       不能当 0 比较——未采集的 0 会永远赢不了真实尖峰，看起来像"从没尖峰过"。</li>
+     *   <li><b>CPU</b>：{@code 0.0} 是合法读数（空载），只排除负哨兵。</li>
+     *   <li><b>GC</b>：累计量，逐对取正差累加。静态差（last-first）在跨重启时会算出负数
+     *       或偏小的假值，而 GC 计数重启归零正是最常见场景。计数器回退即跳过该对、
+     *       把基线更新到新值，重启前的增量因此不丢。</li>
+     * </ul>
+     */
+    static TrendStats computeTrendStats(List<HistorySample> samples) {
+        double minTps = Double.MAX_VALUE;
+        HistorySample minTpsAt = null;
+        int peakHeap = -1;
+        HistorySample peakHeapAt = null;
+        double sumTps = 0;
+        int tpsCount = 0;
+        HistorySample peakMsptAt = null;
+        HistorySample peakCpuAt = null;
+        long gcTimeDeltaMs = 0L;
+        long gcCountDelta = 0L;
+        boolean gcSeen = false;
+        boolean gcAnyRecorded = false;
+        long prevGcTime = HistorySample.NO_LONG;
+        long prevGcCount = HistorySample.NO_LONG;
+
+        for (HistorySample s : samples) {
+            if (s.tps1m() >= 0 && s.tps1m() <= 20.5) {
+                sumTps += s.tps1m();
+                tpsCount++;
+                if (s.tps1m() < minTps) {
+                    minTps = s.tps1m();
+                    minTpsAt = s;
+                }
+            }
+            if (s.heapUsagePercent() > 0 && s.heapUsagePercent() > peakHeap) {  // @sentinel-ok 求堆占用峰值：0 不可能高于任何正值，过滤它与不过滤结果相同
+                peakHeap = s.heapUsagePercent();
+                peakHeapAt = s;
+            }
+            if (s.msptMax() > 0 && (peakMsptAt == null || s.msptMax() > peakMsptAt.msptMax())) {
+                peakMsptAt = s;
+            }
+            if (s.cpuProcess() >= 0 && (peakCpuAt == null || s.cpuProcess() > peakCpuAt.cpuProcess())) {
+                peakCpuAt = s;
+            }
+            if (s.gcTime() != HistorySample.NO_LONG && s.gcCount() != HistorySample.NO_LONG) {
+                gcAnyRecorded = true;
+                boolean hasPrev = prevGcTime != HistorySample.NO_LONG;
+                boolean reset = hasPrev && (s.gcTime() < prevGcTime || s.gcCount() < prevGcCount);
+                if (hasPrev && !reset) {
+                    gcTimeDeltaMs += s.gcTime() - prevGcTime;
+                    gcCountDelta += s.gcCount() - prevGcCount;
+                    gcSeen = true;
+                }
+                prevGcTime = s.gcTime();
+                prevGcCount = s.gcCount();
+            }
+        }
+        return new TrendStats(minTps, minTpsAt, sumTps, tpsCount, peakHeap, peakHeapAt,
+            peakMsptAt, peakCpuAt, gcCountDelta, gcTimeDeltaMs, gcSeen, gcAnyRecorded);
+    }
+
+    /**
+     * {@link #computeTrendStats} 的结果。
+     *
+     * <p>{@code minTps} 在 {@code tpsCount == 0} 时是 {@link Double#MAX_VALUE}
+     * （调用方按 {@code tpsCount} 判断是否有有效样本），{@code peakHeap} 在无数据时是 -1。
+     * 这两个"无数据"的表示沿用原实现的取值，不在这里改——改它属于行为变更，要单独评估。</p>
+     */
+    record TrendStats(
+        double minTps,
+        HistorySample minTpsAt,
+        double sumTps,
+        int tpsCount,
+        int peakHeap,
+        HistorySample peakHeapAt,
+        HistorySample peakMsptAt,
+        HistorySample peakCpuAt,
+        long gcCountDelta,
+        long gcTimeDeltaMs,
+        boolean gcSeen,
+        boolean gcAnyRecorded) {
     }
 
     /**
