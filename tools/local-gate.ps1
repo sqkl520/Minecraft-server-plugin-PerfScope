@@ -180,6 +180,17 @@ if ($null -ne $node) {
     Invoke-Step 'L1 bStats bucket selection' {
         & $node (Join-Path $PSScriptRoot 'check-bstats-buckets.mjs')
     }
+    # reload() must rebuild its tasks even when config loading failed. The javadoc says so
+    # ("无论 load 成败，任务必须重建：绝不允许「采集停了不重建」的半途冻结态") but nothing
+    # structurally enforces it, and the bad refactor looks reasonable ("config didn't load,
+    # why rebuild?"). Its effect: one bad config write leaves collection stopped, alerts
+    # silent and daily summary dead, while the console only adds a warning that reads like
+    # "carrying on as before". A unit test would need six real modules (load() needs a
+    # dataFolder, cleanOldReports() writes to disk, startPrometheus() binds a port), so the
+    # constraint goes to the source layer instead.
+    Invoke-Step 'L1 reload rebuilds even when load fails' {
+        & $node (Join-Path $PSScriptRoot 'check-reload-rebuild.mjs')
+    }
 } else {
     Write-Step 'static gates need node -- skipped' 'WARN'
 }

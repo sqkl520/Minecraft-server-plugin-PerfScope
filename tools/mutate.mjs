@@ -356,6 +356,18 @@ const MUTATIONS = [
             + '看门狗报出一个看起来像「刚刚」的时刻，掩盖了「从来没采到过」',
         expect: 'StalenessQueryTest',
     },
+    {
+        id: 'M35',
+        file: 'src/main/java/cn/perfscope/PerfScope.java',
+        from: '        startCollectionTasks();\n        startAlertService();',
+        to: '        if (!loadFailed) {\n            startCollectionTasks();\n'
+            + '            startAlertService();\n        }',
+        desc: '把 reload 的重建包进 !loadFailed（看起来合理："配置都没加载成功，重建成干什么"）—— '
+            + '配置写坏一次就停掉全部任务且不重建，采集停摆、告警静默、每日摘要不发，'
+            + '而控制台只多一条读起来像"一切照旧"的 warning',
+        expect: null,
+        gate: 'tools/check-reload-rebuild.mjs',
+    },
 ];
 
 // ---------------------------------------------------------------------------
