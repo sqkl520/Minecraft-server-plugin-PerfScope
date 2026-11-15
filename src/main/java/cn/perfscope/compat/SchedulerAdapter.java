@@ -172,10 +172,15 @@ public final class SchedulerAdapter {
 
     // ==================== 9A-1：运行期能力探针的挂载点 ====================
     // 探针本体在 ServerCompat.probeRuntimeAvailability(Logger, boolean)（不引入调度依赖，便于单测）。
-    // 挂载方式（PerfScope.onEnable() 内、startCollectionTasks() 之后）：
-    //   SchedulerAdapter.runLater(plugin,
-    //       () -> ServerCompat.probeRuntimeAvailability(getLogger(), ServerCompat.isFolia()),
-    //       ServerCompat.runtimeProbeDelayTicks());
+    //
+    // ⚠ 实际接线不是"延迟一次就完事"：PerfScope.onEnable() 只调一次
+    //   ServerCompat.armRuntimeProbe(this)（PerfScope.java:172），由后者经 scheduleProbe
+    //   走 runLater 做**最多 3 次**重试（ServerCompat.PROBE_RETRY_ATTEMPTS）。
+    // 为什么必须重试：非 Folia 分支要求"连续两次全零"才定案（ZERO_SAMPLE_CONFIRMATIONS = 2），
+    //   单次延迟执行永远只采到 streak = 1，**永不定案**——能力位会静默停在初始值上。
+    // 本段注释此前给的是"单次 runLater + probeRuntimeAvailability"的伪代码，照它改接线
+    //   会得到那个永不定案的版本。改这一带之前先读 ServerCompat.armRuntimeProbe 与 scheduleProbe。
+    //
     // 为什么走本类：Folia 上 Bukkit 调度器必抛 UnsupportedOperationException，
     // 探针必须经统一的 GlobalRegionScheduler 直连路径才能跑起来（与采集任务同一条通路）。
     // 延迟原因：首周期之前 tick 采样窗口尚未填充，全零是正常态，过早探测会把 Paper 误判成"不可用"。

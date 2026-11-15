@@ -20,8 +20,8 @@
 | 位置 | 用例数 | 说明 |
 |---|---|---|
 | `PrometheusEndpointHttpTest` | 7 个 `@Disabled` | 凡是要看到 200 响应体的（Prometheus 格式合规、快照值穿透 HTTP、HEAD 无 body、Content-Type…） |
-| `SchedulerAdapter` (304 行) | 全部 | 零测试。**类加载时**就执行 `private static final boolean FOLIA = ServerCompat.isFolia()`（第 56 行），所以连"造个假 Plugin 试试"都做不到 |
-| `FoliaSchedulerBridge` (121 行) | 全部 | 零测试 |
+| `SchedulerAdapter` (304 行) | **部分已测** | 见下方「嵌套类可以独立加载」。三个调度方法（`runGlobalTimer` / `runAsyncTimer` / `runLater`）与 Folia fail-safe 分支仍零测试；但 `TaskHandle` 已由 `TaskHandleContractTest`（13 个用例）覆盖 |
+| `FoliaSchedulerBridge` (121 行) | **部分已测** | `wrap` / `cancel` 已由 `FoliaSchedulerBridgeContractTest`（7 个用例）覆盖；另三个方法首步就调 `Bukkit.getGlobalRegionScheduler()`，仍不可测 |
 | `BstatsCharts` (197 行) | 全部 | 零测试。它只调 `ServerCompat.getServerName()`（一行），但那是静态字段，读取即触发 `<clinit>` |
 | `ReportGeneratorTest` 的 TPS 可用分支 | 部分 | 该测试已按"两条契约里必中一条"处理，不算缺失 |
 
@@ -29,6 +29,29 @@
 只依赖 `Plugin` 与 `BukkitTask` 两个接口——看起来完全可以用 `Proxy` 造假。
 但它在**类加载期**通过字段初始化间接碰了 `ServerCompat`，于是整条路被封死。
 "这个类不 import Bukkit"不代表"这个类能脱离 Bukkit 构造"。
+
+### 更正：嵌套类可以独立加载（2026-11-16 实测）
+
+上面那条结论**对嵌套类不成立**。JLS 12.4.1：初始化一个类只触发其**超类与接口**的初始化，
+不触发外围类。实测：
+
+```
+Class.forName("cn.perfscope.compat.SchedulerAdapter")            -> FAIL (ExceptionInInitializerError)
+Class.forName("cn.perfscope.compat.SchedulerAdapter$TaskHandle") -> OK
+Class.forName("cn.perfscope.compat.FoliaSchedulerBridge")        -> OK   （隐式 <clinit>）
+Class.forName("cn.perfscope.compat.ServerCompat$ServerType")     -> OK
+```
+
+所以"外围类加载不了"**不等于**"里面的东西全都测不了"。`TaskHandle` 自身没有任何静态依赖，
+`FoliaSchedulerBridge` 没有静态字段初始化，两者都成了可测的孤岛。
+
+配套手段：`BukkitTask`、`Plugin`、`ScheduledTask` 都是**接口**，`Proxy.newProxyInstance` 能造
+（注意 `Server` 不能，见下条）。造出来的假实现只在方法被调用时进 handler，
+所以不必实现全部方法。
+
+**这条更正的实际价值**：它把 `SchedulerAdapter` / `FoliaSchedulerBridge` 从"全部不可测"
+改成"部分可测"，而且**零生产代码改动**。先榨干这些孤岛，再决定要不要为了剩下那部分动接缝。
+
 
 ### 试过的三条路（全部失败，实测）
 
