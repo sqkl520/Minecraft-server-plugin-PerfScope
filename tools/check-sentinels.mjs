@@ -198,6 +198,21 @@ const noSentinelRe = new RegExp(
   String.raw`(\b(?:snap\.|s\.|sample\.|last\.|first\.|prev\.)?(?:${fieldAlt(NO_SENTINEL_FIELDS)})\b|` +
   String.raw`\b(?:${fieldAlt(NO_SENTINEL_FIELDS)})\s*\(\s*\))\s*${CMP}\s*0(?:\.0+[dDfF]?)?(?![\d.])`, 'g');
 
+/**
+ * 「哨兵是 -1 且 0 也不可信」的字段：**任何与 0 的等值/不等值比较都是错的**。
+ *
+ * <p>MSPT 就属于这一类：`0` 不可能是一次真实 tick 的耗时，`-1` 是"未采集"，
+ * 两者都必须判"不可信"。所以 `x == 0` / `x != 0` 这样的判据注定漏掉一半情形——
+ * `x == 0` 会把 -1 当可信，`x != 0` 会把 0 当可信。</p>
+ *
+ * <p>这一类此前**定义了却没有接进正则**（`SENTINEL_AND_ZERO_BOTH_BAD` 是个孤儿常量），
+ * 于是 `msptMax >= 0` 这种把"0 也不可信"的字段当成"0 可信"的改动，测试与门禁双双放行。
+ * 那是一轮可维护性审计实测出来的。</p>
+ */
+const bothBadRe = new RegExp(
+  String.raw`(\b(?:snap\.|s\.|sample\.|last\.|first\.|prev\.)?(?:${fieldAlt(SENTINEL_AND_ZERO_BOTH_BAD)})\b|` +
+  String.raw`\b(?:${fieldAlt(SENTINEL_AND_ZERO_BOTH_BAD)})\s*\(\s*\))\s*(==|!=)\s*0(?:\.0+[dDfF]?)?(?![\d.])`, 'g');
+
 function lineOf(text, idx) {
   let n = 1;
   for (let i = 0; i < idx && i < text.length; i++) if (text[i] === '\n') n++;
@@ -243,6 +258,26 @@ for (const f of files) {
       code: whole.trim(),
       rule: 'SENTINEL_AS_ZERO',
       detail: `${SENTINEL_FIELDS[name]}。用 '${op} 0' 会把 0 也排除掉；应当用 '${op === '<=' ? '<' : '>='} 0'`,
+    });
+  }
+
+  // ---- 哨兵是 -1 且 0 也不可信的字段：不能与 0 做等值比较 ----
+  for (const m of text.matchAll(bothBadRe)) {
+    const [whole, lhsOrCall, op] = m;
+    found++;
+    const name = Object.keys(SENTINEL_AND_ZERO_BOTH_BAD).find((k) => lhsOrCall.includes(k));
+    if (!name) continue;
+    if (COUNTER_NAMES.has(name)) continue;
+    const ln = lineOf(text, m.index);
+    if (exemptAt(ln)) continue;
+    violations.push({
+      file: r,
+      line: ln,
+      field: name,
+      op,
+      code: whole.trim(),
+      rule: 'EQUALITY_AGAINST_ZERO',
+      detail: `${SENTINEL_AND_ZERO_BOTH_BAD[name]}。用 '${op} 0' 做等值比较会漏掉另一半情形；应当用 '< 0' 或 '<= 0' 判不可信`,
     });
   }
 
