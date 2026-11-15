@@ -18,6 +18,63 @@
 
 > v1.4.4 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
 
+### Added — 测试：`ConfigManager` 的 double 阈值 / CPU 百分比 / `HH:mm` 解析（此前零断言）
+
+可维护性审计对 `ConfigManager` 跑了 61 个变异，其中 **8 个存活**，全部集中在
+`sanitizePair` / `sanitizePercent` / `TPS_CEILING` / 迟滞带交叉校验 / `isValidHhMm`
+这几条路径上。也就是说这些闸门此前**完全靠代码纪律维持**：
+
+| 拆掉的闸 | 存活后果 |
+|---|---|
+| `sanitizePercent` 的 `v > 100` | `cpu.process_warning_threshold: 150` 被放行，读数永远到不了，告警等于被静默关掉 |
+| `sanitizePair` 的 `highIsBad` 方向 | tps 是低值差（越低越差），方向传反后正常配置 18/15 被判倒置并回退 |
+| `TPS_CEILING = 20.5` | `tps.warning_threshold: 25` 合法通过，窗口均值恒 ≤ 20.5 < 25，`DIAG-TPS-PERSIST` 永久命中 |
+| mspt 的 `<= 0` 闸 | `mspt_critical_threshold: 0` 让「严重」档恒真（判据 `msptAvg > 阈值`，而 msptAvg 恒正） |
+| 迟滞带交叉校验 `margin >= cpuMinThreshold` | `margin` 不小于阈值时退出线 `threshold - margin` 非正，闩锁一旦进入永不解除 |
+| 迟滞带回退值 `min(5.0, minThreshold/2)` | 硬编码成 5.0 后，阈值为 3 时 5 仍不小于阈值，回退后问题照旧 |
+| `parseHhMmMinutes` 的小时越界 | `"99:99"` 被算成 6039 分钟，与当天任何时刻都不相等，每日摘要永远不触发且完全静默 |
+| `isValidHhMm` 的形态正则 | `"+8:00"` / `"008:00"` / `"8 : 00"` 被接受，配置层与 `DailySummaryService` 的口径分裂 |
+
+新增三个测试类共 59 个用例：
+
+- **`DoubleThresholdPairValidationTest`（15）** — tps 与 mspt 两对 double 阈值。
+  锁住倒置方向、`TPS_CEILING` 边界（20.5 本身合法、25 非法）、mspt 的 0 与负值、
+  非有限数值、以及 `TPS_TAUTOLOGY_FLOOR` 的 **warn-only 语义**（≥20.0 只警告不改值——
+  改成回退就是 breaking change，会把用户合法的 20.1 配置误判成 18.0）。
+- **`CpuThresholdAndHysteresisValidationTest`（24）** — 单值百分比 + 迟滞带交叉校验。
+  重点是这组**顺序耦合**：交叉校验必须在 `sanitizePercent` **之后**跑。顺序反了会拿原始的
+  `-1` 当基准算出负的 margin，运行时 `exit = 80 - (-0.5) = 80.5` 高于阈值本身，
+  迟滞反转成「只在阈值之上 0.5 内保持」，比无迟滞还抖。
+- **`HhMmTimeParsingTest`（20）** — 核心价值是锁住「**解析器合法集 ≠ 校验器合法集**」：
+  `parseHhMmMinutes("+8:00")` 返回 480（`Integer.parseInt` 接受前导 `+`），
+  但 `isValidHhMm` 因 `\d{1,2}` 正则拒绝它。两处**不能合并成一个方法**，
+  否则配置层会接受 `DailySummaryService` 解析语义之外的写法。
+
+### Added — `tools/mutate.mjs`：把「测试是否真能杀死变异」变成一键操作
+
+本仓库已踩过至少五次「写了测试、断言是假的、变异存活」的坑。此前每次都是手工改代码、
+手工跑、手工 `git checkout` 还原——而**手工 revert 已经三次误伤未提交的改动**。
+
+新工具把这件事固化：
+
+- 变异表内联在脚本里，每项声明文件、原文、替换、以及**应当变红的测试类**
+- 运行前检查 `git status --porcelain`，**工作树不干净就拒绝运行**——这条直接堵住上面那个坑
+- 每项跑完立刻还原，并校验 `git diff --quiet` 为空
+- 判据只有一条：红了 = KILLED（测试有效），绿了 = SURVIVED（测试锁不住），后者退出码 1
+
+本次用它验证上面 59 个用例，**10 个变异全部 KILLED**。
+
+### Refactored — 抽出 `ConfigFixtures`，去掉 `validConfig()` 的三处副本
+
+`validConfig()` 原本在 `ThresholdPairZeroValidationTest` 与 `UpdateIntervalValidationTest`
+里各写一遍，逐字段一模一样。第三、第四个调用方进来时，任何一次字段增删都要改多处——
+而漏改的那一处**不会编译失败**，只会让那个测试开始断言"未初始化字段的默认值"，看上去仍然绿。
+
+`ConfigFixtures` 提供 `validConfig()` / `manager(name)` / `validate(cm, cfg)` /
+`warningsOf(name, setup)`。`validConfig()` 已核对覆盖 `validateThresholds` 读取的
+全部 29 个字段，没有遗漏。
+
+
 ### Added — 测试：`MetricsSnapshot` 的「发布即只读」契约（此前零断言）
 
 快照一旦发布就被多线程共享：采集主线程持续改写下一帧，而 HTTP 线程、报告执行器、
