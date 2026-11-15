@@ -161,7 +161,31 @@ jobs:
         run: node "${{ steps.tools.outputs.dir }}/check-i18n.mjs" --repo "$GITHUB_WORKSPACE" --strict
 
       - name: Config backward compatibility
-        run: node "${{ steps.tools.outputs.dir }}/check-config-compat.mjs" --repo "$GITHUB_WORKSPACE"
+        run: |
+          set -euo pipefail
+          # The tool compares the working tree against "something that shipped", and by default
+          # it looks in versions/*.jar -- but *.jar is gitignored (JARs are not committed), so on
+          # a runner that directory is empty and the tool exits 2 with "no baseline config found".
+          # That made this whole job red on every run since v1.4.0.
+          #
+          # What DID ship is the previous release tag. Read its config.yml straight out of git:
+          # that is a real shipped baseline, not a guess.
+          BASE=""
+          PREV_TAG="$(git tag --sort=-v:refname | head -n 1 || true)"
+          if [ -n "$PREV_TAG" ]; then
+            git show "$PREV_TAG:src/main/resources/config.yml" > "$RUNNER_TEMP/base-config.yml" 2>/dev/null || true
+            if [ -s "$RUNNER_TEMP/base-config.yml" ]; then
+              BASE="$RUNNER_TEMP/base-config.yml"
+              echo "baseline: $PREV_TAG:src/main/resources/config.yml"
+            fi
+          fi
+          if [ -z "$BASE" ]; then
+            echo '::warning::no release tag found -- config backward-compat check DID NOT RUN.'
+            echo "This job is NOT proof that old configs still load. Tag a release to enable it."
+            exit 0
+          fi
+          node "${{ steps.tools.outputs.dir }}/check-config-compat.mjs" \
+            --repo "$GITHUB_WORKSPACE" --base "$BASE"
 
       - name: Scenario assertion validity
         id: scenarios
