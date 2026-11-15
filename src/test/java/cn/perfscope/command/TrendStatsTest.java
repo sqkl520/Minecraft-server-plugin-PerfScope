@@ -113,6 +113,40 @@ class TrendStatsTest {
             "the worst single tick must win; a -1 'not collected' must not be compared as 0");
     }
 
+    /**
+     * {@code msptMax == 0} 同样算"未采集"，不能参与峰值比较。
+     *
+     * <p><b>这条是补上去的</b>：上面那条用的是 {@code -1}，而 {@code -1} 对
+     * {@code > 0} 与 {@code >= 0} 两种写法<b>都能排除</b>——所以把判据从 {@code > 0}
+     * 改成 {@code >= 0} 时它不会红（变异验证实测 SURVIVED）。</p>
+     *
+     * <p>{@code 0} 才是这两者的分界：MSPT 的 {@code 0} 不可能是一次真实 tick 的耗时
+     * （每 tick 至少要花可测量的时间），出现 0 只可能是 TPS 反推路径或 avg-only 路径
+     * 留下的"无数据"。若允许它参与比较，一个无数据的 0 会永远赢不了真实尖峰，
+     * 于是"从没尖峰过"和"没采到尖峰"变得同形。</p>
+     */
+    @Test
+    void zeroMsptIsTreatedAsNotCollectedForThePeak() {
+        var st = PerfScopeCommand.computeTrendStats(List.of(
+            s(0, 20, 60, 0.0, 30, 10, 100),     // 无数据，不是"最快的一次 tick"
+            s(1, 20, 60, 0.0, 30, 10, 100)));
+
+        assertNull(st.peakMsptAt(),
+            "all-zero MSPT means no spike data at all; returning a sample here would let a "
+                + "'not collected' 0 masquerade as a real reading");
+    }
+
+    /** 0 与真实尖峰混合时，0 不得参与比较（峰值仍是真实那个）。 */
+    @Test
+    void zeroMsptLosesToARealSpikeRatherThanTyingIt() {
+        var st = PerfScopeCommand.computeTrendStats(List.of(
+            s(0, 20, 60, 0.0, 30, 10, 100),     // 无数据
+            s(1, 20, 60, 250.0, 30, 10, 100))); // 真实尖峰
+
+        assertNotNull(st.peakMsptAt());
+        assertEquals(250.0, st.peakMsptAt().msptMax(), 1e-9);
+    }
+
     /** CPU 峰值取最大，且 {@code 0.0}（空载）是合法读数。 */
     @Test
     void peakCpuIsTheMaximumAndZeroIsARealReading() {
