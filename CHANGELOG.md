@@ -42,6 +42,58 @@
   一级成功只写三个字段、`wasPrimaryAvailable` 与 `wasAvailable` 不合并、`probed` 先于分支），
   全部被测试杀死。
 
+### Added — 测试：`isStale()` / `isJvmStale()`（采集是否还活着，此前零测试）
+
+审计把它们列为"零测试且高引用"，而 `isJvmStale()` 是**「把盲点报成健康」的经典形态**：
+JVM 异步采集是独立任务，被静默取消时主线程仍每秒产快照，`isStale()` 看不出来——
+症状是内存/CPU/GC 永远停在最后一次的数值，而界面一切正常。
+
+`StalenessQueryTest`（13 个用例）覆盖两条节拍，重点是三个易漏分支：
+
+- **「从未采集时退回 `startedAtMs`」**：若写成 `now - lastJvmCollectAtMs > threshold` 而
+  `lastJvmCollectAtMs == 0`，`now - 0` 是"自 1970 年以来的毫秒数"，恒大于任何阈值——
+  插件每次启动都会报「JVM 指标已停止更新 56 年」，然后服主学会无视这条警告，
+  真出事时那条也被无视。
+- **`Math.max(WARMUP_WINDOW_MS, staleThresholdMs())` 取较大者**：改成只比宽限期，
+  `update_interval: 100`（stale 阈值 15 秒）的服务器会在 10 秒后就报 stale——
+  比它自己的采集节拍还急，每轮误报。
+- **`staleThresholdMs` 的 3000ms 下界**：去掉它，`update_interval: 1` 时判定窗口只有 150ms，
+  20 tick/s 的服务端偶发一次调度抖动就报"采集已停止"。
+
+还有一条专门挡"把两个判定合并成一个"：主线程新、JVM 旧时，`isStale()` 必须报健康而
+`isJvmStale()` 必须报 stale。合并后的实现这里会误报健康，而内存/CPU/GC 已冻结。
+
+### Added — 门禁：`reload()` 在配置加载失败时仍必须重建任务
+
+`PerfScope.reload()` 的 javadoc 写着"无论 load 成败，任务必须重建：绝不允许『采集停了不重建』
+的半途冻结态"。**但这条语义结构上没有任何东西守着**，而把它改坏的方式看起来完全合理：
+
+```java
+// 改坏的样子："配置都没加载成功，重建成干什么？"
+if (!loadFailed) {
+    startCollectionTasks();
+    startAlertService();
+    startDailySummary();
+}
+```
+
+后果：配置写坏一次（语法错、权限位不对、磁盘满），`reload` 会**停掉全部任务然后不重建**——
+采集停摆、告警不再推送、每日摘要不发，而控制台只多一条"配置加载失败，继续用旧配置"的 warning，
+读起来像是"一切照旧"。旧配置还在内存里，却没有任何人在用它采集。
+
+**为什么用门禁而不是单测**：`reload()` 里 `configManager.load()` 要 `dataFolder` 与 YAML 资源流，
+`reportGenerator.cleanOldReports()` 要写盘，`startPrometheus()` 会真的绑定端口，
+而且 `configManager.get().report_autoExport` 与 `reportGenerator.cleanOldReports()`
+这两处**没有判空守卫**（其余 start/stop 有）——要跑起来得装六七个真实对象，
+成本远高于这条纯结构断言的价值。
+
+`tools/check-reload-rebuild.mjs` 做的判断是源码级的：三个 `start*` 调用必须出现在
+`configManager.load()` 之后、且不能被含 `loadFailed` 的条件包住；另外 `loadFailed`
+只允许影响"打哪条日志"，出现在其他 `if` 里就报错。
+
+这是本项目第三条源码门禁，三条同一范式（前两条是 `check-sentinels.mjs` 与
+`check-bstats-buckets.mjs`）：**当行为只能在特定运行环境里显现时，把约束上升到源码层。**
+
 ### Fixed — bStats 的玩家数用了实体桶（遥测读不出大服与小服）
 
 `peak_players_bucket` 复用了 `ENTITY_BUCKETS`（边界 `0/100/500/…/50000`）。于是 0–100 玩家

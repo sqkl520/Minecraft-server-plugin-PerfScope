@@ -952,7 +952,7 @@ public class ConfigManager {
         // === 全局阈值对 ===
         // TPS（低值差，warning 应 >= critical）
         double[] tps = sanitizePair("tps.warning_threshold/critical_threshold",
-            cfg.tps_warningThreshold, cfg.tps_criticalThreshold, 18.0, 15.0, false);
+            cfg.tps_warningThreshold, cfg.tps_criticalThreshold, 18.0, 15.0, true);
         cfg.tps_warningThreshold = tps[0];
         cfg.tps_criticalThreshold = tps[1];
         // f-s03-logic-01：sanitizePair 的上界是数值域 1e7，而 TPS 的合法阈值上限应取指标域。
