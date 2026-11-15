@@ -211,8 +211,8 @@ const MUTATIONS = [
     {
         id: 'M19',
         file: 'src/main/java/cn/perfscope/alert/AlertCatalog.java',
-        from: '            return new Object[] {formattedValue};',
-        to: '            return new Object[] {scopeOrEmpty(alert), formattedValue};',
+        from: '        return new Object[] {formattedValue};',
+        to: '        return new Object[] {scopeOrEmpty(alert), formattedValue};',
         desc: '复现 BLOCKER-1：普通模板也传 (scope, value) —— 数值被塞进没人读的 {1}，'
             + '所有普通告警渲染成「Heap usage high: 」（数值消失、零异常零日志）',
         expect: 'AlertCatalogTest',
