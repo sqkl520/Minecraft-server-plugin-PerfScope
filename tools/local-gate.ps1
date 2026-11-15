@@ -171,6 +171,15 @@ if ($null -ne $node) {
     Invoke-Step 'L1 sentinel convention (0 vs -1)' {
         & $node (Join-Path $PSScriptRoot 'check-sentinels.mjs') '--repo' $RepoRoot
     }
+    # bStats bucket selection. bucket() itself is unit-tested, but "which bucket does
+    # peak_players_bucket use" lives inside register(...) and only runs with a real
+    # Metrics + MetricsCollector -- not reachable from tests. It really was wrong once
+    # (players reused the entity buckets, so 0-100 players collapsed into one bar with a
+    # "50000+" label). That class of bug is silent: no exception, no log, only a
+    # misleading graph on the bStats dashboard. So it gets a source-level gate.
+    Invoke-Step 'L1 bStats bucket selection' {
+        & $node (Join-Path $PSScriptRoot 'check-bstats-buckets.mjs')
+    }
 } else {
     Write-Step 'static gates need node -- skipped' 'WARN'
 }

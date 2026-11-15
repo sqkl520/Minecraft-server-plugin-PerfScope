@@ -284,8 +284,10 @@ const MUTATIONS = [
         from: '            return snap == null ? Map.of() : single(bucket(snap.playerCount, PLAYER_BUCKETS, "200+"));',
         to: '            return snap == null ? Map.of() : single(bucket(snap.playerCount, ENTITY_BUCKETS, "50000+"));',
         desc: '退回真实存在过的 bug：玩家数复用实体桶 —— 0-100 玩家合并成一档、'
-            + '溢出标签写「50000+」，bStats 后台读不出大服与小服的差别（零异常零日志）',
-        expect: 'BstatsChartsBucketTest',
+            + '溢出标签写「50000+」，bStats 后台读不出大服与小服的差别（零异常零日志）。'
+            + '单测抓不到这个（register() 要真 Bukkit 才跑），由源码门禁守。',
+        expect: null,
+        gate: 'tools/check-bstats-buckets.mjs',
     },
     {
         id: 'M28',
@@ -386,12 +388,28 @@ function main() {
         }
         try {
             fs.writeFileSync(abs, original.replace(m.from, m.to), 'utf8');
-            const r = runTests(m.expect);
-            // 红了 = 测试有效 = KILLED；绿了 = 测试锁不住 = SURVIVED
+            // expect: null + gate: '...' 的形态用于"单测够不着、由源码门禁守"的改动。
+            // 判据同样只有一条：门禁脚本的退出码非零 = 门禁有效 = KILLED。
+            let r;
+            let label;
+            if (m.expect) {
+                r = runTests(m.expect);
+                label = m.expect;
+            } else if (m.gate) {
+                const g = spawnSync(process.execPath, [path.join(ROOT, m.gate)],
+                    { cwd: ROOT, encoding: 'utf8' });
+                r = { ok: g.status === 0, summary: `门禁退出码 ${g.status}` };
+                label = path.basename(m.gate);
+            } else {
+                console.log('SKIP（既无 expect 也无 gate）');
+                results.push({ ...m, verdict: 'SKIP' });
+                continue;
+            }
+            // 红了 = 测试/门禁有效 = KILLED；绿了 = 锁不住 = SURVIVED
             const verdict = r.ok ? 'SURVIVED' : 'KILLED';
-            console.log(`${verdict}  (${m.expect}: ${r.summary})`);
+            console.log(`${verdict}  (${label}: ${r.summary})`);
             if (verdict === 'SURVIVED') {
-                console.log(`     ↑ 该测试类没有发现这个改动，需要补断言`);
+                console.log(`     ↑ ${m.expect ? '该测试类没有发现' : '该门禁没有发现'}这个改动，需要补断言`);
             }
             results.push({ ...m, verdict, summary: r.summary });
         } finally {
