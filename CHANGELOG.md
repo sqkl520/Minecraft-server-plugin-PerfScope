@@ -18,6 +18,39 @@
 
 > v1.4.3 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
 
+### Fixed — 模块不可用时 `/metrics` 照旧输出 0，把"没测"说成"真的是 0"（致命）
+
+`MetricsSnapshot` 只给 MSPT/CPU 设了 `-1` 哨兵默认值；TPS / 玩家 / 实体 / 区块 /
+方块实体 / 堆 / GC / uptime **全是 0**。而 0 在 Prometheus 里是一条**正常样本**，不是缺数据。
+
+所以模块被禁用或采集失败时，端点发出的是：
+
+```
+perfscope_tps{period="1m"} 0     # tps.enabled: false 时
+perfscope_heap_used_bytes 0      # memory.enabled: false 时
+perfscope_gc_collections_total 0
+perfscope_entities 0             # Folia 上平台跳过时
+perfscope_chunks_loaded 0
+```
+
+**Grafana 上读作**：TPS 归零 = 服务器彻底冻结；堆占用 0 = JVM 一点都不用内存；
+实体 0 = 一个实体都没有。而真实原因可能只是服主自己关了 `tps.enabled`。
+
+任何 `perfscope_tps < 15` 的告警规则，在这种服上会**永久 firing**——一个"以防万一配的"
+安全规则变成了永久噪音，然后被静音，然后真正出事时没人看。
+
+README 第 515 行逐字承诺过：「未采集的指标**整行不输出**，不会出现 `-1`。缺行让 Grafana
+显示 gap，比画一条贴底的假线诚实」。**那个承诺此前只对 CPU/MSPT 成立。**
+
+现在十个指标组统一先查 `snap.unavailable`，命中即整组不输出。`perfscope_module_available`
+这一组保留——它正是告诉抓取方"这个 gap 是真的"的信号。
+
+新增两条测试：不可用时整行消失、可用时正常输出（守卫不能把所有东西都挡掉）。
+
+**为什么这条门禁没抓到**：`check-sentinels.mjs` 检查的是"比较表达式的哨兵口径"，
+而本案的根因是"根本没有比较、直接输出字段默认值"——它不在此门禁的射程内。
+这是工具的已知边界，记在这里以免下次误以为哨兵门禁能覆盖这类问题。
+
 ---
 
 ## [1.4.3] — 2026-11-14 — 补丁版

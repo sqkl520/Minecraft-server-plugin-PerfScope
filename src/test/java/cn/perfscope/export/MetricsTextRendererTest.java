@@ -366,4 +366,58 @@ class MetricsTextRendererTest {
         // 字节就是字节：1 GiB 应输出 1073741824，不是 1024
         assertTrue(out.contains("perfscope_heap_used_bytes 1073741824"));
     }
+
+    // ==================== 模块不可用时必须整行不输出 ====================
+
+    /**
+     * 模块被禁用/采集失败时，那一组指标必须<b>整行消失</b>，而不是发一个 0。
+     *
+     * <p><b>这条守的是一个致命缺陷</b>：{@code MetricsSnapshot} 只给 MSPT/CPU 设了 -1
+     * 哨兵默认值，TPS / 玩家 / 实体 / 区块 / 方块实体 / 堆 / GC / uptime 全是 <b>0</b>。
+     * 而 0 在 Prometheus 里是一条<b>正常样本</b>。</p>
+     *
+     * <p>所以旧实现在 {@code tps.enabled: false} 时发出
+     * {@code perfscope_tps{period="1m"} 0}——Grafana 上读作"服务器彻底冻结"，
+     * 而真实原因是服主自己关了 TPS 模块。任何 {@code perfscope_tps < 15} 的告警规则
+     * 会在这种服上<b>永久 firing</b>。同理 Folia 上 {@code perfscope_entities 0}
+     * 是"一个实体都没有"的硬断言。</p>
+     *
+     * <p>README 逐字承诺过「未采集的指标整行不输出……缺行让 Grafana 显示 gap，
+     * 比画一条贴底的假线诚实」。这条测试把那个承诺变成可执行的。</p>
+     */
+    @Test
+    void unavailableModulesEmitNoSampleInsteadOfZero() {
+        MetricsSnapshot s = snap();
+        s.unavailable.add(MetricsSnapshot.MODULE_TPS);
+        s.unavailable.add(MetricsSnapshot.MODULE_MEMORY);
+        s.unavailable.add(MetricsSnapshot.MODULE_GC);
+        s.unavailable.add(MetricsSnapshot.MODULE_ENTITIES);
+        s.unavailable.add(MetricsSnapshot.MODULE_CHUNKS);
+        s.unavailable.add(MetricsSnapshot.MODULE_PLAYERS);
+
+        String out = MetricsTextRenderer.render(s, ctx());
+
+        for (String metric : new String[] {
+            "perfscope_tps", "perfscope_heap_used_bytes", "perfscope_gc_collections_total",
+            "perfscope_entities", "perfscope_chunks_loaded", "perfscope_players_online"}) {
+            assertFalse(out.contains(" " + metric + "{") || out.contains("\n" + metric + " "),
+                "metric '" + metric + "' must be absent (not zero) when its module is unavailable: "
+                    + "a 0 reads as a real sample in Prometheus, and 'TPS 0' reads as 'server frozen'");
+        }
+
+        // module_available 这一组本身必须还在——它正是告诉抓取方"别信这些缺失"的
+        assertTrue(out.contains("perfscope_module_available{module=\"tps\"} 0"),
+            "the availability signal itself must survive; it is how the scraper knows the gap is real");
+    }
+
+    /** 模块可用时必须正常输出（守卫不能把所有东西都挡掉）。 */
+    @Test
+    void availableModulesStillEmitTheirSamples() {
+        MetricsSnapshot s = snap();   // 默认没有任何模块进 unavailable
+        String out = MetricsTextRenderer.render(s, ctx());
+
+        assertTrue(out.contains("perfscope_tps{period=\"1m\"}"), "TPS is available here");
+        assertTrue(out.contains("perfscope_heap_used_bytes "), "memory is available here");
+        assertTrue(out.contains("perfscope_entities "), "entities are available here");
+    }
 }

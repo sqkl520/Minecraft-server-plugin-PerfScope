@@ -152,6 +152,25 @@ public final class MetricsTextRenderer {
         return sb.toString();
     }
 
+    /**
+     * 该模块当前是否可采信（不在 {@code unavailable} 里）。
+     *
+     * <p><b>为什么每个指标组都必须先问这一句</b>：{@code MetricsSnapshot} 只给 MSPT/CPU
+     * 设了 {@code -1} 哨兵默认值，TPS / 玩家 / 实体 / 区块 / 方块实体 / 堆 / GC / uptime
+     * 全是 <b>0</b>。而 0 在 Prometheus 里是一条<b>正常样本</b>，不是"缺数据"。</p>
+     *
+     * <p>于是模块被禁用或采集失败时，旧实现会发出 {@code perfscope_tps 0}——在 Grafana 上
+     * 读作"服务器彻底冻结"，而真实原因是服主自己关了 {@code tps.enabled}。任何
+     * {@code perfscope_tps < 15} 的告警规则会在这种服上永久 firing。</p>
+     *
+     * <p>README 逐字承诺过「未采集的指标整行不输出……缺行让 Grafana 显示 gap，比画一条
+     * 贴底的假线诚实」。那个承诺此前只对 CPU/MSPT 成立。</p>
+     */
+    private static boolean available(MetricsSnapshot snap, String module) {
+        return !snap.unavailable.contains(module);
+    }
+
+
     // ==================== 各指标组 ====================
 
     private static void buildInfo(StringBuilder sb, Context ctx) {
@@ -202,8 +221,12 @@ public final class MetricsTextRenderer {
     }
 
     private static void tps(StringBuilder sb, MetricsSnapshot snap) {
-        if (snap.tps1m < 0 && snap.tps5m < 0 && snap.tps15m < 0) {
-            return;   // 全未采集 → 整组不输出，而不是发三个 -1
+        // TPS 字段没有 -1 哨兵（采集层直接写 Bukkit.getTPS()，值域 0..20），
+        // 所以下面这条 `all < 0` 的判断永远是 false——不能靠它判"未采集"。
+        // 必须问 unavailable，否则 tps.enabled=false 时发出 perfscope_tps 0，
+        // 在 Grafana 上读作"服务器彻底冻结"。
+        if (!available(snap, MetricsSnapshot.MODULE_TPS)) {
+            return;
         }
         help(sb, "perfscope_tps", "Server ticks per second, by averaging window.", "gauge");
         emitIfPresent(sb, "perfscope_tps", "period", "1m", snap.tps1m);
@@ -224,6 +247,9 @@ public final class MetricsTextRenderer {
     }
 
     private static void players(StringBuilder sb, MetricsSnapshot snap) {
+        if (!available(snap, MetricsSnapshot.MODULE_PLAYERS)) {
+            return;
+        }
         help(sb, "perfscope_players_online", "Players currently online.", "gauge");
         sample(sb, "perfscope_players_online", null, Integer.toString(snap.playerCount));
 
@@ -239,12 +265,18 @@ public final class MetricsTextRenderer {
     }
 
     private static void entities(StringBuilder sb, MetricsSnapshot snap) {
+        if (!available(snap, MetricsSnapshot.MODULE_ENTITIES)) {
+            return;
+        }
         help(sb, "perfscope_entities", "Loaded entities in total and per world.", "gauge");
         sample(sb, "perfscope_entities", null, Integer.toString(snap.totalEntities));
         emitPerWorld(sb, "perfscope_entities", snap.entitiesByWorld);
     }
 
     private static void chunks(StringBuilder sb, MetricsSnapshot snap) {
+        if (!available(snap, MetricsSnapshot.MODULE_CHUNKS)) {
+            return;
+        }
         help(sb, "perfscope_chunks_loaded", "Loaded chunks in total and per world.", "gauge");
         sample(sb, "perfscope_chunks_loaded", null, Integer.toString(snap.totalLoadedChunks));
         emitPerWorld(sb, "perfscope_chunks_loaded", snap.chunksByWorld);
@@ -255,12 +287,18 @@ public final class MetricsTextRenderer {
     }
 
     private static void tileEntities(StringBuilder sb, MetricsSnapshot snap) {
+        if (!available(snap, MetricsSnapshot.MODULE_TILE_ENTITIES)) {
+            return;
+        }
         help(sb, "perfscope_tile_entities", "Loaded tile entities in total and per world.", "gauge");
         sample(sb, "perfscope_tile_entities", null, Integer.toString(snap.tileEntityCount));
         emitPerWorld(sb, "perfscope_tile_entities", snap.tileEntitiesByWorld);
     }
 
     private static void memory(StringBuilder sb, MetricsSnapshot snap) {
+        if (!available(snap, MetricsSnapshot.MODULE_MEMORY)) {
+            return;
+        }
         // 字节就是字节。用 MB 会让「_bytes」这个名字撒谎，也会让 Grafana 的单位换算错位。
         help(sb, "perfscope_heap_used_bytes", "JVM heap currently in use.", "gauge");
         sample(sb, "perfscope_heap_used_bytes", null, Long.toString(snap.heapUsed));
@@ -296,6 +334,9 @@ public final class MetricsTextRenderer {
     }
 
     private static void gc(StringBuilder sb, MetricsSnapshot snap) {
+        if (!available(snap, MetricsSnapshot.MODULE_GC)) {
+            return;
+        }
         // 计数用 counter（进程内累计，重启归零——Prometheus 语义允许这种重置，
         // rate() 会自动处理）。
         help(sb, "perfscope_gc_collections_total", "Total GC collections since JVM start.", "counter");
@@ -306,6 +347,9 @@ public final class MetricsTextRenderer {
     }
 
     private static void serverInfo(StringBuilder sb, MetricsSnapshot snap) {
+        if (!available(snap, MetricsSnapshot.MODULE_SERVER)) {
+            return;
+        }
         if (snap.uptimeSeconds >= 0) {
             help(sb, "perfscope_uptime_seconds", "JVM uptime in seconds.", "gauge");
             sample(sb, "perfscope_uptime_seconds", null, Long.toString(snap.uptimeSeconds));
