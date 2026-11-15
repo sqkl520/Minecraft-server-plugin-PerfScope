@@ -18,6 +18,26 @@
 
 > v1.4.4 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
 
+### Added — 测试：`MetricsSnapshot` 的「发布即只读」契约（此前零断言）
+
+快照一旦发布就被多线程共享：采集主线程持续改写下一帧，而 HTTP 线程、报告执行器、
+告警线程都在遍历同一个已发布快照。集合若仍可变，一次误改就污染最多 300 份历史快照
+加所有正在生成的报告，且不可复现。
+
+`MetricsTextRenderer` 的类注释明确依赖这条契约："传入的 snap 必须已经过 freezeCollections
+固化——否则遍历其集合可能与采集线程竞争。"
+
+**但它此前没有任何断言。** 一轮可维护性审计实测：把 unmodifiableMap 换成裸 LinkedHashMap、
+unmodifiableSet 换成裸 LinkedHashSet、List.copyOf 换成 new ArrayList —— 三个变异全部存活。
+
+新增 `SnapshotImmutabilityTest`（6 个用例）覆盖 14 个集合字段：
+- 5 个 Map / 4 个 List / 5 个 Set 逐个断言写入抛 UnsupportedOperationException
+- **固化是拷贝而非包装**：活集合后续被改，快照内容不得跟着变（这条比"不可变"更严格——
+  unmodifiableMap(source) 不复制时，快照看上去仍不可写，但采集线程继续写源 Map 会让内容变）
+- **插入序必须保留**：Map.copyOf 的迭代序未定义，会打乱报告"按世界分布"的顺序、
+  也让 /metrics 输出在两次抓取间变化
+- 空集合走短路路径后仍然不可变
+
 ### Refactored — 抽出 `showTrend` 的 60 行内联统计，让它第一次可测
 
 `/perfscope trend` 的窗口统计（最小 TPS / 峰值堆 / 峰值尖峰 / 峰值 CPU / GC 逐对增量）
