@@ -2397,6 +2397,10 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             case "entities_totalWarningThreshold":  return cfg.entities_totalWarningThreshold;
             case "entities_totalCriticalThreshold": return cfg.entities_totalCriticalThreshold;
             case "history_persistRetentionDays":    return cfg.history_persistRetentionDays;
+            // 缺口判据要的是**期望采样间隔**。漏了这一行时它会永远落到 default 返回 fallback，
+            // 于是把 history.sample-interval-seconds 设成 300 的服，每一对相邻样本
+            // （间隔 300s）都会被判成"缺口"（阈值 2×60=120s）——整条 trend 刷满假缺口。
+            case "history_sampleIntervalSeconds":   return cfg.history_sampleIntervalSeconds;
             default: return fallback;
         }
     }

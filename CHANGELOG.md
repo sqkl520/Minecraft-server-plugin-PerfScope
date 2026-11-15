@@ -18,6 +18,21 @@
 
 > v1.4.3 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
 
+### Fixed — `/perfscope trend` 的数据缺口判据永远是 60 秒
+
+`showTrendGaps` 用 `thresholdOf(cfgNow(), "history_sampleIntervalSeconds", 60.0)` 取期望采样间隔，
+而 `thresholdOf` 是个手写 switch —— **漏了 `history_sampleIntervalSeconds` 的 case**，
+于是它永远落到 `default: return fallback`，恒定返回 60.0。
+
+后果：把 `history.sample-interval-seconds` 设成 300 的服，正常样本间隔就是 300 秒，
+而缺口阈值是 2×60=120 秒 —— **每一对相邻样本都被判成缺口**，整条 trend 刷满假缺口，
+服主看到的是「我的历史数据到处是洞」。
+
+补上那个 case，并加 3 条测试锁住（含一条反向验证：未知字段仍应回退）。
+
+发现方式：本轮多 Agent 审计中的红队 Agent 指出判据「永远是 60 秒」，主线程核实后发现
+根因是 switch 缺 case 而非硬编码 —— 两者修法不同，报错的人给的现象是对的、定位是偏的。
+
 ### Fixed — 模块不可用时 `/metrics` 照旧输出 0，把"没测"说成"真的是 0"（致命）
 
 `MetricsSnapshot` 只给 MSPT/CPU 设了 `-1` 哨兵默认值；TPS / 玩家 / 实体 / 区块 /
