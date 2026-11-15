@@ -242,6 +242,42 @@ const MUTATIONS = [
         desc: 'needsScope 恒 false —— 世界维度告警丢失世界名，服主不知道是哪个世界出的问题',
         expect: 'AlertCatalogTest',
     },
+    {
+        id: 'M23',
+        file: 'src/main/java/cn/perfscope/compat/MsptCapabilityState.java',
+        from: '        if (streak < ZERO_SAMPLE_CONFIRMATIONS) {',
+        to: '        if (false) {',
+        desc: '拆掉「两次确认」——首次全零就降级，'
+            + '首周期空窗口会把健康 Paper 误判成不可用，用户永久失去精确 MSPT',
+        expect: 'MsptCapabilityStateTest',
+    },
+    {
+        id: 'M24',
+        file: 'src/main/java/cn/perfscope/compat/MsptCapabilityState.java',
+        from: '        if (!avgBad) {',
+        to: '        if (avgBad) {',
+        desc: '两级降级的分支写反 —— 二级明明可用却报不可用，'
+            + '用户丢掉唯一平均值来源；且 reasonKey 与 isMsptTrustworthy() 会自相矛盾',
+        expect: 'MsptCapabilityStateTest',
+    },
+    {
+        id: 'M25',
+        file: 'src/main/java/cn/perfscope/compat/MsptCapabilityState.java',
+        from: '        boolean bad = !tickTimesMethodPresent || !primarySampleOk;',
+        to: '        boolean bad = !primarySampleOk;',
+        desc: '一级方法缺失时不再直接判负 —— 纯 avg 服务端会白跑满两轮，'
+            + '且一旦 primarySampleOk 被误传 true 就永远判「可用」（假精确）',
+        expect: 'MsptCapabilityStateTest',
+    },
+    {
+        id: 'M26',
+        file: 'src/main/java/cn/perfscope/compat/MsptCapabilityState.java',
+        from: '                msptAvailable, avgTickAvailable, null, true, 0);',
+        to: '                true, true, null, true, 0);',
+        desc: '一级成功时顺手把两个能力位都置 true —— 违反「只降不升」，'
+            + '在 tick 计时恒零的 Paper 分支上宣称「精确」',
+        expect: 'MsptCapabilityStateTest',
+    },
 ];
 
 // ---------------------------------------------------------------------------
