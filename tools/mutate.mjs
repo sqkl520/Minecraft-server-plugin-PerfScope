@@ -1,0 +1,235 @@
+#!/usr/bin/env node
+/*
+ * PerfScope - Minecraft 服务器性能监测插件
+ * Copyright (C) 2026 PerfScope Team
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
+/**
+ * 变异验证器：证明某个测试类**真的能杀死**它声称锁住的改动。
+ *
+ * <h2>为什么必须有这个东西</h2>
+ * "测试通过"只证明测试与被测代码当前一致，不证明测试能发现错误。本仓库已经踩过至少
+ * 五次「写了测试、断言是假的、变异存活」的坑（最近的例子：`assertFalse(out.contains(" "
+ * + metric + "{"))` 中的空格永远不匹配行首，改成 `"\n"` 才有意义）。
+ *
+ * 判据只有一条：**把被测代码按变异描述改坏，跑测试，必须变红。**
+ * 绿了就是假测试（SURVIVED），红了才是真测试（KILLED）。
+ *
+ * <h2>用法</h2>
+ * 变异表写在脚本内的 `MUTATIONS` 里，每项声明：文件、原文、替换、以及应当杀死它的测试类。
+ *
+ *   node tools/mutate.mjs              # 跑全部
+ *   node tools/mutate.mjs --only M3    # 只跑编号 M3
+ *   node tools/mutate.mjs --list       # 只列变异，不跑
+ *
+ * <h2>安全边界</h2>
+ * - 改前先 `git status --porcelain` 检查工作树，**不干净就拒绝运行**。
+ *   否则 `git checkout -- <file>` 会把未提交的改动一起抹掉（本仓库踩过三次）。
+ * - 每个变异跑完立刻 `git checkout --` 还原，且还原后校验 `git diff --quiet` 为空。
+ * - 中途异常（Ctrl-C / Maven 超时）不阻断还原：用 try/finally 包住。
+ */
+
+import { execSync, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import fs from 'node:fs';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.resolve(HERE, '..');
+
+/**
+ * 变异表。
+ *
+ * 每项的 `expect` 是**应当变红**的测试类；若该测试类全绿，说明它锁不住这个改动。
+ * `desc` 要写清"改坏之后用户会看到什么"，而不只是"这行改了"——否则变异表本身
+ * 也会变成一份没人读得懂的清单。
+ */
+const MUTATIONS = [
+    {
+        id: 'M1',
+        file: 'src/main/java/cn/perfscope/config/ConfigManager.java',
+        from: 'if (v <= 0.0d || v > 100.0d) {',
+        to: 'if (v <= 0.0d) {',
+        desc: 'sanitizePercent 去掉 100 上界 —— cpu 阈值写 150 被放行，'
+            + 'processCpuLoad 永远到不了，这条告警等于被静默关掉',
+        expect: 'CpuThresholdAndHysteresisValidationTest',
+    },
+    {
+        id: 'M2',
+        file: 'src/main/java/cn/perfscope/config/ConfigManager.java',
+        from: 'cfg.tps_warningThreshold, cfg.tps_criticalThreshold, 18.0, 15.0, false);',
+        to: 'cfg.tps_warningThreshold, cfg.tps_criticalThreshold, 18.0, 15.0, true);',
+        desc: 'tps 的 highIsBad 方向写反 —— tps 是低值差（越低越差），传 true 后'
+            + '正常配置 18/15 被判倒置并回退，告警阈值永久失效',
+        expect: 'DoubleThresholdPairValidationTest',
+    },
+    {
+        id: 'M3',
+        file: 'src/main/java/cn/perfscope/config/ConfigManager.java',
+        from: 'private static final double TPS_CEILING = 20.5;',
+        to: 'private static final double TPS_CEILING = 10_000_000.0;',
+        desc: 'TPS_CEILING 提到 1e7 等于拆掉这道闸 —— tps.warning_threshold: 25 合法通过，'
+            + '窗口均值恒 <= 20.5 < 25，DIAG-TPS-PERSIST 永久命中',
+        expect: 'DoubleThresholdPairValidationTest',
+    },
+    {
+        id: 'M4',
+        file: 'src/main/java/cn/perfscope/config/ConfigManager.java',
+        from: 'if (cfg.mspt_warningThreshold <= 0.0d || cfg.mspt_criticalThreshold <= 0.0d) {',
+        to: 'if (false) {',
+        desc: '拆掉 mspt 的 0 闸 —— mspt_critical_threshold: 0 让「严重」档恒真（判据是 msptAvg > 阈值，'
+            + '而 msptAvg 恒正）',
+        expect: 'DoubleThresholdPairValidationTest',
+    },
+    {
+        id: 'M5',
+        file: 'src/main/java/cn/perfscope/config/ConfigManager.java',
+        from: 'if (cfg.cpu_hysteresisMargin >= cpuMinThreshold) {',
+        to: 'if (cfg.cpu_hysteresisMargin > cpuMinThreshold) {',
+        desc: '迟滞带交叉校验的闭合方向改开 —— margin 恰好等于阈值时不拦，退出线 threshold-margin = 0，'
+            + '而判定值恒正，闩锁一旦进入就永不解除',
+        expect: 'CpuThresholdAndHysteresisValidationTest',
+    },
+    {
+        id: 'M6',
+        file: 'src/main/java/cn/perfscope/config/ConfigManager.java',
+        from: 'double fallback = Math.min(CPU_HYSTERESIS_DEFAULT, cpuMinThreshold / 2.0d);',
+        to: 'double fallback = CPU_HYSTERESIS_DEFAULT;',
+        desc: '迟滞带回退值硬编码成默认 5.0 —— 阈值为 3 时 5 仍不小于阈值，回退后问题照旧',
+        expect: 'CpuThresholdAndHysteresisValidationTest',
+    },
+    {
+        id: 'M7',
+        file: 'src/main/java/cn/perfscope/config/ConfigManager.java',
+        from: 'double cpuMinThreshold = Math.min(cfg.cpu_processWarningThreshold, cfg.cpu_systemWarningThreshold);',
+        to: 'double cpuMinThreshold = cfg.cpu_processWarningThreshold;',
+        desc: '交叉校验只取 process 不看 system —— system 阈值更低时 margin 会越过它，'
+            + 'system 那条告警永不解除',
+        expect: 'CpuThresholdAndHysteresisValidationTest',
+    },
+    {
+        id: 'M8',
+        file: 'src/main/java/cn/perfscope/config/ConfigManager.java',
+        from: 'if (h < 0 || h > 23 || m < 0 || m > 59) {',
+        to: 'if (m < 0 || m > 59) {',
+        desc: 'parseHhMmMinutes 去掉小时越界 —— "99:99" 被算成 6039 分钟，'
+            + '与当天任何时刻都不相等，每日摘要永远不触发且完全静默',
+        expect: 'HhMmTimeParsingTest',
+    },
+    {
+        id: 'M9',
+        file: 'src/main/java/cn/perfscope/config/ConfigManager.java',
+        from: 'return v.matches("\\\\d{1,2}:\\\\d{2}") && parseHhMmMinutes(v) >= 0;',
+        to: 'return parseHhMmMinutes(v) >= 0;',
+        desc: 'isValidHhMm 去掉形态正则 —— "+8:00" / "008:00" / "8 : 00" 都会被接受，'
+            + 'DailySummaryService 的解析结果与配置层校验口径分裂',
+        expect: 'HhMmTimeParsingTest',
+    },
+    {
+        id: 'M10',
+        file: 'src/main/java/cn/perfscope/config/ConfigManager.java',
+        from: 'if (!isValidHhMm(cfg.alerts_dailySummaryTime)) {',
+        to: 'if (false) {',
+        desc: '拆掉 daily-summary.time 的回退 —— 非法值原样留在配置里，'
+            + 'DailySummaryService 拿到 -1 后行为未定义',
+        expect: 'HhMmTimeParsingTest',
+    },
+];
+
+// ---------------------------------------------------------------------------
+
+const args = process.argv.slice(2);
+const only = args.includes('--only') ? args[args.indexOf('--only') + 1] : null;
+const listOnly = args.includes('--list');
+
+function run(cmd, opts = {}) {
+    return execSync(cmd, { cwd: ROOT, encoding: 'utf8', stdio: 'pipe', ...opts });
+}
+
+function gitClean() {
+    return run('git status --porcelain').trim() === '';
+}
+
+function restore(file) {
+    run(`git checkout -- "${file}"`);
+    if (run(`git diff --quiet -- "${file}" && echo CLEAN || echo DIRTY`).trim() !== 'CLEAN') {
+        throw new Error(`无法还原 ${file}，请手动 git checkout`);
+    }
+}
+
+/** 跑指定测试类；返回 {ok, summary}。用 spawnSync 以免退出码非零时抛异常。 */
+function runTests(classes) {
+    const r = spawnSync(
+        process.platform === 'win32' ? 'D:/maven/apache-maven-3.9.9/bin/mvn.cmd' : 'mvn',
+        ['-q', 'test', `-Dtest=${classes}`, '-DfailIfNoTests=false'],
+        { cwd: ROOT, encoding: 'utf8', shell: true },
+    );
+    const out = `${r.stdout || ''}\n${r.stderr || ''}`;
+    const m = out.match(/Tests run: (\d+), Failures: (\d+), Errors: (\d+), Skipped: (\d+)/);
+    return {
+        ok: r.status === 0,
+        summary: m ? `${m[1]} 跑 / ${m[2]} 失败 / ${m[3]} 错误` : '（未找到汇总行，可能编译失败）',
+        detail: out,
+    };
+}
+
+function main() {
+    if (!gitClean()) {
+        console.error('工作树不干净，拒绝运行。');
+        console.error('变异验证会 git checkout 还原文件——未提交的改动会被一起抹掉。');
+        console.error('请先提交或 stash。');
+        process.exit(2);
+    }
+
+    const targets = only ? MUTATIONS.filter(m => m.id === only) : MUTATIONS;
+    if (targets.length === 0) {
+        console.error(`没有编号为 ${only} 的变异`);
+        process.exit(2);
+    }
+    if (listOnly) {
+        for (const m of targets) {
+            console.log(`${m.id}  ${m.expect}`);
+            console.log(`     ${m.desc}`);
+        }
+        return;
+    }
+
+    const results = [];
+    for (const m of targets) {
+        process.stdout.write(`${m.id}  ${m.desc.split('——')[0].trim()} ... `);
+        const abs = path.join(ROOT, m.file);
+        const original = fs.readFileSync(abs, 'utf8');
+        if (!original.includes(m.from)) {
+            console.log('SKIP（原文未找到，代码可能已改动）');
+            results.push({ ...m, verdict: 'SKIP' });
+            continue;
+        }
+        try {
+            fs.writeFileSync(abs, original.replace(m.from, m.to), 'utf8');
+            const r = runTests(m.expect);
+            // 红了 = 测试有效 = KILLED；绿了 = 测试锁不住 = SURVIVED
+            const verdict = r.ok ? 'SURVIVED' : 'KILLED';
+            console.log(`${verdict}  (${m.expect}: ${r.summary})`);
+            if (verdict === 'SURVIVED') {
+                console.log(`     ↑ 该测试类没有发现这个改动，需要补断言`);
+            }
+            results.push({ ...m, verdict, summary: r.summary });
+        } finally {
+            fs.writeFileSync(abs, original, 'utf8');
+            restore(m.file);
+        }
+    }
+
+    console.log('\n────────────────────────────────');
+    const killed = results.filter(r => r.verdict === 'KILLED').length;
+    const survived = results.filter(r => r.verdict === 'SURVIVED').length;
+    const skipped = results.filter(r => r.verdict === 'SKIP').length;
+    console.log(`KILLED ${killed} / SURVIVED ${survived} / SKIP ${skipped}  (共 ${results.length})`);
+    for (const r of results.filter(r => r.verdict !== 'KILLED')) {
+        console.log(`  ${r.verdict}  ${r.id}  ${r.desc}`);
+    }
+    process.exit(survived > 0 ? 1 : 0);
+}
+
+main();

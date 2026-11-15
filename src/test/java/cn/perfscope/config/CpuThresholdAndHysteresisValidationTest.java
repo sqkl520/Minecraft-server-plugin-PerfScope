@@ -112,7 +112,7 @@ class CpuThresholdAndHysteresisValidationTest {
      *
      * <p>为什么 0 必须非法：判据是 {@code processCpuLoad > threshold}，阈值 0 使空载服务器
      * （读数 0.0，MetricsCollector 明确允许 0 作为合法读数）之上的一切都算「CPU 偏高」，
-     * 告警恒真。users 想关 CPU 告警应该用 {@code cpu.enabled: false}。</p>
+     * 告警恒真。用户想关 CPU 告警应该用 {@code cpu.enabled: false}。</p>
      */
     @Test
     void processZeroFallsBackToDefault() {
@@ -427,8 +427,8 @@ class CpuThresholdAndHysteresisValidationTest {
         assertEquals(5.0, order.cpu_hysteresisMargin, EPS,
             "回退后的 min 是 min(80, 90)=80，5 < 80 故 margin 保留 5.0；若交叉校验抢在 "
                 + "sanitizePercent 之前跑，它会拿原始的 -1 当基准，把 margin 写成 -0.5（负数、"
-                + "且已越过 [0,50] 区间闸），运行时 latched 的 exit 会变成 80.5 这种荒谬值——"
-                + "迟滞带第一次比阈值还宽，告警进入后要在 0.5% 以下才退出");
+                + "且已越过 [0,50] 区间闸），运行时 exit 变成 80-(-0.5)=80.5 高于阈值本身——"
+                + "迟滞反转成「只在阈值之上 0.5 内保持」，比无迟滞还抖");
 
         ConfigManager.ConfigData outOfRange = withCpu(101.0, 90.0, 50.0);
         assertEquals(80.0, outOfRange.cpu_processWarningThreshold, EPS,
@@ -448,6 +448,11 @@ class CpuThresholdAndHysteresisValidationTest {
      * <p>这条防「校验过度收紧」：回退逻辑本身不会崩，但一条无谓的 warning 会让服主
      * 每次 reload 都在控制台看到「你的配置有问题」，长期后果是所有人开始无视这类日志——
      * 真出问题时那条真正重要的 warning 也就一起被无视了。</p>
+     *
+     * <p><b>刻意不断言 {@code warnings.isBlank()}</b>：本类只对 CPU 三个键负责，
+     * 而 {@code validateThresholds} 会跑完整张表。若其他字段的基线日后被改坏，
+     * 断言整体为空会让本类红在一个与 CPU 毫无关系的地方，读的人要花时间排除误判。
+     * 所以这里只按 {@code cpu} 前缀断言——既精确又不会替别的模块背锅。</p>
      */
     @Test
     void legalConfigProducesNoCpuWarnings() {
@@ -459,9 +464,8 @@ class CpuThresholdAndHysteresisValidationTest {
             "合法的 system=90.0 不得触发回退 warning；got: " + warnings);
         assertFalse(warnings.contains("cpu.hysteresis_margin"),
             "合法的 margin=5.0（5 < min(80,90)）不得触发回退 warning；got: " + warnings);
-        assertTrue(warnings.isBlank(),
-            "基线配置每一项都合法，理应一条 warning 都没有（有的话说明 validConfig() 需要同步）。got: "
-                + warnings);
+        assertFalse(warnings.contains("CPU"),
+            "合法配置不得产生任何 CPU 相关告警（含 hysteresis-not-below 那条）；got: " + warnings);
     }
 
     /**
