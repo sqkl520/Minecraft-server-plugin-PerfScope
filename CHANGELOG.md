@@ -18,6 +18,52 @@
 
 > v1.4.4 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
 
+### Fixed — Folia 上 MSPT 被错标成「采集失败」（子集契约缺执法者）
+
+`MetricsSnapshot` 的三个"为什么不可用"集合有一条写死在字段 javadoc 里的契约：
+
+```
+platformSkipped ⊆ disabledModules ⊆ unavailable
+warmingUp ⊆ unavailable
+```
+
+**而它此前只有注释，没有任何执法者。** 五处写入点各写各的 `add`，审计用 4 种方式破坏，
+526 个用例全绿。
+
+破坏的后果不是崩溃，是**用户可见的错标**：`/perfscope status` 与报告的模块状态列按
+`platformSkipped → disabledModules → warmingUp → unavailable` 顺序判定，任一集合漏标
+就掉进下一档。
+
+真实案例已经存在：`collectMSPT` 的 Folia 分支只标 `unavailable`，不标另外两个。Folia 的
+`getTickTimes`/`getAverageTickTime` 方法都在但恒返回全零，属"平台使该指标不可信"，
+与 entities/chunks 的跨 region 聚合不可靠同类——但它在状态面板上显示的是**红色的「采集失败」**，
+而真相是灰色的「平台限制（跨 region 聚合不可靠，已自动跳过）」。服主会去查日志、重装插件，
+真正的原因却在平台本身。
+
+修法：
+
+1. **`collectMSPT` 的 Folia 分支补上另外两个标记**（这是行为修正）。
+2. **`freezeCollections` 内置契约修复**——它是快照发布的唯一出口。违反时就地补齐父集合并
+   限频告警（首次立即记，之后每 5 分钟一条，与 `safeCollect` 同口径）。
+3. **新增 `SnapshotSubsetInvariantTest`（8 个用例）**。
+
+三个设计选择及其代价：
+
+- **修复方向是补齐父集合，不是剔掉子集合成员。** 子集合记录的是更精确的原因（"服主关掉"/
+  "平台限制"/"预热中"），丢掉它只会让展示层退回笼统的「不可用」；补 `unavailable` 还顺带
+  修正了 40 处只看它的消费点。
+- **修复而非抛出。** `freezeCollections` 由 `collectSync` 在定时任务里调用，那条任务外层
+  没有 try/catch（见 `start()` 的 `runGlobalTimer`）。抛出会让固化之后的全部逻辑跳过——
+  不写 history、不更新缓存、不发布快照——每周期一次，把"显示错标"升级成"采集停摆"。
+- **级联必须修两遍。** 契约是可传递的：把 `platformSkipped` 的成员补进 `disabledModules`
+  之后，它们才开始参与 `disabledModules ⊆ unavailable` 的判定，单遍修不完整条链。
+  不做 `while` 循环：三条规则两遍必然收敛，用循环反而会掩盖"某条规则写反导致永不收敛"的真 bug。
+
+还有一个**自己踩到的坑，值得记下来**：契约修复最初挂在 `collectSync` 的调用点，而测试直接调
+内部分解出来的静态 `repairSubsetContracts`。把调用点那一行删掉，**8 个用例全部存活**——
+测的是一个可能没被接上的实现。改到 `freezeCollections` 内部、测试也只走它之后，变异才被杀死。
+这条正是本次要修的那类问题（"靠代码纪律维持"）在修复代码自己身上的复发。
+
 ### Added — 测试：`ConfigManager` 的 double 阈值 / CPU 百分比 / `HH:mm` 解析（此前零断言）
 
 可维护性审计对 `ConfigManager` 跑了 61 个变异，其中 **8 个存活**，全部集中在
@@ -62,7 +108,10 @@
 - 每项跑完立刻还原，并校验 `git diff --quiet` 为空
 - 判据只有一条：红了 = KILLED（测试有效），绿了 = SURVIVED（测试锁不住），后者退出码 1
 
-本次用它验证上面 59 个用例，**10 个变异全部 KILLED**。
+本次用它验证上面 67 个用例，**13 个变异全部 KILLED**。
+
+其中 M11 有一个反复：第一版把契约修复挂在 `collectSync` 的调用点、测试直接调内部静态方法，
+删掉调用点后 8 个用例全部存活。工具把这个假绿抓了出来——这正是它存在的理由喵。
 
 ### Refactored — 抽出 `ConfigFixtures`，去掉 `validConfig()` 的三处副本
 
