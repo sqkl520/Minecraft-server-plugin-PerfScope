@@ -42,6 +42,60 @@
   一级成功只写三个字段、`wasPrimaryAvailable` 与 `wasAvailable` 不合并、`probed` 先于分支），
   全部被测试杀死。
 
+### Fixed — bStats 的玩家数用了实体桶（遥测读不出大服与小服）
+
+`peak_players_bucket` 复用了 `ENTITY_BUCKETS`（边界 `0/100/500/…/50000`）。于是 0–100 玩家
+全被合并成同一条柱子，溢出标签写 `"50000+"`——**bStats 后台那张图读不出大服与小服的差别**，
+而它存在的唯一目的就是回答"大服到底有多大"（见类注释）。
+
+新增 `PLAYER_BUCKETS = {0, 5, 10, 20, 50, 100, 200}`。边界取自 Minecraft 实际可及的量级：
+原版服务器很少超过 20 人，大型服务器通常 200 以内。
+
+这类错误零异常、零日志，只在遥测后台的图形上体现——属于"数据不可信但没人查"的典型。
+所以除了 `bucket()` 本身的单测（9 个用例），**还加了一道源码门禁** `tools/check-bstats-buckets.mjs`：
+
+- **为什么必须用门禁而不是单测**：桶的选择写在 `register()` 的 lambda 里，要拿到真的
+  `Metrics` 与 `MetricsCollector` 才会执行，测试环境跑不起来。而用反射读常量也不够——
+  常量本身是对的，错的是"哪个图表引用哪个常量"。
+- 我第一版就是踩了这个坑：测试里自己声明两个数组再断言它们对不同值给不同标签，那是**自证**。
+  变异验证当场揭穿——把 `register()` 里的 `PLAYER_BUCKETS` 改回 `ENTITY_BUCKETS`，测试照样全绿。
+- 门禁是**白名单**：新增 `*_bucket` 图表若不登记就报错，逼着作者显式声明这个指标的量级。
+  漏登记正是"玩家数复用实体桶"那类错误的入口。
+
+### Added — 测试：`Metric.ofKey` / `scopeOf` 的解析契约（此前零直接断言）
+
+所有结构化告警的入口都经过它们（`Alert` 的三个工厂都调 `ofKey` + `scopeOf`）。
+`Metric` 的类注释自述三个解析器历史上有过三种"静默失效"；解析错一次的后果是告警标题与正文
+指向**错误的指标**，零异常零日志——服主会照着"区块数偏高"去查区块，实际出问题的是实体数。
+
+`MetricKeyParsingTest`（12 个用例）覆盖九个指标的可识别形态、按第一个冒号切分（世界名可含冒号）、
+未知 key 返回 `null`、前缀精确匹配、`scopeOf` 的提取语义，以及两个函数必须自洽
+（`scopeScoped()` 为真的指标其 key 必然取到非空世界名）。
+
+**顺带澄清两处与直觉不符的当前语义**（各有一条断言钉住，避免被误当 bug "修"掉）：
+
+- **无冒号的裸词是合法 key**（`"tps"` 解析成 `TPS`）。`AlertService` 等处直接 `new Alert(key, …)`，
+  key 来源不保证带冒号；判成 `null` 会让格式稍简的历史告警退化成原始 key 展示。
+- **`cpu` 的 `rest` 是精确匹配**（`cpu:process:extra` → `null`），与 `entities`/`chunks` 的
+  "只看开头"口径不同。前者 key 形态由采集层固定产出，后者要承载世界名所以必须容忍后续冒号。
+
+### Fixed — 子集契约的注释与实际不符（我上一轮写错的）
+
+上一轮加子集契约修复时，我写了"单次写回：避免字段改了一半的中间态被并发读者看到"。
+**这句话是错的**：`PAPER_MSPT_AVAILABLE` / `PAPER_AVG_TICK_AVAILABLE` / `msptUnavailableReasonKey` /
+`runtimeProbed` / `zeroSampleStreak` 是**五次独立的 volatile 写**，它们之间没有内存屏障把它们绑成一个，
+并发读者仍可能看到"能力位已降但原因键还是旧的"这类中间态。
+
+红队审计逐条核对了线程归属后指出这一点，并给了正确的修法方向。已改成如实描述，并写明：
+
+- 真实跨线程读者只有三个（报告线程的 `msptUnavailableCause`、Prometheus 线程的
+  `isTpsGlobalScope`、bStats 线程的 `getServerName`），最坏只影响一行标注文案；
+- 若将来这个窗口的后果变严重（某读者据它做分支决策），正确做法是把五个字段收进一个
+  `volatile` 快照对象，**而不是**在这里加 `synchronized`。
+
+保留现状的理由：收进快照对象意味着 43 处既有读点全部改成 getter，那正是本类 javadoc
+明确要避免的事。
+
 ### Refactored — 抽出 `MsptCapabilityState`，让 MSPT 能力位判定第一次可测
 
 `ServerCompat.probeRuntimeAvailability`（76 行）决定 `PAPER_MSPT_AVAILABLE` / `PAPER_AVG_TICK_AVAILABLE`

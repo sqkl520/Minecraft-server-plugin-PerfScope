@@ -22,7 +22,7 @@
 | `PrometheusEndpointHttpTest` | 7 个 `@Disabled` | 凡是要看到 200 响应体的（Prometheus 格式合规、快照值穿透 HTTP、HEAD 无 body、Content-Type…） |
 | `SchedulerAdapter` (304 行) | **部分已测** | 见下方「嵌套类可以独立加载」。三个调度方法（`runGlobalTimer` / `runAsyncTimer` / `runLater`）与 Folia fail-safe 分支仍零测试；但 `TaskHandle` 已由 `TaskHandleContractTest`（13 个用例）覆盖 |
 | `FoliaSchedulerBridge` (121 行) | **部分已测** | `wrap` / `cancel` 已由 `FoliaSchedulerBridgeContractTest`（7 个用例）覆盖；另三个方法首步就调 `Bukkit.getGlobalRegionScheduler()`，仍不可测 |
-| `BstatsCharts` (197 行) | 全部 | 零测试。它只调 `ServerCompat.getServerName()`（一行），但那是静态字段，读取即触发 `<clinit>` |
+| `BstatsCharts` (197 行) | **部分已测** | `bucket()` / `normalizeLanguage()` 已由 `BstatsChartsBucketTest`（9 个用例）覆盖。此条此前判为"全部零测试"，**理由是错的**——见下方更正 |
 | `ReportGeneratorTest` 的 TPS 可用分支 | 部分 | 该测试已按"两条契约里必中一条"处理，不算缺失 |
 
 **注意一个反直觉的点**：`SchedulerAdapter` 的 import 里没有任何 `Bukkit.` 静态调用，
@@ -51,6 +51,37 @@ Class.forName("cn.perfscope.compat.ServerCompat$ServerType")     -> OK
 
 **这条更正的实际价值**：它把 `SchedulerAdapter` / `FoliaSchedulerBridge` 从"全部不可测"
 改成"部分可测"，而且**零生产代码改动**。先榨干这些孤岛，再决定要不要为了剩下那部分动接缝。
+
+### 更正二：`BstatsCharts` 的结论也是错的
+
+上面第 18 行原本写「`BstatsCharts`(197 行) 全部——它只调 `ServerCompat.getServerName()`（一行），
+但那是静态字段，读取即触发 `<clinit>`」。**这个理由是错的**，两个层面：
+
+1. `ServerCompat.getServerName()` **只**在 `register()` 的 lambda 内部（第 79 行）被调用，
+   `bucket()` / `normalizeLanguage()` 完全不碰它。
+2. 本类的 `<clinit>` 经 `javap -c` 反汇编只有一个 `static {}`，里面是
+   `bipush/newarray/iastore` 序列——**纯数据初始化，零 `invoke`**。
+
+所以 `bucket(int,int[],String)` 与 `normalizeLanguage(String)` 是零生产改动可测的
+（`BstatsChartsBucketTest`，9 个用例）。做不到的只有 `register()` 本身。
+
+**教训可以复用**：「这个类读了 X（会触发静态初始化）」不等于「这个类整个都测不了」——
+先看那个读点在哪个方法里。
+
+### 反面：有些错误连单测也测不到，只能靠源码门禁
+
+`peak_players_bucket` 曾复用 `ENTITY_BUCKETS`，导致 0–100 玩家合并成一档、
+溢出标签写 `"50000+"`（bStats 后台读不出大服与小服）。
+
+- 单测抓不到：桶的选择在 `register()` 的 lambda 里，要真 `Metrics` + `MetricsCollector` 才执行。
+- 反射读常量也抓不到：常量本身是对的，错的是**哪个图表引用哪个常量**。
+- 我试过"测试里自己声明两个数组再断言它们对不同值给不同标签"——那是**自证**，
+  变异验证当场揭穿：把调用点改回 `ENTITY_BUCKETS`，测试照样全绿。
+
+正解是 `tools/check-bstats-buckets.mjs`：一条**白名单式**源码门禁（新增 `*_bucket` 图表
+不登记就报错）。这与 `check-sentinels.mjs` 是同一范式——**当行为只能在特定运行环境里显现时，
+把约束上升到源码层**。
+
 
 
 ### 试过的三条路（全部失败，实测）
