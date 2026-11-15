@@ -42,6 +42,77 @@
   一级成功只写三个字段、`wasPrimaryAvailable` 与 `wasAvailable` 不合并、`probed` 先于分支），
   全部被测试杀死。
 
+### Refactored — 抽出 `MsptCapabilityState`，让 MSPT 能力位判定第一次可测
+
+`ServerCompat.probeRuntimeAvailability`（76 行）决定 `PAPER_MSPT_AVAILABLE` / `PAPER_AVG_TICK_AVAILABLE`
+两个能力位——它们决定整个 MSPT 采集走哪条路、报告里写"精确"还是"不可用"。**零测试。**
+
+测不了的原因是 `ServerCompat` 的 `<clinit>` 在测试 JVM 里必然抛
+`ExceptionInInitializerError`（`Bukkit.getBukkitVersion()` 解引用 `Bukkit.server`，而它是 null）。
+这也顺带判死了"可注入探针接口"这条路：**注入点本身要先加载类，而类加载就已经死了**——
+不是在类里开个洞就能解决，阻塞点在五处静态探测上。
+
+7 条不变量此前全靠代码纪律，破坏后**不崩溃、不报错**，只让能力位或控制台文案变得不诚实：
+
+| 破坏方式 | 用户可见后果 |
+|---|---|
+| 两次确认改成一次 | 首周期空窗口（延迟仅 100 tick）把健康 Paper 误判不可用，永久失去精确 MSPT |
+| 两级降级分支写反 | 二级明明可用却报不可用，用户丢掉唯一平均值来源；`reasonKey` 与 `isMsptTrustworthy()` 自相矛盾 |
+| 常量耦合失效（`PROBE_RETRY_ATTEMPTS < ZERO_SAMPLE_CONFIRMATIONS`） | 链只重试 3 次就停，**永不收敛**，能力位静默停在假精确 |
+| 一级成功时顺手置两个 `true` | 违反"只降不升"，在 tick 计时恒零的分支上宣称"精确" |
+| `wasPrimaryAvailable` 与 `wasAvailable` 合并 | 打错日志（`degraded-to-avg` 与 `marked-unavailable` 混淆） |
+
+抽法：新建 `MsptCapabilityState`（266 行，**不 import 任何 Bukkit 类型、不 import `Messages`**），
+把判定变成不可变状态 + 纯转移函数，返回 `Result{state, event}`；
+`probeRuntimeAvailability` 只剩"取样本 → 调状态机 → 单次写回 volatile → 按 `Event` 打日志"四步。
+
+三个设计选择：
+
+- **日志渲染留在 `ServerCompat`。** `CoreMessages` 里记着"`Messages.load` 之后才 armRuntimeProbe"
+  的时序承诺；把 `Messages.get` 挪进新类会让新类在测试里也加载不了，丢掉全部收益。
+  所以状态机只产出 `Event` 枚举，"哪条日志"变成可断言的，渲染仍在外层。
+- **`isFolia` 继续用入参，不改回读 `isFolia()`。** 两者正常时恒等，但一旦不等，Folia 会走实测
+  路径——`getTickTimes` 在 Folia 上方法存在但恒返回全零，两轮后原因键从
+  `folia-no-global-tick` 变成 `tick-times-empty`；更糟的是若 `getAverageTickTime` 恰好返回正数，
+  会落进降级分支，**MSPT 被标成"精确"而实际是 global region 局部值**（9A-2 明令禁止的双重不可信）。
+- **单次写回而非逐字段写。** 原实现 `PAPER_MSPT_AVAILABLE` 与 `PAPER_AVG_TICK_AVAILABLE` 是两次
+  独立写，报告线程（`perfscope-report` 线程池）上的 `isMsptTrustworthy()` 可能读到
+  "MSPT=false、AVG=true"的中间态。现在一次结构体替换掉整个窗口。
+
+`MsptCapabilityStateTest`（16 个用例）覆盖全部 7 条不变量 + 一级成功路径 + `hasPositiveTickSample`。
+**调用点改动数：0**（13 个对外成员共 43 处代码调用全部无感——字段名保留，只换写入方）。
+
+### Added — 测试：`AlertCatalog` 的渲染契约（告警文案的唯一出口，此前零测试）
+
+`AlertCatalog`（175 行）是告警正文的唯一渲染点（`Alert.message()` 与 `Alert.display()` 都委托它）。
+它出错时的表现是**静默失真**——不崩溃、不打日志，只是让服主读到错的或空的告警。
+
+必须补的理由写在它自己的 javadoc 里：`argsFor` 曾经对所有模板一律传 `(scope, value)`，
+而普通模板只写 `{0}`，于是所有普通告警渲染成 `"Heap usage high: "`——**数值凭空消失，
+零异常零日志**。那是红队用真实类实测出的 BLOCKER-1。
+
+`AlertCatalogTest`（16 个用例）逐档钉住三种占位符形态（普通 / 世界维度 / 带容量），
+并加了反向守卫：正文与标题都不得泄露 `alert.*` 原始键名。
+另有 `NaN → "?"`（不能渲染成 0，那是把盲点报成健康）、`levelId` 不得恒返回 warning、
+`title` 不得带数值（否则恢复通知读成"92.1% 恢复了"）。
+
+**变异验证补出的一个真缺口**：`needsScope` 改成恒 `false` 时，最初那条
+"世界维度告警含世界名"的断言**照样绿**——因为键缺失会落进 `message()` 的结构化兜底，
+而兜底文案恰好也含世界名。于是"世界维度告警走的是 `.scoped` 模板"这件事此前零断言，
+后果是用户看到英文兜底而不是本地化文案（切中文仍英文）。已补两条断言锁住"不得落进兜底"。
+
+### Fixed — 两处恒真的空转断言
+
+审计顺带查出两类"断言从不执行"的用例，都不是崩溃而是**假绿**：
+
+1. **`MsptSpikeRuleTest` 有一条 `assertEquals(150.0, 150.0)`** —— 字面量与自身比较，恒真。
+   全仓扫描确认只有这一处（`assertEquals("字面量", "字面量")`、`assertTrue(true)`、
+   `assertNotNull(null)` 均为 0 处）。已改成断言 detail 里含峰值 `150`。
+2. **`MetricsTextRendererTest` 两处"逐行校验样本"的循环缺守卫。** 若 `render()` 因回归返回空串、
+   或只输出 HELP/TYPE 注释行，循环体一次都不执行，断言从不运行——两个用例双双全绿，
+   而实际什么都没渲染。当前没出事全靠夹具凑巧（`snap()` 填了 14 个字段且 `unavailable` 为空）。
+   已加 `requireSampleLines(out)` 守卫，夹具一改窄就会红在正确的地方。
+
 ### Fixed — Folia 上 MSPT 被错标成「采集失败」（子集契约缺执法者）
 
 `MetricsSnapshot` 的三个"为什么不可用"集合有一条写死在字段 javadoc 里的契约：
