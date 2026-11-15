@@ -208,6 +208,40 @@ const MUTATIONS = [
             + '把「句柄来源不对」从可见失败变成无声的功能停用（javadoc 明确要求抛）',
         expect: 'FoliaSchedulerBridgeContractTest',
     },
+    {
+        id: 'M19',
+        file: 'src/main/java/cn/perfscope/alert/AlertCatalog.java',
+        from: '            return new Object[] {formattedValue};',
+        to: '            return new Object[] {scopeOrEmpty(alert), formattedValue};',
+        desc: '复现 BLOCKER-1：普通模板也传 (scope, value) —— 数值被塞进没人读的 {1}，'
+            + '所有普通告警渲染成「Heap usage high: 」（数值消失、零异常零日志）',
+        expect: 'AlertCatalogTest',
+    },
+    {
+        id: 'M20',
+        file: 'src/main/java/cn/perfscope/alert/AlertCatalog.java',
+        from: '        if (Double.isNaN(value)) {\n            return "?";',
+        to: '        if (Double.isNaN(value)) {\n            return "0";',
+        desc: 'NaN 渲染成 0 —— 采集没拿到值时服主看到「CPU 占用 0%」，把盲点报成健康',
+        expect: 'AlertCatalogTest',
+    },
+    {
+        id: 'M21',
+        file: 'src/main/java/cn/perfscope/alert/AlertCatalog.java',
+        from: '        return alert.critical() ? Alert.LEVEL_CRITICAL : Alert.LEVEL_WARNING;',
+        to: '        return Alert.LEVEL_WARNING;',
+        desc: 'levelId 恒返回 warning —— 严重与警告渲染同一套文案，'
+            + '而级别正是决定服主要不要立刻处理的信息',
+        expect: 'AlertCatalogTest',
+    },
+    {
+        id: 'M22',
+        file: 'src/main/java/cn/perfscope/alert/AlertCatalog.java',
+        from: '        return metric != null && metric.scopeScoped() && !scopeOrEmpty(alert).isEmpty();',
+        to: '        return false;',
+        desc: 'needsScope 恒 false —— 世界维度告警丢失世界名，服主不知道是哪个世界出的问题',
+        expect: 'AlertCatalogTest',
+    },
 ];
 
 // ---------------------------------------------------------------------------
