@@ -535,7 +535,6 @@ public class MetricsCollector {
         // 若缓存下一次刷新复用同一实例，最多 300 份历史快照会同时看到"新值"（历史被篡改）。
         // 这里把缓存容器本身在刷新时复制（见 refreshXxxCache），此处再把快照侧集合固化为不可变副本，
         // 保证任何消费方误改都只影响自己那一份（MetricsSnapshot 类本身不改）。
-        repairSubsetContractsBeforeFreeze(snap);
         freezeCollections(snap);
 
         // v1.3.0 -04：把本周期耗时写进快照。放在 freezeCollections 之后、入 history 之前——
@@ -582,8 +581,13 @@ public class MetricsCollector {
      * 顺序打乱；这里用 {@code LinkedHashMap} 复制再包 unmodifiable，既防篡改又保留插入序。</p>
      */
     private static void freezeCollections(MetricsSnapshot snap) {
-        // 契约校验必须在拷贝之前：拷贝之后查的是副本，与检查"即将发布的那一份"是否同一对象
-        // 就取决于实现细节了。在源头查，"检查过的东西"与"发布出去的东西"按定义同一份。
+        // 契约保障放在固化入口本身，而不是调用点：freezeCollections 是快照发布的唯一出口，
+        // 把校验写在这里，"任何被发布的快照都满足契约"就由这一处定义，没有第二条路径能绕开。
+        // 写在 collectSync 的调用点则相反——那一行被删掉时契约就静默失效，而测试照样全绿
+        // （这是实测到的：删掉调用点后 8 个契约用例全部存活）。
+        //
+        // 顺序必须先修后拷：修复要改的是原始集合，拷贝之后改副本对发布出去的那一份没有意义。
+        repairSubsetContracts(snap);
         snap.entitiesByType = freezeMap(snap.entitiesByType);
         snap.entitiesByWorld = freezeMap(snap.entitiesByWorld);
         snap.chunksByWorld = freezeMap(snap.chunksByWorld);
@@ -613,37 +617,38 @@ public class MetricsCollector {
     }
 
     /**
-     * 发布前的契约兜底：违反子集关系时就地补齐并限频告警（见 {@link #repairSubsetContracts}）。
-     *
-     * <p>与 {@code safeCollect} 的日志限频同口径：首次立即记，之后每 5 分钟一条——
-     * 契约违反是代码 bug，理论上修一次就消失；若它每周期都发生，说明写入点又漏了一个，
-     * 这时需要的是"看得见"而不是"每秒一条把日志刷爆"。</p>
+     * 子集契约违反的日志限频间隔（与 {@code safeCollect} 的模块失败日志同口径）。
      */
-    private void repairSubsetContractsBeforeFreeze(MetricsSnapshot snap) {
-        int before = SUBSET_VIOLATIONS.get();
-        if (!repairSubsetContracts(snap)) {
-            return;
-        }
-        long now = System.currentTimeMillis();
-        if (before == 0 || now - lastSubsetViolationLogAtMs >= SUBSET_VIOLATION_LOG_INTERVAL_MS) {
-            lastSubsetViolationLogAtMs = now;
-            plugin.getLogger().warning("[PerfScope] " + SUBSET_VIOLATION_DETAIL
-                + "。这是采集侧的自身一致性 bug，已自动修正以免影响展示；请报告给开发者");
-        }
-    }
-
-    /** 子集契约累计违反次数（仅用于"首次立即记"的判定与自检）。 */
-    private static final java.util.concurrent.atomic.AtomicInteger SUBSET_VIOLATIONS =
-        new java.util.concurrent.atomic.AtomicInteger();
-
-    /** 最近一次违反的详情；仅在违反时写入，告警文案用它。 */
-    private static volatile String SUBSET_VIOLATION_DETAIL = "";
-
-    /** 子集契约违反的日志限频间隔（与 safeCollect 的模块失败日志同口径）。 */
     private static final long SUBSET_VIOLATION_LOG_INTERVAL_MS = 5 * 60 * 1000L;
 
-    /** 上次记录子集契约违反的时刻。 */
-    private volatile long lastSubsetViolationLogAtMs;
+    /** 上次记录子集契约违反的时刻；0 = 尚未记录过。 */
+    private static volatile long subsetViolationLoggedAtMs;
+
+    /** 最近一次违反的详情；仅在违反时写入，告警文案用它。 */
+    private static volatile String subsetViolationDetail = "";
+
+    /**
+     * 违反子集契约时的限频告警。
+     *
+     * <p>限频口径与 {@code safeCollect} 一致：首次立即记，之后每 5 分钟一条。契约违反是采集侧的
+     * 代码 bug，理论上修一次就消失；若它每周期都发生，说明写入点又漏了一个——这时需要的是
+     * "看得见"，而不是每秒一条把日志刷爆。</p>
+     *
+     * <p>用 {@code Logger.getLogger} 而非 {@code plugin.getLogger()}：本方法要能被静态的
+     * {@link #freezeCollections} 调用，而那是契约的唯一执法点。名字与插件日志器同名，
+     * 输出会进同一处控制台。</p>
+     */
+    private static void warnSubsetViolation() {
+        long now = System.currentTimeMillis();
+        long last = subsetViolationLoggedAtMs;
+        if (last != 0L && now - last < SUBSET_VIOLATION_LOG_INTERVAL_MS) {
+            return;
+        }
+        subsetViolationLoggedAtMs = now;
+        java.util.logging.Logger.getLogger("PerfScope").warning("[PerfScope] "
+            + subsetViolationDetail + "。这是采集侧的自身一致性 bug，已自动修正以免影响展示；"
+            + "请报告给开发者");
+    }
 
     /**
      * 校验三个"为什么不可用"集合之间的子集契约（v1.4.5），<b>违反时就地修复并告警，不抛出</b>。
@@ -705,9 +710,9 @@ public class MetricsCollector {
         Set<String> extra = new LinkedHashSet<>(child);
         extra.removeAll(parent);
         parent.addAll(extra);
-        SUBSET_VIOLATIONS.addAndGet(1);
-        SUBSET_VIOLATION_DETAIL = "MetricsSnapshot 子集契约 " + childName + " ⊆ " + parentName
+        subsetViolationDetail = "MetricsSnapshot 子集契约 " + childName + " ⊆ " + parentName
             + " 被违反：多出 " + extra + "（已补进 " + parentName + "）";
+        warnSubsetViolation();
         return true;
     }
 

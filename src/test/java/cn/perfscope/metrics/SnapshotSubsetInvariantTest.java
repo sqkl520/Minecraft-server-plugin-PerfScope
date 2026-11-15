@@ -174,10 +174,6 @@ class SnapshotSubsetInvariantTest {
     @Test
     void emptySnapshotPassesContracts() {
         MetricsSnapshot snap = snapshot();
-        boolean repaired = (Boolean) TestObjects.invoke(MetricsCollector.class,
-            "repairSubsetContracts", new Class<?>[]{MetricsSnapshot.class}, snap);
-        assertFalse(repaired, "空快照没有任何契约违反，不该报告修复过");
-        assertContracts(snap);
         freeze(snap);
         assertContracts(snap);
         assertTrue(snap.unavailable.isEmpty());
@@ -232,19 +228,24 @@ class SnapshotSubsetInvariantTest {
     }
 
     /**
-     * 断言 {@code repairSubsetContracts} 把 {@code child ⊆ parent} 的违反修好。
+     * 断言 {@code freezeCollections} 把 {@code child ⊆ parent} 的违反修好。
      *
-     * <p><b>为什么测"修复"而不是"抛出"</b>：本方法由 {@code collectSync} 在定时任务里调用，
-     * 那条定时任务外层没有 try/catch（{@code start()} 的 {@code runGlobalTimer}）。
-     * 抛出会让 {@code freezeCollections} 之后的全部逻辑跳过——不写 history、不更新缓存、
-     * 不发布快照——每周期抛一次，把一个"显示错标"升级成"采集彻底停摆"。
-     * 所以契约违反的处置是<b>纠错 + 让它在日志里可见</b>。</p>
+     * <p><b>为什么必须走 {@code freezeCollections} 而不是直接调 {@code repairSubsetContracts}</b>：
+     * 后者是内部分解出来的小函数，直接调它等于测了一个"可能没被接上"的实现。
+     * 实测过这个陷阱——契约修复原本挂在 {@code collectSync} 的调用点而非固化入口，
+     * 把那一行删掉后，8 个直接调静态方法的用例<b>全部存活</b>，契约静默失效。
+     * 现在校验写在 {@code freezeCollections} 内部，本类也只通过它验证——
+     * 任何"发布出去"的快照都必须经过它，没有第二条路径。</p>
+     *
+     * <p><b>为什么是"修复"而不是"抛出"</b>：{@code freezeCollections} 由 {@code collectSync}
+     * 在定时任务里调用，那条任务外层没有 try/catch。抛出会让固化之后的全部逻辑跳过——
+     * 不写 history、不更新缓存、不发布快照——每周期抛一次，把"显示错标"升级成"采集停摆"。</p>
      */
     private static void assertRepaired(MetricsSnapshot snap, String child, String parent) {
-        boolean repaired = (Boolean) TestObjects.invoke(MetricsCollector.class,
-            "repairSubsetContracts", new Class<?>[]{MetricsSnapshot.class}, snap);
-        assertTrue(repaired, "契约 " + child + " ⊆ " + parent + " 被违反，但未被修复");
+        freeze(snap);
         assertContracts(snap);
+        assertTrue(setOf(snap, parent).containsAll(setOf(snap, child)),
+            "契约 " + child + " ⊆ " + parent + " 经过 freezeCollections 后仍未成立");
     }
 
     /** 按名字取集合字段，只为让 {@link #assertRepaired} 的调用处能传字符串。 */

@@ -138,9 +138,9 @@ const MUTATIONS = [
     {
         id: 'M11',
         file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
-        from: '        repairSubsetContractsBeforeFreeze(snap);',
+        from: '        repairSubsetContracts(snap);',
         to: '',
-        desc: '拆掉 freezeCollections 的契约校验 —— 子集被破坏的快照会被原样发布出去',
+        desc: '拆掉 freezeCollections 内置的契约修复 —— 子集被破坏的快照会被原样发布出去',
         expect: 'SnapshotSubsetInvariantTest',
     },
     {
