@@ -316,6 +316,119 @@ class TaskHandleContractTest {
     }
 
     // ------------------------------------------------------------------------------------
+    // 3b. Folia 路径的 cancel（`(foliaTask, plugin)` 构造器）
+    // ------------------------------------------------------------------------------------
+
+    /**
+     * 造一个 {@code ScheduledTask}（Folia 调度句柄）假实现。
+     *
+     * <p>它是 {@code io.papermc.paper.threadedregions.scheduler} 里的<b>接口</b>，
+     * 而 paper-api 1.20.4 已包含该包（实测 {@code javap} 可见），所以能用 {@link Proxy} 造。
+     * 不能像 Bukkit 路径那样塞一个裸 {@code Object}——{@code FoliaSchedulerBridge.cancel}
+     * 第 112 行是 {@code ((ScheduledTask) scheduledTask).cancel()}，塞 Object 会
+     * {@code ClassCastException}，而那个异常会走进取消失败的日志分支、在
+     * {@code plugin.getLogger()} 为 null 时再抛 NPE，把"路径没走通"伪装成"日志代码有 bug"。</p>
+     */
+    private static Object fakeScheduledTask(Runnable onCancel) {
+        try {
+            Class<?> st = Class.forName("io.papermc.paper.threadedregions.scheduler.ScheduledTask");
+            return Proxy.newProxyInstance(
+                TaskHandleContractTest.class.getClassLoader(),
+                new Class<?>[]{st},
+                (proxy, method, args) -> {
+                    if ("cancel".equals(method.getName())) {
+                        onCancel.run();
+                        return null;
+                    }
+                    return switch (method.getReturnType().getName()) {
+                        case "boolean" -> false;
+                        case "int" -> 0;
+                        case "long" -> 0L;
+                        default -> null;
+                    };
+                });
+        } catch (ClassNotFoundException e) {
+            throw new IllegalStateException(
+                "paper-api 未提供 ScheduledTask——Folia 路径的测试前提不成立", e);
+        }
+    }
+
+    /**
+     * Folia 路径的 {@code cancel()} 必须真的调到 {@code FoliaSchedulerBridge.cancel}。
+     *
+     * <p><b>这条是用变异验证补出来的。</b>第一版测试只覆盖了 Bukkit 路径，把
+     * {@code if (foliaTask != null)} 改成 {@code if (false)}——Folia 句柄永不取消——
+     * <b>10 个用例全部存活</b>。而那个改动的后果是：reload 之后旧实例的定时任务留在
+     * Folia 的 GlobalRegionScheduler 里继续跑，与新实例同时采集、同时告警、同时写历史。</p>
+     */
+    @Test
+    void foliaPathCancelReachesTheBridge() {
+        int[] cancelCount = {0};
+        SchedulerAdapter.TaskHandle h = handle(
+            new Class<?>[]{Object.class, Plugin.class},
+            fakeScheduledTask(() -> cancelCount[0]++), fakePlugin(null));
+        h.cancel();
+        assertEquals(1, cancelCount[0],
+            "Folia 路径的 cancel 必须调到 bridge 的 cancel()：把 if (foliaTask != null) 改成 "
+                + "if (false) 会让 Folia 句柄永不取消——reload 后旧任务残留并与新实例同时跑。"
+                + "这个缺口是变异验证发现的（当时 10 个用例全部存活）");
+    }
+
+    /** Folia 路径的句柄同样必须报告活跃。 */
+    @Test
+    void foliaHandleIsActive() {
+        SchedulerAdapter.TaskHandle h = handle(
+            new Class<?>[]{Object.class, Plugin.class},
+            fakeScheduledTask(() -> { }), fakePlugin(null));
+        assertTrue(h.isActive(),
+            "带 foliaTask 的句柄必须报告活跃：它代表 GlobalRegionScheduler 真的接下了这个任务");
+    }
+
+    /**
+     * Folia 路径取消失败（bridge 里抛出）也必须被吞掉并记日志。
+     *
+     * <p>这条锁的是 Folia 分支的 {@code catch (Throwable)}——范围比 Bukkit 分支的
+     * {@code catch (Exception | LinkageError)} 更宽，因为 bridge 走反射，
+     * 反射能抛出的东西不限于 {@code Exception}。</p>
+     */
+    @Test
+    void foliaPathCancelFailureIsSwallowedAndLogged() {
+        List<LogRecord> records = new ArrayList<>();
+        Logger logger = Logger.getLogger("pscope-taskhandle-folia-cancel-test");
+        logger.setUseParentHandlers(false);
+        logger.setLevel(Level.ALL);
+        Handler handler = new Handler() {
+            @Override
+            public void publish(LogRecord r) {
+                records.add(r);
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        logger.addHandler(handler);
+        try {
+            SchedulerAdapter.TaskHandle h = handle(
+                new Class<?>[]{Object.class, Plugin.class},
+                fakeScheduledTask(() -> {
+                    throw new IllegalStateException("模拟 Folia 取消失败");
+                }),
+                fakePlugin(logger));
+            assertDoesNotThrow(h::cancel,
+                "Folia 路径取消失败必须被吞：它跑在关服 / reload 循环里，冒泡会中断其余句柄的取消");
+        } finally {
+            logger.removeHandler(handler);
+        }
+        assertEquals(1, records.size(),
+            "Folia 路径取消失败必须正好记一条日志：零条是静默吞异常");
+    }
+
+    // ------------------------------------------------------------------------------------
     // 4. 边界：这条测试真的在测东西吗
     // ------------------------------------------------------------------------------------
 
