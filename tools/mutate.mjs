@@ -400,9 +400,9 @@ const MUTATIONS = [
         file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
         from: '        if (snap.totalEntities > cfg.entities_totalCriticalThreshold) {',
         to: '        if (snap.totalEntities >= cfg.entities_totalCriticalThreshold) {',
-        desc: '把 entities 的采集层判定从开区间改成闭区间 —— 与展示层「统一」了，'
-            + '但会让读数恰好等于 30000 的一批服务器突然开始报 critical。'
-            + '本变异用来验证「差异清单」这条断言真的会亮',
+        desc: '把 entities 的采集层判定从开区间改成闭区间 —— 两侧「统一」了，'
+            + '早预警语义（README 第 39 行）随之取消，读数恰好等于 30000 的一批服务器会突然开始报 critical。'
+            + '本变异用来验证「早预警语义」这条断言真的会亮',
         expect: 'ThresholdBoundaryAsymmetryTest',
     },
     {
@@ -411,6 +411,7 @@ const MUTATIONS = [
         from: '                if (value >= critical) return Level.CRITICAL;',
         to: '                if (value > critical) return Level.CRITICAL;',
         desc: '把展示层的闭区间改成开区间 —— 恰好到线的数字不再变红，'
+            + '早预警语义的展示侧（颜色先变）被取消，'
             + '违反 ThresholdColorsTest「30000 必须已经变红」的 UI 契约',
         expect: 'ThresholdBoundaryAsymmetryTest',
     },

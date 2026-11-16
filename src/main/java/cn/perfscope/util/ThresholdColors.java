@@ -31,8 +31,8 @@ import net.kyori.adventure.text.format.NamedTextColor;
  * 显示与告警从此同一口径，改配置即改颜色。
  *
  * <p>语义约定（闭合区间：达到或越过阈值即变色，与 A8 规格的 {@code ≥critical→CRITICAL} 表述一致）：
- * 注意采集层告警的触发条件在部分指标上用严格比较（如 MSPT &gt; 50、区块 &gt; 2500），因此
- * <b>恰好等于阈值的瞬间，显示会比告警先变一档</b>——这是有意的"早预警"语义（看到颜色变化时告警还在路上）；
+ * 注意采集层告警的触发条件在部分指标上用严格比较（如 MSPT &gt; 50、区块 &gt; 15000、实体 &gt; 30000），
+ * 因此 <b>恰好等于阈值的瞬间，显示会比告警先变一档</b>——这是有意的"早预警"语义（看到颜色变化时告警还在路上）；
  * MEMORY / PLAYERS 两侧均为闭区间、完全一致。
  * <ul>
  *   <li>低值差指标（{@link Metric#TPS}）：值越低越差。{@code value <= critical → CRITICAL}，
@@ -45,6 +45,10 @@ import net.kyori.adventure.text.format.NamedTextColor;
  *       用覆盖值；否则回退全局阈值（显示侧的提示性质，告警侧总数判定见 MetricsCollector）。</li>
  *   <li>数值哨兵：{@code value <= 0}（MSPT/CPU 的 -1 语义）或 NaN → {@link Level#UNKNOWN}。</li>
  * </ul>
+ *
+ * <p>四族差异里 {@link Metric#TPS} 最特别：方向相反（此处 {@code <=}、采集层 {@code <}），
+ * 且是唯一<b>差两档</b>的——{@code tps1m} 恰好等于 critical 时这里判 CRITICAL，
+ * 采集层却落进 warning 分支（发 WARNING 告警）。详见 {@code ThresholdBoundaryAsymmetryTest}。
  *
  * <p><b>行为变更声明（v1.2）</b>：绑定配置后，部分服务器的肉眼感受会变化——原先多个指标的
  * "红界"实际等于告警"黄界"（区块 1500、CPU 80 等），现在红色只在真正越过 critical 时出现。

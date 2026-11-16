@@ -14,26 +14,37 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * 阈值边界语义：<b>两处对同一批阈值采用了不同的区间口径</b>，这里把差异显式钉住。
+ * 阈值边界的<b>早预警语义</b>：展示层闭区间、采集层严格比较，这里把这个设计钉住。
  *
- * <h2>发现</h2>
- * 同一份配置、同一个读数，两个地方给出的结论不同：
+ * <h2>这是既定设计，不是缺陷</h2>
+ * {@code README.md} 第 39 行原文：「显示用闭区间（达到阈值即变色），部分指标告警用严格大于，
+ * 因此<b>恰好等于阈值的那一瞬颜色会先变、告警随后到达</b>（有意的早预警语义）」。
+ * {@code ThresholdColors} 类注释（约 33-51 行）与 {@code docs/07-guides/PERFSCOPE-TEST-PLAN.md}
+ * 附录 A 第 9 项也写着同一件事。本类的作用是<b>第一次用测试把它钉住</b>——
+ * 此前没有任何用例同时看两层，比较符被改坏也不会有测试变红。
+ *
+ * <h2>两层的实际口径</h2>
  *
  * <table border="1">
- *   <caption>边界值 value == threshold 时的判定</caption>
+ *   <caption>边界值时的判定（{@code value} 恰好等于阈值）</caption>
  *   <tr><th>指标</th><th>采集层（{@code MetricsCollector}）</th><th>展示层（{@code ThresholdColors}）</th></tr>
  *   <tr><td>{@code entities}</td><td>{@code >}（开区间）→ 边界值不告警</td><td>{@code >=}（闭区间）→ 边界值变红</td></tr>
  *   <tr><td>{@code chunks}</td><td>{@code >}（开区间）</td><td>{@code >=}（闭区间）</td></tr>
- *   <tr><td>{@code memory}</td><td>{@code >=}（闭区间）</td><td>{@code >=}（闭区间）</td></tr>
- *   <tr><td>{@code players}</td><td>{@code >=}（闭区间）</td><td>{@code >=}（闭区间）</td></tr>
- *   <tr><td>{@code tps}</td><td>{@code <}（低值差，闭区间）</td><td>{@code <=} 或 {@code <}（见各自测试）</td></tr>
  *   <tr><td>{@code mspt}</td><td>{@code >}（开区间）</td><td>{@code >=}（闭区间）</td></tr>
+ *   <tr><td>{@code tps}</td><td>{@code <}（低值差，开区间）</td><td>{@code <=}（低值差，闭区间）</td></tr>
+ *   <tr><td>{@code memory} / {@code players}</td><td>{@code >=}（闭区间）</td><td>{@code >=}（闭区间）</td></tr>
  * </table>
  *
- * <h2>后果</h2>
- * 在 {@code entities} / {@code chunks} / {@code mspt} 上，读数**恰好等于**阈值时：
- * 界面已经标红（展示层 {@code >=}），但告警不会发出（采集层 {@code >}）。
- * 服主看到红色数字却收不到通知，会以为告警坏了。
+ * <p><b>共 4 族</b>存在差异：{@code entities} / {@code chunks} / {@code mspt} / {@code tps}。
+ * 注意展示层<b>不是</b>"一律 {@code >=}"——{@code tps} 是低值差指标，方向相反，用的是 {@code <=}。</p>
+ *
+ * <h2>边界值时的行为</h2>
+ * 前三族只差一档：读数恰好等于阈值时界面已经标红（展示层闭区间），但告警不会发出
+ * （采集层开区间）——看到颜色变化时告警还在路上。
+ *
+ * <p>{@code tps} 是<b>唯一差两档</b>的：{@code tps1m == 15.0} 时展示层判 {@code CRITICAL}（红），
+ * 而采集层 {@code 15.0 < 15.0} 不成立、落进 {@code else if (tps1m < 18.0)} 分支 →
+ * 发 {@code WARNING} 告警、{@code recordLevel = 1}（黄）。</p>
  *
  * <p>反过来也成立：读数刚好在阈值<b>下方一点点</b>时界面是黄的，而告警也确实没发——这条一致。</p>
  *
@@ -47,12 +58,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  *       "30000 必须已经变红"是<b>刻意的 UI 契约</b>——到线就标红比"超过才标红"更符合直觉。</li>
  * </ul>
  *
- * <p>所以本测试<b>不提修复建议，只把现状钉住</b>。若将来决定统一，这些用例会红，
+ * <p>所以本测试<b>不提修复建议，只把语义钉住</b>。若将来决定统一，这些用例会红，
  * 那正是有意识的决定需要更新测试的位置。</p>
  *
  * <h2>这一组为什么值得存在</h2>
  * 两个类分属不同包（{@code util} 与 {@code metrics}），各自有测试，但<b>没有任何测试同时看两边</b>。
- * 于是"同一阈值两种口径"这件事在这个仓库里从未被记录下来——而它是真实存在的。
+ * 口径此前只写在注释与 README 里——注释不会在你改比较符时变红，测试会。
  */
 class ThresholdBoundaryAsymmetryTest {
 
@@ -120,7 +131,7 @@ class ThresholdBoundaryAsymmetryTest {
      *
      * <p>测试方式：把 {@code collectEntities} 的判定行读出来做断言。这不是"测行为"，
      * 而是把**结构事实**变成可失败的断言——若有人把 {@code >} 改成 {@code >=}，这里会红，
-     * 提醒他两侧口径已经不一致。</p>
+     * 提醒他早预警语义已经被改动（界面上"颜色先变"这一档就不存在了）。</p>
      */
     @Test
     void collectorUsesStrictGreaterThanForEntities() throws Exception {
@@ -130,9 +141,9 @@ class ThresholdBoundaryAsymmetryTest {
         assertEquals(true, strict || closed,
             "找不到 entities 的 critical 判定——判定被改写或重组了，请更新本测试");
         assertEquals(true, strict,
-            "采集层对 entities 用的是 `>`（开区间），而展示层 ThresholdColors 用 `>=`（闭区间）。"
-                + "这个不一致是当前事实：读数恰好等于 30000 时界面标红但告警不发。"
-                + "若你刚把它改成 `>=`，那是有意识的行为变更——请同时确认"
+            "采集层对 entities 用的是 `>`（开区间），展示层 ThresholdColors 用 `>=`（闭区间）——"
+                + "这是 README 第 39 行明写的早预警语义：读数恰好等于 30000 时界面先标红、告警还在路上。"
+                + "若你刚把它改成 `>=`，那是有意识的行为变更（早预警语义被取消）——请同时确认"
                 + "ThresholdColorsTest 的「30000 必须已经变红」仍然成立，并更新本测试的说明");
     }
 
@@ -159,14 +170,17 @@ class ThresholdBoundaryAsymmetryTest {
     }
 
     // ------------------------------------------------------------------------------------
-    // 3. 差异的汇总断言（让"不一致"本身成为一条可失败的用例）
+    // 3. 早预警语义的汇总断言（让"设计意图"本身成为一条可失败的用例）
     // ------------------------------------------------------------------------------------
 
     /**
-     * <b>记录差异清单</b>：哪几个指标在两层的区间口径不同。
+     * <b>钉住差异清单</b>：本条覆盖高值差两族（{@code entities} / {@code mspt}）的口径差异。
      *
-     * <p>这条用例的作用是"把隐式不一致变成显式清单"。它断言的是<b>当前已知的差异集合</b>——
-     * 若将来有人统一了口径，这里会红，让他必须来更新这份清单（而不是让差异悄悄消失或悄悄扩大）。</p>
+     * <p>作用是把"早预警语义"从注释里的一句话变成会变红的断言。它断言的是<b>当前设计下的差异集合</b>——
+     * 若将来有人统一了口径，这里会红，让他必须来更新这份清单（而不是让语义悄悄消失或悄悄扩大）。</p>
+     *
+     * <p>另两族（{@code chunks} 同为高值差开区间、{@code tps} 为低值差且差两档）见类注释的对照表；
+     * 本条不重复断言它们，断言内容保持不变。</p>
      */
     @Test
     void knownDivergencesBetweenLayersAreExactlyThese() {
@@ -181,7 +195,7 @@ class ThresholdBoundaryAsymmetryTest {
         boolean entitiesStrict = src.contains("snap.totalEntities > cfg.entities_totalCriticalThreshold");
         boolean msptStrict = src.contains("snap.msptAvg > cfg.mspt_criticalThreshold");
 
-        // 展示层对所有指标一律用闭区间（>=）——见 ThresholdColors.Level 的实现
+        // 展示层对高值差指标用闭区间（>=）；低值差指标 TPS 方向相反，用 <=。
         ThresholdColors c = colors();
         boolean displayEntitiesClosed =
             c.levelOf(ThresholdColors.Metric.ENTITIES, 30_000) == ThresholdColors.Level.CRITICAL;
@@ -189,14 +203,15 @@ class ThresholdBoundaryAsymmetryTest {
             c.levelOf(ThresholdColors.Metric.MSPT, 50) == ThresholdColors.Level.CRITICAL;
 
         assertEquals(true, displayEntitiesClosed && displayMsptClosed,
-            "展示层预期对 entities 与 mspt 都用闭区间（恰好到线就变红）");
+            "展示层对高值差指标 entities 与 mspt 用闭区间（恰好到线就变红）");
 
         assertEquals("entities 开 / mspt 开",
             (entitiesStrict ? "entities 开" : "entities 闭")
                 + " / " + (msptStrict ? "mspt 开" : "mspt 闭"),
-            "已知的区间口径差异清单变了。当前：entities 与 mspt 在采集层是开区间（>），"
-                + "在展示层是闭区间（>=），所以边界值会出现「界面已标红但告警未发」。"
-                + "若你刚统一了口径，更新这份清单与 ThresholdBoundaryAsymmetryTest 的说明");
+            "早预警语义的差异清单变了。当前：entities 与 mspt 在采集层是开区间（>），"
+                + "在展示层是闭区间（>=），所以边界值会出现「界面已标红但告警未发」——这是 README 第 39 行"
+                + "明写的既定设计。若你刚统一了口径（取消了早预警），更新这份清单与"
+                + " ThresholdBoundaryAsymmetryTest 的说明");
     }
 
     /** 读源码文本。只用于本条把结构事实变成断言，不参与任何生产逻辑。 */
