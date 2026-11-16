@@ -1002,15 +1002,54 @@ public class MetricsCollector {
         cachedEntityLevels = new LinkedHashMap<>(levelList);
     }
 
+    /**
+     * 四个"重模块"（entities / chunks / tile_entities / hotspots）缓存回放时的不可用标记。
+     *
+     * <p><b>为什么收成一个方法</b>：这四个模块的缓存回放逻辑此前是四份逐字相同的 10 行块，
+     * 唯一的差别是模块名与三个布尔量。四份手写的代价不是"重复不好看"，而是
+     * <b>漏一个标记不会有任何提示</b>——它只会让 {@code freezeCollections} 的
+     * {@code repairSubsetContracts} 在事后补上，而"事后补救"意味着<b>数据已经错了一轮</b>
+     * 才被纠正，且只在日志里留一行限频 WARNING。</p>
+     *
+     * <p>三个标记的语义与契约（见 {@link MetricsSnapshot} 的字段 javadoc）：</p>
+     * <ul>
+     *   <li>{@code unavailable} —— 必备。模块的数据这一轮不可信，收集这一份就是它的全部含义；</li>
+     *   <li>{@code disabledModules} —— 服主显式 {@code enabled: false}。<b>必须同时进 unavailable</b>；</li>
+     *   <li>{@code platformSkipped} —— 平台限制（Folia 跨 region 聚合不可靠）。
+     *       <b>必须同时进 disabledModules 与 unavailable</b>，即
+     *       {@code platformSkipped ⊆ disabledModules ⊆ unavailable}。</li>
+     * </ul>
+     *
+     * <p>收成一个方法后，"写 platformSkipped 却忘了写 disabledModules"这类错在结构上
+     * 不再可能——三个集合在同一个方法体里，一次写完。</p>
+     *
+     * @param module          模块名（{@link MetricsSnapshot#MODULE_ENTITIES} 等）
+     * @param unavailable     本轮该模块是否不可用（缓存未就绪 或 采集失败/被禁用）
+     * @param disabled        是否因配置 {@code enabled: false} 而不可用
+     * @param platformSkipped 是否因平台限制（Folia）而不可用
+     */
+    private static void markDedicatedModuleUnavailable(MetricsSnapshot snap, String module,
+                                                       boolean unavailable, boolean disabled,
+                                                       boolean platformSkipped) {
+        if (!unavailable) {
+            return;
+        }
+        snap.unavailable.add(module);
+        if (disabled) {
+            snap.disabledModules.add(module);
+        }
+        if (platformSkipped) {
+            // 契约要求 platformSkipped ⊆ disabledModules：平台限制同时是"服主没配过但平台不让采"，
+            // 展示层据此渲染更精确的原因而不是笼统的「已禁用」。
+            snap.disabledModules.add(module);
+            snap.platformSkipped.add(module);   // 9B-3
+        }
+    }
+
     private void applyEntitiesCache(MetricsSnapshot snap) {
         if (!entitiesCacheReady || entitiesCacheUnavailable) {
-            snap.unavailable.add(MetricsSnapshot.MODULE_ENTITIES);
-            if (entitiesCacheDisabled) {
-                snap.disabledModules.add(MetricsSnapshot.MODULE_ENTITIES);
-            }
-            if (entitiesCachePlatformSkipped) {
-                snap.platformSkipped.add(MetricsSnapshot.MODULE_ENTITIES);   // 9B-3
-            }
+            markDedicatedModuleUnavailable(snap, MetricsSnapshot.MODULE_ENTITIES,
+                true, entitiesCacheDisabled, entitiesCachePlatformSkipped);
             return;
         }
         snap.totalEntities = cachedTotalEntities;
@@ -1094,13 +1133,8 @@ public class MetricsCollector {
 
     private void applyChunksCache(MetricsSnapshot snap) {
         if (!chunksCacheReady || chunksCacheUnavailable) {
-            snap.unavailable.add(MetricsSnapshot.MODULE_CHUNKS);
-            if (chunksCacheDisabled) {
-                snap.disabledModules.add(MetricsSnapshot.MODULE_CHUNKS);
-            }
-            if (chunksCachePlatformSkipped) {
-                snap.platformSkipped.add(MetricsSnapshot.MODULE_CHUNKS);   // 9B-3
-            }
+            markDedicatedModuleUnavailable(snap, MetricsSnapshot.MODULE_CHUNKS,
+                true, chunksCacheDisabled, chunksCachePlatformSkipped);
             return;
         }
         snap.totalLoadedChunks = cachedTotalLoadedChunks;
@@ -1166,13 +1200,8 @@ public class MetricsCollector {
 
     private void applyTileEntitiesCache(MetricsSnapshot snap) {
         if (!teCacheReady || teCacheUnavailable) {
-            snap.unavailable.add(MetricsSnapshot.MODULE_TILE_ENTITIES);
-            if (teCacheDisabled) {
-                snap.disabledModules.add(MetricsSnapshot.MODULE_TILE_ENTITIES);
-            }
-            if (teCachePlatformSkipped) {
-                snap.platformSkipped.add(MetricsSnapshot.MODULE_TILE_ENTITIES);   // 9B-3
-            }
+            markDedicatedModuleUnavailable(snap, MetricsSnapshot.MODULE_TILE_ENTITIES,
+                true, teCacheDisabled, teCachePlatformSkipped);
             return;
         }
         snap.tileEntityCount = cachedTileEntityCount;
@@ -1393,13 +1422,8 @@ public class MetricsCollector {
 
     private void applyHotspotsCache(MetricsSnapshot snap) {
         if (!hotspotsCacheReady || hotspotsCacheUnavailable) {
-            snap.unavailable.add(MetricsSnapshot.MODULE_HOTSPOTS);
-            if (hotspotsCacheDisabled) {
-                snap.disabledModules.add(MetricsSnapshot.MODULE_HOTSPOTS);
-            }
-            if (hotspotsCachePlatformSkipped) {
-                snap.platformSkipped.add(MetricsSnapshot.MODULE_HOTSPOTS);   // 9B-3
-            }
+            markDedicatedModuleUnavailable(snap, MetricsSnapshot.MODULE_HOTSPOTS,
+                true, hotspotsCacheDisabled, hotspotsCachePlatformSkipped);
             return;
         }
         snap.topEntityChunks = new ArrayList<>(cachedHotspots);   // 9A-10 #3：每次快照独立副本
@@ -1412,15 +1436,17 @@ public class MetricsCollector {
      * 将异步 JVM 缓存填入当前快照（P0-1）。
      * 缓存为空（启动初期异步尚未产出）时，内存/CPU/GC 标记 unavailable，避免 0 值误导或 NPE；
      * server 的 Bukkit 部分已在主线程采集，JVM 部分（运行时长/线程数）短暂为默认值，下一周期即补上。
-     */
-    private void applyJvmCache(MetricsSnapshot snap) {
-        applyJvmCache(snap, configManager.get());
-    }
-
-    /**
-     * 9A-10 #2：接受调用方传入的 cfg，避免在采集过程中回读配置。
-     * reload 期间 configManager.get() 已换新引用，若此处再读一次，同一份快照的
-     * "JVM 段"就会用新一代的 enabled 判定，与前半段（旧阈值）混用两代配置。
+     *
+     * <p><b>9A-10 #2 之后只剩双参版本</b>：曾有一个单参重载
+     * {@code applyJvmCache(MetricsSnapshot)}，方法体只有一行
+     * {@code applyJvmCache(snap, configManager.get())}。唯一调用点（{@code collectSyncOnce}）
+     * 早已改成显式传 {@code cfg}——因为 reload 期间再经 {@code configManager.get()} 回读，
+     * 会让同一份快照的"JVM 段"用新一代配置、前半段用旧一代。</p>
+     *
+     * <p>那个重载因此是零调用点的死代码，且它<b>保留着已被淘汰的那种危险写法</b>：
+     * 谁若误用它，9A-10 #2 那个 bug 会原样复发。删掉比留着安全。</p>
+     *
+     * @param cfg 本周期捕获的配置快照，<b>不得</b>在方法内回读 {@code configManager.get()}
      */
     private void applyJvmCache(MetricsSnapshot snap, ConfigManager.ConfigData cfg) {
         MetricsSnapshot jvm = jvmCache; // volatile 读一次，保证本次填入一致
@@ -2016,6 +2042,20 @@ public class MetricsCollector {
         snap.chunksByWorld = byWorld;
         snap.forceLoadedChunksByWorld = forceByWorld;
 
+        // v1.4.5：注意与 collectEntities 的逐世界判定**口径不同**，这是刻意的，不是遗漏。
+        //
+        // collectEntities 对没有 worlds 覆盖的世界 `continue`（不判定、不写 entities:world:<名>），
+        // 因为它有"全服总数"口径（entities:global）兜底——没覆盖的世界的实体仍计入全服合计。
+        //
+        // 这里则**每个世界都判**，用全局阈值，因为 chunks **没有全服口径**：
+        // Metric 枚举里只有 CHUNKS_WORLD、没有"全服区块数"这个告警指标
+        //（见 Metric.ofKey 的注释："全服区块数不是告警指标，旧版本也从未告警过"）。
+        // 若这里也跳过没覆盖的世界，那些世界的区块超限将**完全失声**——既没有逐世界告警，
+        // 也没有全服告警可依托。
+        //
+        // 副效果：用户新增一个世界（自定义世界、插件生成世界）却不配 worlds 覆盖时，
+        // chunks:world:<新世界> 会出现且用全局阈值判定，而 entities:world:<新世界> 不会出现。
+        // 两条序列的键集合因此不对称——Prometheus 侧查这两族指标时的预期要分开写。
         for (Map.Entry<String, Integer> entry : byWorld.entrySet()) {
             String chunkKey = "chunks:world:" + entry.getKey();
             if (entry.getValue() > cfg.chunks_loadedCriticalThreshold) {
