@@ -414,6 +414,41 @@ const MUTATIONS = [
             + '违反 ThresholdColorsTest「30000 必须已经变红」的 UI 契约',
         expect: 'ThresholdBoundaryAsymmetryTest',
     },
+    {
+        id: 'M41',
+        file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
+        from: '                if (t <= 0) {\n                    continue; // 跳过未填充槽位/无效采样',
+        to: '                if (t < 0) {\n                    continue; // 跳过未填充槽位/无效采样',
+        desc: '跳过条件从 t<=0 放宽成 t<0 —— 未填充槽位 0 被计入 min，'
+            + 'min 恒为 0，展示层用 msptMin<=0 判「未采集」，于是有效极值被渲染成「没数据」',
+        expect: 'MsptReduceTest',
+    },
+    {
+        id: 'M42',
+        file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
+        from: '            return new MsptStats(-1, -1, -1, 0);',
+        to: '            return new MsptStats(0, 0, 0, 0);',
+        desc: '无样本时返回 0 而不是 -1 哨兵 —— MSPT 里 0 是合法读数，'
+            + '于是「服务器极快」与「采不到」无法区分',
+        expect: 'MsptReduceTest',
+    },
+    {
+        id: 'M43',
+        file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
+        from: '            round2(max / 1_000_000.0),',
+        to: '            round2(max / 1_000.0),',
+        desc: 'max 的换算从 /1e6 改成 /1e3 —— min/avg 是毫秒、max 是微秒，量级差 1000 的混排',
+        expect: 'MsptReduceTest',
+    },
+    {
+        id: 'M44',
+        file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
+        from: '            round2(sum / (double) n / 1_000_000.0),',
+        to: '            round2(sum / (double) (arr == null ? 1 : arr.length) / 1_000_000.0),',
+        desc: 'avg 的分母用数组总长度而不是有效样本数 —— 含零槽位时 avg 被拉低，'
+            + '甚至可能小于 min（「平均比最快还快」）',
+        expect: 'MsptReduceTest',
+    },
 ];
 
 // ---------------------------------------------------------------------------
