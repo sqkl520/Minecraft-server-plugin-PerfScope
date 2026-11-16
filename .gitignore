@@ -11,3 +11,11 @@ dependency-reduced-pom.xml
 /versions/*
 !/versions/README.md
 *.jar
+
+# JVM 崩溃与重放日志
+# tools/mutate.mjs 会连续跑几十次 mvn，机器内存紧张时 JVM 会 dump 一份 hs_err/replay 到
+# 当前目录（也就是仓库根）。它们含堆栈与环境信息，既不该入库，也不该在工作树里堆几十个
+# untracked 文件干扰 git status 的判读。
+hs_err_pid*.log
+replay_pid*.log
+
