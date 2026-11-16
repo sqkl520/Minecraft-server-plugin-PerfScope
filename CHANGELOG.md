@@ -18,6 +18,52 @@
 
 > v1.4.4 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
 
+### Changed — 阈值判定收成显式算子表（`ThresholdOperator`）
+
+**这不是「统一算子」。** 早预警语义原样保留：`tps` / `mspt` / 逐世界实体 / 全服实体 / 逐世界区块
+仍是严格比较（`<` / `>`），`players` / `memory` 仍是闭区间（`>=`）。README 第 39 行那条
+「读数恰好等于阈值时颜色先变、告警还在路上」的行为一个字没动，`ThresholdBoundaryAsymmetryTest`
+的四点表逐条验证了这一点。
+
+**改的是「算子放在哪」**：采集层 7 个 `collect*` 方法里原本散着 14 处内联的 `if (value > cfg.xxx)`
+两段式比较，现在收成 `ThresholdOperator` 里每指标一行
+`new Rule(key, direction, criticalComparison, warningComparison)`，`collect*` 侧只剩
+`Rule.levelOf(value, warn, crit)` 一行。于是「改某个指标的算子」从「翻遍 14 处 if」变成
+「改表里一格」，而「新增第 8 个指标」在结构上等于「必须往表里加一行并声明方向与算子」——
+`ThresholdOperatorBehaviorTest` 的「表里有几条就必须测几条」会把漏加用例变成红色。
+
+**两档拆成两个字段是刻意的**：`criticalComparison` 与 `warningComparison` 分开，才让
+「只把 warning 档从 `>` 改成 `>=`」这种半格挪动可以被单独表达、单独改坏、单独被测试杀死。
+两档共用一个字段时它根本无法表达（此前实测正是这个方向存活）。
+
+**原来哪些方向零保护（变异实测）**：在改动前的 715 个用例下，以下六个方向**全量零失败**——
+改坏了没有任何测试会变红，后果是线上判定整整挪动一格：
+
+| 方向 | 改动后果 |
+|---|---|
+| `tps` 的 `<` → `<=` | TPS 恰好 15.0（默认 critical 线，最常见边界读数）从「只发 warning」变成「发 critical」 |
+| `chunks` 的 `>` → `>=` | 恰好加载 15000 区块的世界开始报 critical，等于把告警线悄悄下调一格 |
+| `entities:world:*` 的 `>` → `>=` | 配了 `worlds:` 覆盖的世界在边界值上开始告警 |
+| `mspt` warning 档的 `>` → `>=` | 恰好 45ms 的服务器持续告警 |
+| `entities:global` warning 档的 `>` → `>=` | 恰好 20000 全服实体开始报 warning |
+| `players` 的 `>=` → `>` | 恰好 98% 满员从 critical 掉回 warning |
+
+现在这六个方向各有一条变异，全部 KILLED（`tools/mutate.mjs` 的 M54–M58 与 M48/M39）。
+
+**顺带修掉的工具缺陷**：`mutate.mjs` 旧版的退出码只看 `survived > 0`，`from` 字面量被重构搬走后
+那条变异只打一行 SKIP 就静默消失——覆盖少了一条，脚本照样 exit 0。现在 SKIP 计入失败，
+汇总行单独列出 SKIP 的编号与原因（「原文未找到 = 变异表已过期」/「既无 expect 也无 gate = 表写错」），
+退出码改为 `survived > 0 || skipped > 0`。
+
+**测试改动**：`ThresholdBoundaryAsymmetryTest` 里 6 处读源码文本的 `src.contains("...")`
+断言改写为对算子表取值（`Rule.criticalComparison()`）与行为（`Rule.levelOf`）的断言。
+理由：判定搬进表之后那些字面量必然消失，文本断言会**假红**（行为没变、只是写法变了），
+而且它读文件要求 cwd 是仓库根。改写后同一批错误（把 `>` 改成 `>=`）仍然会红，
+但重构不再误报。类注释里的「4 族差异清单」保留——那是文档价值。
+
+**新增测试**：`ThresholdOperatorBehaviorTest`（20 用例）——表完整性、七条规则的点表、
+两档闭合性可独立、五个判定半段方法的键名与 `alertLevels` 写入时机。
+
 ### Fixed — 采集坏了却报「已恢复正常」：`alertLevels` 引入显式「无判定」三态
 
 **现象**：某个维度明明没有被测量，告警层却在 3 个周期后推出一条「已恢复正常」，并把该告警

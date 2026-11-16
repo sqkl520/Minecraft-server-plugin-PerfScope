@@ -123,28 +123,34 @@ class ThresholdBoundaryAsymmetryTest {
     // ------------------------------------------------------------------------------------
 
     /**
-     * <b>采集层对 entities 用开区间</b>：恰好等于阈值<b>不</b>告警。
+     * <b>采集层对 entities 用开区间</b>：恰好等于阈值<b>不</b>告警，而展示层已经把它标红。
      *
-     * <p>这条是用源码事实表达的：{@code collectEntities} 里写的是
-     * {@code snap.totalEntities > cfg.entities_totalCriticalThreshold}（{@code >} 而非 {@code >=}）。
-     * 所以读数恰好 30000 时，采集层不生成 critical 告警，而展示层已经把那个数字标红。</p>
+     * <p>这条断言的是<b>一次判定里的两层对照</b>，而不是某一行的写法：同一读数 30000，
+     * {@link ThresholdColors} 判 {@code CRITICAL}，{@link ThresholdOperator#ENTITIES_GLOBAL}
+     * 判 {@code 1}（warning 档，未到 critical）。</p>
      *
-     * <p>测试方式：把 {@code collectEntities} 的判定行读出来做断言。这不是"测行为"，
-     * 而是把**结构事实**变成可失败的断言——若有人把 {@code >} 改成 {@code >=}，这里会红，
-     * 提醒他早预警语义已经被改动（界面上"颜色先变"这一档就不存在了）。</p>
+     * <p><b>为什么从"读源码文本"改成"读算子表"</b>：原实现
+     * {@code src.contains("snap.totalEntities > cfg.entities_totalCriticalThreshold")} 在
+     * 判定收进 {@link ThresholdOperator} 之后必然假红（行为没变，只是字面量搬了家），
+     * 而且它读文件要求 cwd 是仓库根。算子表是采集层判定的唯一来源，断言它的
+     * {@link ThresholdOperator.Rule#criticalComparison()} 与四点表一样能杀死"把 {@code >}
+     * 改成 {@code >=}"，却不会因为一次重构就误报。</p>
      */
     @Test
-    void collectorUsesStrictGreaterThanForEntities() throws Exception {
-        String src = sourceOf("src/main/java/cn/perfscope/metrics/MetricsCollector.java");
-        boolean strict = src.contains("snap.totalEntities > cfg.entities_totalCriticalThreshold");
-        boolean closed = src.contains("snap.totalEntities >= cfg.entities_totalCriticalThreshold");
-        assertEquals(true, strict || closed,
-            "找不到 entities 的 critical 判定——判定被改写或重组了，请更新本测试");
-        assertEquals(true, strict,
+    void collectorUsesStrictGreaterThanForEntities() {
+        assertEquals(ThresholdOperator.Comparison.STRICT,
+            ThresholdOperator.ENTITIES_GLOBAL.criticalComparison(),
             "采集层对 entities 用的是 `>`（开区间），展示层 ThresholdColors 用 `>=`（闭区间）——"
                 + "这是 README 第 39 行明写的早预警语义：读数恰好等于 30000 时界面先标红、告警还在路上。"
                 + "若你刚把它改成 `>=`，那是有意识的行为变更（早预警语义被取消）——请同时确认"
                 + "ThresholdColorsTest 的「30000 必须已经变红」仍然成立，并更新本测试的说明");
+
+        // 行为侧同一件事：恰好 30000 只到 1 级，展示层却是 CRITICAL
+        assertEquals(1, ThresholdOperator.ENTITIES_GLOBAL.levelOf(30_000, 20_000, 30_000),
+            "读数恰好等于 critical 阈值时采集层必须只到 warning（开区间）");
+        assertEquals(ThresholdColors.Level.CRITICAL,
+            colors().levelOf(ThresholdColors.Metric.ENTITIES, 30_000),
+            "同一个 30000 在展示层必须已经是 CRITICAL——两者的差就是「早预警」本身");
     }
 
     /**
@@ -155,18 +161,17 @@ class ThresholdBoundaryAsymmetryTest {
      */
     @Test
     void collectorUsesClosedIntervalForPercentMetrics() {
-        String src;
-        try {
-            src = sourceOf("src/main/java/cn/perfscope/metrics/MetricsCollector.java");
-        } catch (Exception e) {
-            throw new IllegalStateException(e);
-        }
-        assertEquals(true,
-            src.contains("pct >= cfg.players_criticalThreshold"),
+        assertEquals(ThresholdOperator.Comparison.INCLUSIVE,
+            ThresholdOperator.PLAYERS.criticalComparison(),
             "players 是百分比指标，采集层用闭区间 `>=`，与展示层一致");
-        assertEquals(true,
-            src.contains("snap.heapUsagePercent >= cfg.memory_heapCriticalThreshold"),
+        assertEquals(ThresholdOperator.Comparison.INCLUSIVE,
+            ThresholdOperator.MEMORY.criticalComparison(),
             "memory 是百分比指标，采集层用闭区间 `>=`，与展示层一致");
+
+        // 行为侧：恰好到线就进档，两层同时成立才叫"一致"
+        assertEquals(1, ThresholdOperator.PLAYERS.levelOf(90, 90, 98));
+        assertEquals(1, ThresholdOperator.MEMORY.levelOf(85, 85, 95));
+        assertEquals(ThresholdColors.Level.WARN, colors().levelOf(ThresholdColors.Metric.MEMORY, 85));
     }
 
     // ------------------------------------------------------------------------------------
@@ -184,18 +189,15 @@ class ThresholdBoundaryAsymmetryTest {
      */
     @Test
     void knownDivergencesBetweenLayersAreExactlyThese() {
-        String src;
-        try {
-            src = sourceOf("src/main/java/cn/perfscope/metrics/MetricsCollector.java");
-        } catch (Exception e) {
-            throw new IllegalStateException(e);
-        }
-
-        // 采集层用开区间（>）的指标
-        boolean entitiesStrict = src.contains("snap.totalEntities > cfg.entities_totalCriticalThreshold");
-        // mspt 的判定已抽进纯函数 msptAlertLevel（见 MetricsCollector，v1.6 让哨兵口径可测）；
-        // 探针跟着搬到新位置，语义仍是「开区间」——顺便把"抽函数时把 > 写成 >= "变成会红的事实。
-        boolean msptStrict = src.contains("msptAvg > crit");
+        // 采集层用开区间（>）的指标——判定的唯一来源是 ThresholdOperator 这张表，
+        // 所以这里断言表的取值，而不是 MetricsCollector 里的某一行字面量
+        //（判定收进表之后字面量必然搬走，文本断言会假红；见 collectorUsesStrictGreaterThanForEntities 的说明）。
+        boolean entitiesStrict =
+            ThresholdOperator.ENTITIES_GLOBAL.criticalComparison() == ThresholdOperator.Comparison.STRICT;
+        // mspt 的判定已抽进纯函数 msptAlertLevel 并委托给 ThresholdOperator.MSPT（v1.6 让哨兵口径可测）；
+        // 探针跟着搬到表里，语义仍是「开区间」——顺便把"改表时把 STRICT 写成 INCLUSIVE"变成会红的事实。
+        boolean msptStrict =
+            ThresholdOperator.MSPT.criticalComparison() == ThresholdOperator.Comparison.STRICT;
 
         // 展示层对高值差指标用闭区间（>=）；低值差指标 TPS 方向相反，用 <=。
         ThresholdColors c = colors();
@@ -214,16 +216,5 @@ class ThresholdBoundaryAsymmetryTest {
                 + "在展示层是闭区间（>=），所以边界值会出现「界面已标红但告警未发」——这是 README 第 39 行"
                 + "明写的既定设计。若你刚统一了口径（取消了早预警），更新这份清单与"
                 + " ThresholdBoundaryAsymmetryTest 的说明");
-    }
-
-    /** 读源码文本。只用于本条把结构事实变成断言，不参与任何生产逻辑。 */
-    private static String sourceOf(String relativePath) throws Exception {
-        java.nio.file.Path p = java.nio.file.Paths.get(relativePath);
-        if (!java.nio.file.Files.exists(p)) {
-            // 从 target/test-classes 往上找仓库根（surefire 的 cwd 就是仓库根，但保险起见）
-            p = java.nio.file.Paths.get("..").resolve(relativePath).normalize();
-        }
-        return new String(java.nio.file.Files.readAllBytes(p),
-            java.nio.charset.StandardCharsets.UTF_8);
     }
 }

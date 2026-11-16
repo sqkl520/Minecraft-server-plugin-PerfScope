@@ -1672,18 +1672,37 @@ public class MetricsCollector {
         snap.tps1m = round2(tps[0]);
         snap.tps5m = round2(tps[1]);
         snap.tps15m = round2(tps[2]);
+        applyTpsLevel(snap, cfg);
+    }
 
-        if (snap.tps1m < cfg.tps_criticalThreshold) {
-            addAlert(snap, Alert.measuredWithThresholds("tps:global", Alert.LEVEL_CRITICAL, snap.tps1m,
+    /**
+     * TPS 的判定与告警生成（{@code collectTPS} 的判定半段，与 Bukkit 读数解耦）。
+     *
+     * <p><b>为什么拆出来</b>：{@code collectTPS} 的第一行是 {@code Bukkit.getTPS()}，
+     * 测试 JVM 里没有服务端。判定（算子、档位、键名、告警报文级别）此前因此整段不可测——
+     * 把 {@code <} 改成 {@code <=} 全量用例一个都不红。拆开后本方法只读 {@code snap.tps1m}
+     * 与三个阈值，测试可以直接构造读数再调用它。</p>
+     *
+     * <p>行为与拆分前逐位等价：档位判定仍走 {@link ThresholdOperator#TPS}（两档严格 {@code <}），
+     * 告警参数（键名、级别、阈值字段、模块、时间戳）一字未改。</p>
+     */
+    void applyTpsLevel(MetricsSnapshot snap, ConfigManager.ConfigData cfg) {
+        // 算子（`<` 还是 `<=`）不写在这里，见 ThresholdOperator.TPS：低值差、两档严格比较。
+        // 之前这两段内联的 `<` 零测试保护——改成 `<=` 全量用例一个都不红（实测），
+        // 而线上 TPS 恰好 15.0 时会从「只发 warning」变成「发 critical」。
+        int level = ThresholdOperator.TPS.levelOf(
+            snap.tps1m, cfg.tps_warningThreshold, cfg.tps_criticalThreshold);
+        // 键名也从表里取：阈值与序列名是同一个身份的两半，分开写会让「改了表却没改键」
+        // 变成一次静默的 Prometheus 序列改名（旧序列消失、新序列从 0 起）。
+        String key = ThresholdOperator.TPS.key();
+        if (level == 2) {
+            addAlert(snap, Alert.measuredWithThresholds(key, Alert.LEVEL_CRITICAL, snap.tps1m,
                     cfg.tps_criticalThreshold, cfg.tps_criticalThreshold, MetricsSnapshot.MODULE_TPS, snap.timestamp));
-            recordLevel(snap, "tps:global", 2);
-        } else if (snap.tps1m < cfg.tps_warningThreshold) {
-            addAlert(snap, Alert.measuredWithThresholds("tps:global", Alert.LEVEL_WARNING, snap.tps1m,
+        } else if (level == 1) {
+            addAlert(snap, Alert.measuredWithThresholds(key, Alert.LEVEL_WARNING, snap.tps1m,
                     cfg.tps_warningThreshold, cfg.tps_warningThreshold, MetricsSnapshot.MODULE_TPS, snap.timestamp));
-            recordLevel(snap, "tps:global", 1);
-        } else {
-            recordLevel(snap, "tps:global", 0);
         }
+        recordLevel(snap, key, level);
     }
 
     // ==================== MSPT ====================
@@ -1730,14 +1749,15 @@ public class MetricsCollector {
         // 用缺席表达"没测"，等于把"没测"谎报成"不适用"：采集坏了，告警却宣布「已恢复正常」。
         // 级别与告警的对应关系收在 msptAlertLevel 里（纯函数，可单测），调用点只管照着发。
         int level = msptAlertLevel(snap.msptAvg, cfg.mspt_warningThreshold, cfg.mspt_criticalThreshold);
+        String key = ThresholdOperator.MSPT.key();
         if (level == 2) {
-            addAlert(snap, Alert.measuredWithThresholds("mspt:global", Alert.LEVEL_CRITICAL, snap.msptAvg,
+            addAlert(snap, Alert.measuredWithThresholds(key, Alert.LEVEL_CRITICAL, snap.msptAvg,
                     cfg.mspt_criticalThreshold, cfg.mspt_criticalThreshold, MetricsSnapshot.MODULE_MSPT, snap.timestamp));
         } else if (level == 1) {
-            addAlert(snap, Alert.measuredWithThresholds("mspt:global", Alert.LEVEL_WARNING, snap.msptAvg,
+            addAlert(snap, Alert.measuredWithThresholds(key, Alert.LEVEL_WARNING, snap.msptAvg,
                     cfg.mspt_warningThreshold, cfg.mspt_warningThreshold, MetricsSnapshot.MODULE_MSPT, snap.timestamp));
         }
-        recordLevel(snap, "mspt:global", level);
+        recordLevel(snap, key, level);
     }
 
     /**
@@ -1763,10 +1783,10 @@ public class MetricsCollector {
         if (!(msptAvg > 0)) {
             return MetricsSnapshot.ALERT_LEVEL_NO_VERDICT;
         }
-        if (msptAvg > crit) {
-            return 2;
-        }
-        return msptAvg > warn ? 1 : 0;
+        // 两档的算子（`>` 还是 `>=`）不写在这里，见 ThresholdOperator.MSPT。
+        // 本方法只负责「先判有没有可信读数」，剩下的级别判定交给那张表——
+        // 这样「MSPT 的 warning 档从 > 改成 >=」就能被阈值表的行为用例单独杀死。
+        return ThresholdOperator.MSPT.levelOf(msptAvg, warn, crit);
     }
 
     /**
@@ -1913,17 +1933,32 @@ public class MetricsCollector {
         // P0-13：maxPlayers<=0（代理/精简端）时不做除法，避免 Infinity 强转为 Integer.MAX_VALUE 误报
         // 9A-6：统一走 MetricsSnapshot.playerPercent()（唯一算法入口）
         int pct = snap.playerPercent();
-        if (pct >= cfg.players_criticalThreshold) {
-            addAlert(snap, Alert.measuredWithReference("players:global", Alert.LEVEL_CRITICAL,
+        applyPlayersLevel(snap, cfg, pct);
+    }
+
+    /**
+     * 玩家占比的判定与告警生成（{@code collectPlayers} 的判定半段）。
+     *
+     * <p>拆分理由与 {@link #applyTpsLevel} 同：取值来自 {@code Bukkit.getOnlinePlayers()}
+     * 与 {@code Bukkit.getMaxPlayers()}，测不了。拆分后判定只依赖 {@code pct} 与两个阈值。</p>
+     *
+     * <p>行为等价：档位仍走 {@link ThresholdOperator#PLAYERS}（两档闭区间 {@code >=}），
+     * 告警参数（含 {@code measuredWithReference} 的 playerCount/maxPlayers）不变。</p>
+     */
+    void applyPlayersLevel(MetricsSnapshot snap, ConfigManager.ConfigData cfg, int pct) {
+        // 算子见 ThresholdOperator.PLAYERS：百分比指标两档都是闭区间（`>=`）。
+        // 把 `>=` 改成 `>` 会让「恰好 98%」从 critical 掉回 warning——边界上整整让一档。
+        int level = ThresholdOperator.PLAYERS.levelOf(
+            pct, cfg.players_warningThreshold, cfg.players_criticalThreshold);
+        String key = ThresholdOperator.PLAYERS.key();
+        if (level == 2) {
+            addAlert(snap, Alert.measuredWithReference(key, Alert.LEVEL_CRITICAL,
                 snap.playerCount, snap.maxPlayers, MetricsSnapshot.MODULE_PLAYERS, snap.timestamp));
-            recordLevel(snap, "players:global", 2);
-        } else if (pct >= cfg.players_warningThreshold) {
-            addAlert(snap, Alert.measuredWithReference("players:global", Alert.LEVEL_WARNING,
+        } else if (level == 1) {
+            addAlert(snap, Alert.measuredWithReference(key, Alert.LEVEL_WARNING,
                 snap.playerCount, snap.maxPlayers, MetricsSnapshot.MODULE_PLAYERS, snap.timestamp));
-            recordLevel(snap, "players:global", 1);
-        } else {
-            recordLevel(snap, "players:global", 0);
         }
+        recordLevel(snap, key, level);
     }
 
     // ==================== 实体 ====================
@@ -1952,6 +1987,27 @@ public class MetricsCollector {
         snap.entitiesByType = byType;
         snap.entitiesByWorld = byWorld;
 
+        applyEntitiesLevels(snap, cfg, byWorld);
+    }
+
+    /**
+     * 实体判定与告警生成（{@code collectEntities} 的判定半段，与 Bukkit 遍历解耦）。
+     *
+     * <p><b>为什么拆出来</b>：{@code collectEntities} 的取值要 {@code Bukkit.getWorlds()} 与
+     * 逐个 {@code world.getEntities()}，测试 JVM 里无法驱动。而这里的两个判定点
+     * （逐世界覆盖、全服总数）此前<b>零测试保护</b>——把任一 {@code >} 改成 {@code >=}
+     * 全量 715 个用例都不会红（实测）。拆分后只要给一张"世界 → 实体数"表就能验证算子。</p>
+     *
+     * <p>行为等价：两个判定点仍走 {@link ThresholdOperator#ENTITIES_WORLD} 与
+     * {@link ThresholdOperator#ENTITIES_GLOBAL}（两档严格 {@code >}）；去重判据
+     * {@link #shouldEmitGlobalEntitiesAlert} 与 {@code alertLevels} 的写入时机不变。</p>
+     *
+     * @param snap   快照（读 {@code totalEntities}，写 {@code alerts} / {@code alertLevels}）
+     * @param cfg    本周期配置
+     * @param byWorld 世界名 → 实体数（调用方已遍历完，顺序与快照展示一致）
+     */
+    void applyEntitiesLevels(MetricsSnapshot snap, ConfigManager.ConfigData cfg,
+                            Map<String, Integer> byWorld) {
         // A5/RC-1 裁决——实体阈值判定口径（与 config.yml"总实体数告警阈值"注释及命令层总数口径一致）：
         // ① 在 worlds 段显式配置独立阈值（WorldSettings 覆盖）的世界：按该世界覆盖值逐世界判定；
         // ② 未配置覆盖的世界：不再逐世界套用全局阈值（旧行为下默认 2000/3000 在任何单世界上几乎不可达，
@@ -1971,19 +2027,21 @@ public class MetricsCollector {
             // v1.4：只有「配置了 worlds 覆盖」的世界才进全集——没覆盖的世界永远不可能报警，
             // 给它发一条恒为 0 的序列会在 Grafana 上造出一个点不进去的假维度。
             String entKey = "entities:world:" + entry.getKey();
-            if (entry.getValue() > ws.entities_totalCriticalThreshold) {
+            // 算子见 ThresholdOperator.ENTITIES_WORLD：两档严格比较（`>`）。
+            // 这条此前零保护——改成 `>=` 全量用例一个都不红（实测），而它决定每个配置了
+            // worlds 覆盖的世界在边界值上是否告警。
+            int worldLevel = ThresholdOperator.ENTITIES_WORLD.levelOf(entry.getValue(),
+                ws.entities_totalWarningThreshold, ws.entities_totalCriticalThreshold);
+            if (worldLevel == 2) {
                 addAlert(snap, Alert.measured(entKey, Alert.LEVEL_CRITICAL, entry.getValue(),
                     MetricsSnapshot.MODULE_ENTITIES, snap.timestamp));
-                recordLevel(snap, entKey, 2);
                 maxWorldLevel = 2;
-            } else if (entry.getValue() > ws.entities_totalWarningThreshold) {
+            } else if (worldLevel == 1) {
                 addAlert(snap, Alert.measured(entKey, Alert.LEVEL_WARNING, entry.getValue(),
                     MetricsSnapshot.MODULE_ENTITIES, snap.timestamp));
-                recordLevel(snap, entKey, 1);
                 maxWorldLevel = Math.max(maxWorldLevel, 1);
-            } else {
-                recordLevel(snap, entKey, 0);
             }
+            recordLevel(snap, entKey, worldLevel);
         }
 
         // 全服总数判定（与命令层 /ps entities 的总数口径一致：所有世界实体数相加）。
@@ -2004,20 +2062,15 @@ public class MetricsCollector {
         //      报告与 Prometheus 的**展示数字**，改它会让用户看到的"全服实体数"与各世界之和对不上；
         //      而且当所有世界都配了覆盖时全服口径会恒为 0，"实体分散在多个世界"的超标彻底失声。
         //   ③ 只在文档里说明重叠 —— 一条消息都不减少，等于没修。
-        int globalLevel;
-        if (snap.totalEntities > cfg.entities_totalCriticalThreshold) {
-            globalLevel = 2;
-        } else if (snap.totalEntities > cfg.entities_totalWarningThreshold) {
-            globalLevel = 1;
-        } else {
-            globalLevel = 0;
-        }
+        int globalLevel = ThresholdOperator.ENTITIES_GLOBAL.levelOf(snap.totalEntities,
+            cfg.entities_totalWarningThreshold, cfg.entities_totalCriticalThreshold);
+        String globalKey = ThresholdOperator.ENTITIES_GLOBAL.key();
         if (shouldEmitGlobalEntitiesAlert(globalLevel, maxWorldLevel)) {
-            addAlert(snap, Alert.measured("entities:global",
+            addAlert(snap, Alert.measured(globalKey,
                 globalLevel == 2 ? Alert.LEVEL_CRITICAL : Alert.LEVEL_WARNING,
                 snap.totalEntities, MetricsSnapshot.MODULE_ENTITIES, snap.timestamp));
         }
-        recordLevel(snap, "entities:global", globalLevel);
+        recordLevel(snap, globalKey, globalLevel);
     }
 
     /**
@@ -2070,6 +2123,25 @@ public class MetricsCollector {
         snap.chunksByWorld = byWorld;
         snap.forceLoadedChunksByWorld = forceByWorld;
 
+        applyChunksLevels(snap, cfg, byWorld);
+    }
+
+    /**
+     * 区块判定与告警生成（{@code collectChunks} 的判定半段，与 Bukkit 遍历解耦）。
+     *
+     * <p>拆分理由与 {@link #applyEntitiesLevels} 同：取值要 {@code Bukkit.getWorlds()} 与
+     * {@code world.getLoadedChunks()}，测试 JVM 里驱动不了。而这里的 {@code >} 改成 {@code >=}
+     * 同样全量用例零失败（实测）——1 万/1.5 万两个阈值上的边界行为此前完全裸奔。</p>
+     *
+     * <p>行为等价：档位仍走 {@link ThresholdOperator#CHUNKS_WORLD}（两档严格 {@code >}），
+     * 并且<b>每个世界都判</b>（与实体的"仅覆盖世界"口径不同，这是刻意的，见下方长注释）。</p>
+     *
+     * @param snap    快照（写 {@code alerts} / {@code alertLevels}）
+     * @param cfg     本周期配置
+     * @param byWorld 世界名 → 已加载区块数
+     */
+    void applyChunksLevels(MetricsSnapshot snap, ConfigManager.ConfigData cfg,
+                          Map<String, Integer> byWorld) {
         // v1.4.5：注意与 collectEntities 的逐世界判定**口径不同**，这是刻意的，不是遗漏。
         //
         // collectEntities 对没有 worlds 覆盖的世界 `continue`（不判定、不写 entities:world:<名>），
@@ -2086,17 +2158,18 @@ public class MetricsCollector {
         // 两条序列的键集合因此不对称——Prometheus 侧查这两族指标时的预期要分开写。
         for (Map.Entry<String, Integer> entry : byWorld.entrySet()) {
             String chunkKey = "chunks:world:" + entry.getKey();
-            if (entry.getValue() > cfg.chunks_loadedCriticalThreshold) {
+            // 算子见 ThresholdOperator.CHUNKS_WORLD：两档严格比较（`>`），每个世界都判。
+            // 这条此前零保护——改成 `>=` 全量用例一个都不红（实测）。
+            int chunkLevel = ThresholdOperator.CHUNKS_WORLD.levelOf(entry.getValue(),
+                cfg.chunks_loadedWarningThreshold, cfg.chunks_loadedCriticalThreshold);
+            if (chunkLevel == 2) {
                 addAlert(snap, Alert.measured(chunkKey, Alert.LEVEL_CRITICAL, entry.getValue(),
                     MetricsSnapshot.MODULE_CHUNKS, snap.timestamp));
-                recordLevel(snap, chunkKey, 2);
-            } else if (entry.getValue() > cfg.chunks_loadedWarningThreshold) {
+            } else if (chunkLevel == 1) {
                 addAlert(snap, Alert.measured(chunkKey, Alert.LEVEL_WARNING, entry.getValue(),
                     MetricsSnapshot.MODULE_CHUNKS, snap.timestamp));
-                recordLevel(snap, chunkKey, 1);
-            } else {
-                recordLevel(snap, chunkKey, 0);
             }
+            recordLevel(snap, chunkKey, chunkLevel);
         }
     }
 
@@ -2114,17 +2187,34 @@ public class MetricsCollector {
         snap.nonHeapUsed = memoryMXBean.getNonHeapMemoryUsage().getUsed();
         snap.nonHeapMax = memoryMXBean.getNonHeapMemoryUsage().getMax();
 
-        if (snap.heapUsagePercent >= cfg.memory_heapCriticalThreshold) {
-            addAlert(snap, Alert.measuredWithThresholds("memory:global", Alert.LEVEL_CRITICAL, snap.heapUsagePercent,
+        // 算子见 ThresholdOperator.MEMORY：百分比指标两档都是闭区间（`>=`）。
+        // 把 `>=` 改成 `>` 会让「恰好 95%」从 critical 掉回 warning。
+        applyMemoryLevel(snap, cfg, snap.heapUsagePercent);
+    }
+
+    /**
+     * 堆内存占比的判定与告警生成（{@code collectMemory} 的判定半段）。
+     *
+     * <p>拆分理由与 {@link #applyTpsLevel} 同：{@code heapUsagePercent} 来自
+     * {@code Runtime.getRuntime()} 的真实值，构造不出"恰好 95%"。</p>
+     *
+     * <p>行为等价：档位仍走 {@link ThresholdOperator#MEMORY}（两档闭区间 {@code >=}），
+     * 告警参数不变。</p>
+     *
+     * @param percent 堆使用率百分比（调用方传入，便于测试构造边界值）
+     */
+    void applyMemoryLevel(MetricsSnapshot snap, ConfigManager.ConfigData cfg, int percent) {
+        int level = ThresholdOperator.MEMORY.levelOf(
+            percent, cfg.memory_heapWarningThreshold, cfg.memory_heapCriticalThreshold);
+        String key = ThresholdOperator.MEMORY.key();
+        if (level == 2) {
+            addAlert(snap, Alert.measuredWithThresholds(key, Alert.LEVEL_CRITICAL, percent,
                     cfg.memory_heapCriticalThreshold, cfg.memory_heapCriticalThreshold, MetricsSnapshot.MODULE_MEMORY, snap.timestamp));
-            recordLevel(snap, "memory:global", 2);
-        } else if (snap.heapUsagePercent >= cfg.memory_heapWarningThreshold) {
-            addAlert(snap, Alert.measuredWithThresholds("memory:global", Alert.LEVEL_WARNING, snap.heapUsagePercent,
+        } else if (level == 1) {
+            addAlert(snap, Alert.measuredWithThresholds(key, Alert.LEVEL_WARNING, percent,
                     cfg.memory_heapWarningThreshold, cfg.memory_heapWarningThreshold, MetricsSnapshot.MODULE_MEMORY, snap.timestamp));
-            recordLevel(snap, "memory:global", 1);
-        } else {
-            recordLevel(snap, "memory:global", 0);
         }
+        recordLevel(snap, key, level);
     }
 
     // ==================== CPU ====================

@@ -28,6 +28,17 @@
  *   否则 `git checkout -- <file>` 会把未提交的改动一起抹掉（本仓库踩过三次）。
  * - 每个变异跑完立刻 `git checkout --` 还原，且还原后校验 `git diff --quiet` 为空。
  * - 中途异常（Ctrl-C / Maven 超时）不阻断还原：用 try/finally 包住。
+ *
+ * <h2>SKIP 也是失败（曾经的静默漏洞）</h2>
+ *
+ * <p>旧版的退出码只看 `survived > 0`，于是 `from` 字面量被重构搬走之后那条变异会打一行
+ * SKIP 然后<b>悄悄消失</b>——覆盖少了一条，脚本照样 exit 0，CI 与人都不会注意到。
+ * 本仓库真实发生过：一次重构把若干比较行收进算子表，两条变异从此永远 SKIP。</p>
+ *
+ * <p>现在 SKIP 计入失败：汇总行单独列出 SKIP 的编号与原因，退出码改为
+ * `survived > 0 || skipped > 0`。同时三种 SKIP 的成因分开标注——"原文未找到"是
+ * <b>变异表过期</b>（必须修），"既无 expect 也无 gate"是<b>变异表写错</b>（必须修）。
+ * 判据：**一条变异只有 KILLED 才算数**。</p>
  */
 
 import { execSync, spawnSync } from 'node:child_process';
@@ -397,12 +408,14 @@ const MUTATIONS = [
     },
     {
         id: 'M39',
-        file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
-        from: '        if (snap.totalEntities > cfg.entities_totalCriticalThreshold) {',
-        to: '        if (snap.totalEntities >= cfg.entities_totalCriticalThreshold) {',
+        file: 'src/main/java/cn/perfscope/metrics/ThresholdOperator.java',
+        from: '        new Rule("entities:global", Direction.HIGH_IS_BAD, '
+            + 'Comparison.STRICT, Comparison.STRICT);',
+        to: '        new Rule("entities:global", Direction.HIGH_IS_BAD, '
+            + 'Comparison.INCLUSIVE, Comparison.STRICT);',
         desc: '把 entities 的采集层判定从开区间改成闭区间 —— 两侧「统一」了，'
             + '早预警语义（README 第 39 行）随之取消，读数恰好等于 30000 的一批服务器会突然开始报 critical。'
-            + '本变异用来验证「早预警语义」这条断言真的会亮',
+            + '本变异用来验证「早预警语义」这条断言真的会亮（判定已收进算子表，探针跟到表里）',
         expect: 'ThresholdBoundaryAsymmetryTest',
     },
     {
@@ -488,12 +501,15 @@ const MUTATIONS = [
     },
     {
         id: 'M48',
-        file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
-        from: '        return msptAvg > warn ? 1 : 0;',
-        to: '        return msptAvg >= warn ? 1 : 0;',
-        desc: 'MSPT 阈值比较改成 >= —— 恰好等于阈值的样本被判越界，默认 45ms 警告线下'
-            + '一台"刚好卡在线上"的服务器会持续告警',
-        expect: 'MsptAlertLevelTest',
+        file: 'src/main/java/cn/perfscope/metrics/ThresholdOperator.java',
+        from: '        new Rule("mspt:global", Direction.HIGH_IS_BAD, '
+            + 'Comparison.STRICT, Comparison.STRICT);',
+        to: '        new Rule("mspt:global", Direction.HIGH_IS_BAD, '
+            + 'Comparison.STRICT, Comparison.INCLUSIVE);',
+        desc: 'MSPT 的 warning 档阈值比较改成 >=（critical 保持严格）—— 恰好等于阈值的样本被判越界，'
+            + '默认 45ms 警告线下一台"刚好卡在线上"的服务器会持续告警。'
+            + '这是「只挪半格」的变异：两档共用一个 Comparison 字段时它根本无法被单独表达，也就无从杀死',
+        expect: 'ThresholdOperatorBehaviorTest',
     },
     {
         id: 'M49',
@@ -548,6 +564,66 @@ const MUTATIONS = [
         desc: '渲染层放行内部的 -1 哨兵 —— perfscope_alert 会出现取值为 -1 的序列，'
             + '违反 HELP 里写明的 0/1/2 契约，任何 `perfscope_alert < 1` 的规则都会把"没测"报成"有事"',
         expect: 'MetricsAlertStateTest',
+    },
+    // ---------------------------------------------------------------------------------
+    // 阈值算子表（ThresholdOperator）：六个方向此前实测存活 —— 判定散在 7 个 collect* 方法里时，
+    // 把任一算子挪半格，全量 715 个用例一个都不红。收成显式算子表后每个方向都能被单独命中。
+    // 注意：这里的 `from` 必须带 key 字面量（Rule 构造行），否则六条几乎同形的构造行无法唯一定位。
+    // ---------------------------------------------------------------------------------
+    {
+        id: 'M54',
+        file: 'src/main/java/cn/perfscope/metrics/ThresholdOperator.java',
+        from: '        new Rule("tps:global", Direction.LOW_IS_BAD, '
+            + 'Comparison.STRICT, Comparison.STRICT);',
+        to: '        new Rule("tps:global", Direction.LOW_IS_BAD, '
+            + 'Comparison.INCLUSIVE, Comparison.STRICT);',
+        desc: 'TPS 的 critical 档从严格 `<` 改成 `<=` —— TPS 恰好 15.0 时从「只发 warning」变成'
+            + '「发 critical」，而 TPS 15.0 恰好是默认 critical 阈值，是最常见的边界读数',
+        expect: 'ThresholdOperatorBehaviorTest',
+    },
+    {
+        id: 'M55',
+        file: 'src/main/java/cn/perfscope/metrics/ThresholdOperator.java',
+        from: '        new Rule("chunks:world:*", Direction.HIGH_IS_BAD, '
+            + 'Comparison.STRICT, Comparison.STRICT);',
+        to: '        new Rule("chunks:world:*", Direction.HIGH_IS_BAD, '
+            + 'Comparison.INCLUSIVE, Comparison.STRICT);',
+        desc: '逐世界区块的 critical 档从 `>` 改成 `>=` —— 恰好加载 15000 区块的世界开始报 critical，'
+            + '而 15000 正是默认阈值本身，等于把告警线悄悄下调一格',
+        expect: 'ThresholdOperatorBehaviorTest',
+    },
+    {
+        id: 'M56',
+        file: 'src/main/java/cn/perfscope/metrics/ThresholdOperator.java',
+        from: '        new Rule("entities:world:*", Direction.HIGH_IS_BAD, '
+            + 'Comparison.STRICT, Comparison.STRICT);',
+        to: '        new Rule("entities:world:*", Direction.HIGH_IS_BAD, '
+            + 'Comparison.INCLUSIVE, Comparison.STRICT);',
+        desc: '逐世界实体的 critical 档从 `>` 改成 `>=` —— 配置了 worlds 覆盖的世界在边界值上'
+            + '开始告警；同一张表里 entities:global 仍是严格，两族口径就此分叉',
+        expect: 'ThresholdOperatorBehaviorTest',
+    },
+    {
+        id: 'M57',
+        file: 'src/main/java/cn/perfscope/metrics/ThresholdOperator.java',
+        from: '        new Rule("entities:global", Direction.HIGH_IS_BAD, '
+            + 'Comparison.STRICT, Comparison.STRICT);',
+        to: '        new Rule("entities:global", Direction.HIGH_IS_BAD, '
+            + 'Comparison.STRICT, Comparison.INCLUSIVE);',
+        desc: '全服实体的 warning 档从 `>` 改成 `>=`（critical 保持严格）—— 恰好 20000 的全服总数'
+            + '开始报 warning。这是「只挪半格」的变异，两档共用字段时无法表达、也就无法杀死',
+        expect: 'ThresholdOperatorBehaviorTest',
+    },
+    {
+        id: 'M58',
+        file: 'src/main/java/cn/perfscope/metrics/ThresholdOperator.java',
+        from: '        new Rule("players:global", Direction.HIGH_IS_BAD, '
+            + 'Comparison.INCLUSIVE, Comparison.INCLUSIVE);',
+        to: '        new Rule("players:global", Direction.HIGH_IS_BAD, '
+            + 'Comparison.STRICT, Comparison.INCLUSIVE);',
+        desc: 'players 的 critical 档从闭区间 `>=` 改成 `>` —— 恰好 98% 满员从 critical 掉回 warning，'
+            + '而这正是「满了」的典型读数；同时也是百分比族与计数族口径是否真的分开的证据',
+        expect: 'ThresholdOperatorBehaviorTest',
     },
 ];
 
@@ -615,8 +691,8 @@ function main() {
         const abs = path.join(ROOT, m.file);
         const original = fs.readFileSync(abs, 'utf8');
         if (!original.includes(m.from)) {
-            console.log('SKIP（原文未找到，代码可能已改动）');
-            results.push({ ...m, verdict: 'SKIP' });
+            console.log('SKIP（原文未找到，变异表已过期）');
+            results.push({ ...m, verdict: 'SKIP', skipReason: 'from 字面量在文件中已不存在' });
             continue;
         }
         try {
@@ -634,8 +710,8 @@ function main() {
                 r = { ok: g.status === 0, summary: `门禁退出码 ${g.status}` };
                 label = path.basename(m.gate);
             } else {
-                console.log('SKIP（既无 expect 也无 gate）');
-                results.push({ ...m, verdict: 'SKIP' });
+                console.log('SKIP（既无 expect 也无 gate，变异表写错）');
+                results.push({ ...m, verdict: 'SKIP', skipReason: '既无 expect 也无 gate' });
                 continue;
             }
             // 红了 = 测试/门禁有效 = KILLED；绿了 = 锁不住 = SURVIVED
@@ -657,9 +733,16 @@ function main() {
     const skipped = results.filter(r => r.verdict === 'SKIP').length;
     console.log(`KILLED ${killed} / SURVIVED ${survived} / SKIP ${skipped}  (共 ${results.length})`);
     for (const r of results.filter(r => r.verdict !== 'KILLED')) {
-        console.log(`  ${r.verdict}  ${r.id}  ${r.desc}`);
+        const why = r.verdict === 'SKIP' ? `  ← ${r.skipReason || '跳过'}` : '';
+        console.log(`  ${r.verdict}  ${r.id}  ${r.desc}${why}`);
     }
-    process.exit(survived > 0 ? 1 : 0);
+    if (skipped > 0) {
+        // SKIP 不是"没关系"，是"这条变异根本没有被验证"——覆盖静默变少的正是它。
+        console.log(`\n⚠ ${skipped} 条变异被跳过：它们没有被验证过，覆盖比看上去少。`);
+        console.log('   SKIP 计入失败（退出码非零）：「原文未找到」说明变异表已过期，请更新 from；');
+        console.log('   「既无 expect 也无 gate」说明变异表写错，请补上判据。');
+    }
+    process.exit(survived > 0 || skipped > 0 ? 1 : 0);
 }
 
 main();
