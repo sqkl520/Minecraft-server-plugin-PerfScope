@@ -130,8 +130,31 @@ class MetricsAlertStateTest {
             "a disabled module must not emit healthy-looking zeros for worlds it never measured");
     }
 
-    // ==================== 渲染器约束 ====================
+    /**
+     * 采集层的内部信号 {@link MetricsSnapshot#ALERT_LEVEL_NO_VERDICT}（-1）不得出现在输出里。
+     *
+     * <p>它的职责是让<b>告警层</b>区分"没测"与"不适用"。一旦漏进 {@code perfscope_alert}，
+     * 运维会看到一条取值为 -1 的序列——违反 HELP 里写明的 0/1/2 契约，
+     * 而任何 {@code perfscope_alert < 1} 的规则都会立刻命中，等于把"没测"报成"有事"。</p>
+     */
+    @Test
+    void noVerdictMarkerIsNeverEmitted() {
+        MetricsSnapshot s = snap();
+        Map<String, Integer> levels = new LinkedHashMap<>();
+        levels.put("tps:global", 0);
+        levels.put("cpu:process", MetricsSnapshot.ALERT_LEVEL_NO_VERDICT);
+        s.alertLevels = levels;
 
+        String out = MetricsTextRenderer.render(s, ctx());
+        assertFalse(out.contains("key=\"cpu:process\""),
+            "the internal -1 marker must not reach Prometheus: it is outside the documented 0/1/2 domain");
+        assertFalse(out.contains("} -1"),
+            "no sample may carry a negative value; a negative here would trip `perfscope_alert < 1` rules");
+        assertTrue(out.contains("perfscope_alert{key=\"tps:global\",module=\"tps\"} 0"),
+            "the judgeable key in the same snapshot must still be emitted as healthy");
+    }
+
+    // ==================== 渲染器约束 ====================
     /**
      * HELP/TYPE 必须无条件输出，即使一条告警都没有。
      *

@@ -1724,21 +1724,49 @@ public class MetricsCollector {
             collectMSPT_TPSFallback(snap);
         }
 
-        // v1.4：msptAvg <= 0 是「未采集」哨兵（TPS 反推路径无 MSPT），此时该维度不可判定，
-        // 整块不调用 recordLevel —— 让键从全集缺席，而不是发一个假 0 宣称健康。
-        if (snap.msptAvg > 0) {
-            if (snap.msptAvg > cfg.mspt_criticalThreshold) {
-                addAlert(snap, Alert.measuredWithThresholds("mspt:global", Alert.LEVEL_CRITICAL, snap.msptAvg,
-                        cfg.mspt_criticalThreshold, cfg.mspt_criticalThreshold, MetricsSnapshot.MODULE_MSPT, snap.timestamp));
-                recordLevel(snap, "mspt:global", 2);
-            } else if (snap.msptAvg > cfg.mspt_warningThreshold) {
-                addAlert(snap, Alert.measuredWithThresholds("mspt:global", Alert.LEVEL_WARNING, snap.msptAvg,
-                        cfg.mspt_warningThreshold, cfg.mspt_warningThreshold, MetricsSnapshot.MODULE_MSPT, snap.timestamp));
-                recordLevel(snap, "mspt:global", 1);
-            } else {
-                recordLevel(snap, "mspt:global", 0);
-            }
+        // v1.4：msptAvg <= 0 是「未采集」哨兵（TPS 反推路径无 MSPT），此时该维度不可判定。
+        // v1.6：**必须显式写 ALERT_LEVEL_NO_VERDICT**，而不是让键缺席 ——
+        // 缺席在告警层还有第二种含义（该维度本周期不适用，例如世界已卸载），告警据此正常恢复。
+        // 用缺席表达"没测"，等于把"没测"谎报成"不适用"：采集坏了，告警却宣布「已恢复正常」。
+        // 级别与告警的对应关系收在 msptAlertLevel 里（纯函数，可单测），调用点只管照着发。
+        int level = msptAlertLevel(snap.msptAvg, cfg.mspt_warningThreshold, cfg.mspt_criticalThreshold);
+        if (level == 2) {
+            addAlert(snap, Alert.measuredWithThresholds("mspt:global", Alert.LEVEL_CRITICAL, snap.msptAvg,
+                    cfg.mspt_criticalThreshold, cfg.mspt_criticalThreshold, MetricsSnapshot.MODULE_MSPT, snap.timestamp));
+        } else if (level == 1) {
+            addAlert(snap, Alert.measuredWithThresholds("mspt:global", Alert.LEVEL_WARNING, snap.msptAvg,
+                    cfg.mspt_warningThreshold, cfg.mspt_warningThreshold, MetricsSnapshot.MODULE_MSPT, snap.timestamp));
         }
+        recordLevel(snap, "mspt:global", level);
+    }
+
+    /**
+     * MSPT 的级别判定内核：返回 {@code 2} / {@code 1} / {@code 0}，或
+     * {@link MetricsSnapshot#ALERT_LEVEL_NO_VERDICT}（本周期不可判定）。
+     *
+     * <p><b>为什么单独抽出来</b>：{@code collectMSPT} 的入口先是
+     * {@code ServerCompat.isMsptTrustworthy()} 与若干反射调用，测试 JVM 里根本走不进去
+     * （{@code ServerCompat} 的 {@code <clinit>} 要 {@code Bukkit.getBukkitVersion()}）。
+     * 于是"哨兵是否被正确表达成没判定"这件事此前零保护，而它正是那个「采集坏了却报已恢复」
+     * 的 bug 的一半。抽成纯函数后，输入只是三个 double。</p>
+     *
+     * <p><b>{@code <= 0} 的两个来源都归入没判定</b>：{@code -1} 是显式哨兵（TPS 反推路径无 MSPT），
+     * {@code 0} 在物理上不可能是真实 tick 耗时。两者若落进 {@code 0} 级别，就是宣称
+     * "测了、很健康"——而事实是"没测"。</p>
+     *
+     * @param msptAvg 平均每 tick 毫秒；{@code <= 0} 表示本周期没有可信读数
+     * @param warn    警告阈值（{@code >} 此值进 1 级）
+     * @param crit    严重阈值（{@code >} 此值进 2 级）
+     * @return 级别，或 {@link MetricsSnapshot#ALERT_LEVEL_NO_VERDICT}
+     */
+    static int msptAlertLevel(double msptAvg, double warn, double crit) {
+        if (!(msptAvg > 0)) {
+            return MetricsSnapshot.ALERT_LEVEL_NO_VERDICT;
+        }
+        if (msptAvg > crit) {
+            return 2;
+        }
+        return msptAvg > warn ? 1 : 0;
     }
 
     /**
@@ -2178,6 +2206,10 @@ public class MetricsCollector {
                 // 级别跟闩锁走，不跟瞬时值：闩锁的存在就是为了让边界抖动不反复翻转，
                 // 若这里改用瞬时值判定，指标会比告警本身抖得多，Prometheus 侧反而更吵。
                 recordLevel(snap, "cpu:process", processCpuLatched ? 1 : 0);
+            } else {
+                // v1.6：不可判定必须显式说出来。Windows 上这里是常态（进程 CPU 不采），
+                // 若靠"不写键"表达，告警层会把它读成"本周期不适用"并宣布恢复。
+                recordLevel(snap, "cpu:process", MetricsSnapshot.ALERT_LEVEL_NO_VERDICT);
             }
             if (snap.systemCpuLoad >= 0) {
                 systemCpuLatched = latched(
@@ -2189,13 +2221,19 @@ public class MetricsCollector {
                             MetricsSnapshot.MODULE_CPU, snap.timestamp));
                 }
                 recordLevel(snap, "cpu:system", systemCpuLatched ? 1 : 0);
+            } else {
+                recordLevel(snap, "cpu:system", MetricsSnapshot.ALERT_LEVEL_NO_VERDICT);
             }
         } else {
-            // 非 sun.* MXBean：无 CPU 数据，显式置 -1（避免默认 0 误导），并解除闩锁
+            // 非 sun.* MXBean：无 CPU 数据，显式置 -1（避免默认 0 误导），并解除闩锁。
+            // v1.6：两个键同样要写"没有判定结果"——这一段既不生成消息也不写键时，
+            // 告警层会把它当成一次干净周期。
             snap.processCpuLoad = -1;
             snap.systemCpuLoad = -1;
             processCpuLatched = false;
             systemCpuLatched = false;
+            recordLevel(snap, "cpu:process", MetricsSnapshot.ALERT_LEVEL_NO_VERDICT);
+            recordLevel(snap, "cpu:system", MetricsSnapshot.ALERT_LEVEL_NO_VERDICT);
         }
     }
 
@@ -2468,8 +2506,14 @@ public class MetricsCollector {
      * <p>调用约定：<b>每个判定点必须调用恰好一次</b>，无论是越阈还是正常。
      * 漏调 = 该键从全集消失 = 运维看到序列消失，误以为是恢复。</p>
      *
+     * <p><b>不可判定的维度也必须调用</b>（传 {@link MetricsSnapshot#ALERT_LEVEL_NO_VERDICT}），
+     * 不能靠"不调用"来表达。原因：键缺席还有第二种含义——该维度本周期<b>不适用</b>
+     * （世界被卸载后 {@code chunks:world:<名>} 不再出现），告警层据此正常恢复。
+     * 把"没测"也写成缺席，就等于把"没测"谎报成"不适用"。</p>
+     *
      * @param key   与 {@link Alert#key()} 同一命名（{@code metric:scope}）
-     * @param level {@code 0} 正常 / {@code 1} 警告 / {@code 2} 严重
+     * @param level {@code 0} 正常 / {@code 1} 警告 / {@code 2} 严重 /
+     *              {@link MetricsSnapshot#ALERT_LEVEL_NO_VERDICT} 本周期不可判定
      */
     private static void recordLevel(MetricsSnapshot snap, String key, int level) {
         snap.alertLevels.put(key, level);

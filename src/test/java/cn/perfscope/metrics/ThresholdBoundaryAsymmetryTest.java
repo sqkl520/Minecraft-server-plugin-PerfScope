@@ -193,7 +193,9 @@ class ThresholdBoundaryAsymmetryTest {
 
         // 采集层用开区间（>）的指标
         boolean entitiesStrict = src.contains("snap.totalEntities > cfg.entities_totalCriticalThreshold");
-        boolean msptStrict = src.contains("snap.msptAvg > cfg.mspt_criticalThreshold");
+        // mspt 的判定已抽进纯函数 msptAlertLevel（见 MetricsCollector，v1.6 让哨兵口径可测）；
+        // 探针跟着搬到新位置，语义仍是「开区间」——顺便把"抽函数时把 > 写成 >= "变成会红的事实。
+        boolean msptStrict = src.contains("msptAvg > crit");
 
         // 展示层对高值差指标用闭区间（>=）；低值差指标 TPS 方向相反，用 <=。
         ThresholdColors c = colors();

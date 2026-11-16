@@ -472,6 +472,83 @@ const MUTATIONS = [
             + 'unavailable 也不进其他集合，/metrics 会输出它的 0 值',
         expect: 'ModuleUnavailableMarkingTest',
     },
+    {
+        id: 'M47',
+        file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
+        from: '        if (!(msptAvg > 0)) {\n'
+            + '            return MetricsSnapshot.ALERT_LEVEL_NO_VERDICT;\n'
+            + '        }',
+        to: '        if (!(msptAvg > 0)) {\n'
+            + '            return 0;\n'
+            + '        }',
+        desc: 'MSPT 哨兵被当成"健康"（返回 0 而不是"没判定"）—— msptAvg=-1（TPS 反推路径）时'
+            + '告警层会把它读成"测过了、很健康"，三个周期后推一条与事实相反的「已恢复正常」，'
+            + '而那个维度从头到尾没有被测量过',
+        expect: 'MsptAlertLevelTest',
+    },
+    {
+        id: 'M48',
+        file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
+        from: '        return msptAvg > warn ? 1 : 0;',
+        to: '        return msptAvg >= warn ? 1 : 0;',
+        desc: 'MSPT 阈值比较改成 >= —— 恰好等于阈值的样本被判越界，默认 45ms 警告线下'
+            + '一台"刚好卡在线上"的服务器会持续告警',
+        expect: 'MsptAlertLevelTest',
+    },
+    {
+        id: 'M49',
+        file: 'src/main/java/cn/perfscope/alert/AlertService.java',
+        from: '            boolean verdictMissing = judgedLevel != null'
+            + ' && judgedLevel == MetricsSnapshot.ALERT_LEVEL_NO_VERDICT;',
+        to: '            boolean verdictMissing = judgedLevel == null;',
+        desc: '把"没判定"重新读成"键缺席" —— 这次反过来了：世界被卸载后 chunks:world:<名> '
+            + '不再出现，却被当成"没测"，该告警会永久卡在 unknown 里永远不再消失',
+        expect: 'MissingLevelKeyIsNotRecoveryTest',
+    },
+    {
+        id: 'M50',
+        file: 'src/main/java/cn/perfscope/alert/AlertService.java',
+        from: '            boolean verdictMissing = judgedLevel != null'
+            + ' && judgedLevel == MetricsSnapshot.ALERT_LEVEL_NO_VERDICT;\n'
+            + '            boolean moduleDown',
+        to: '            boolean verdictMissing = false;\n'
+            + '            boolean moduleDown',
+        desc: '把"没判定"重新并回"干净周期" —— 采集层在哨兵路径（msptAvg<=0 的 TPS 反推、'
+            + 'Windows 上 processCpuLoad<0）声明"没测"时，告警会在三个周期后宣布「已恢复正常」，'
+            + '同时离开活跃列表，真故障从此不再被提醒',
+        expect: 'MissingLevelKeyIsNotRecoveryTest',
+    },
+    {
+        id: 'M51',
+        file: 'src/main/java/cn/perfscope/alert/AlertService.java',
+        from: '            if (judgedLevel != null && judgedLevel > 0) {',
+        to: '            if (judgedLevel != null && judgedLevel >= 0) {',
+        desc: '「判定过且健康」（写 0）也被当成不恢复 —— 修复做过了头：真实恢复永远不发生，'
+            + '告警会永久挂在活跃列表，服主最终会不再相信告警列表',
+        expect: 'MissingLevelKeyIsNotRecoveryTest',
+    },
+    {
+        id: 'M52',
+        file: 'src/main/java/cn/perfscope/alert/AlertService.java',
+        from: '            Integer judgedLevel = snap.alertLevels == null ? null : snap.alertLevels.get(key);\n'
+            + '            if (judgedLevel != null'
+            + ' && judgedLevel == MetricsSnapshot.ALERT_LEVEL_NO_VERDICT) {\n'
+            + '                continue; // 仍无结论：留在 unknown（不计恢复、不删除）\n'
+            + '            }',
+        to: '',
+        desc: 'unknown 状态下的「静默解决」不再要求判定结果 —— 一个已转 unknown 的告警会在下一个'
+            + '声明的"没判定"周期被删掉，unknown 行从界面上消失，而采集层从未给出过任何结论',
+        expect: 'MissingLevelKeyIsNotRecoveryTest',
+    },
+    {
+        id: 'M53',
+        file: 'src/main/java/cn/perfscope/export/MetricsTextRenderer.java',
+        from: '                if (key == null || level == null || level < 0) {',
+        to: '                if (key == null || level == null) {',
+        desc: '渲染层放行内部的 -1 哨兵 —— perfscope_alert 会出现取值为 -1 的序列，'
+            + '违反 HELP 里写明的 0/1/2 契约，任何 `perfscope_alert < 1` 的规则都会把"没测"报成"有事"',
+        expect: 'MetricsAlertStateTest',
+    },
 ];
 
 // ---------------------------------------------------------------------------

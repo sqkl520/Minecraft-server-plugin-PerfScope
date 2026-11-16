@@ -400,8 +400,10 @@ public final class MetricsTextRenderer {
         // 0 也要输出：健康是一种可观测事实。没有这一行，恢复时序列直接消失，
         // 既收不到 resolved 通知，也无法用 absent() 区分"没告警"与"采集挂了"。
         //
-        // 键全集由采集层定义（MetricsSnapshot.alertLevels），不含的键 = 该维度不可判定
-        // （模块禁用 / 平台不支持 / 哨兵值），刻意不发 0 —— 给没测的维度发 0 等于宣称它健康。
+        // 键全集由采集层定义（MetricsSnapshot.alertLevels），不含的键 = 该维度本周期不适用。
+        // 负值（ALERT_LEVEL_NO_VERDICT）= 该维度本周期不可判定（采集层走了哨兵路径）。
+        // 两种情况的对外表现完全一致：**整行不输出**。给没测的维度发 0 等于宣称它健康；
+        // 而 -1 是采集层与告警层之间的内部信号，不属于 perfscope_alert 的 0/1/2 契约。
         help(sb, "perfscope_alert",
             "Per-alert state: 0 = healthy, 1 = warning, 2 = critical. Always one series per judgeable key, "
                 + "including healthy ones; a key absent here is not currently judgeable "
@@ -411,7 +413,7 @@ public final class MetricsTextRenderer {
             for (Map.Entry<String, Integer> e : snap.alertLevels.entrySet()) {
                 String key = e.getKey();
                 Integer level = e.getValue();
-                if (key == null || level == null) {
+                if (key == null || level == null || level < 0) {
                     continue;
                 }
                 sb.append("perfscope_alert{key=\"").append(escape(key))

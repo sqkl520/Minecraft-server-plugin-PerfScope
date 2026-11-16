@@ -234,14 +234,30 @@ public final class AlertServiceStateMachineFixture {
     /**
      * 造一份"本周期没有越界"的快照（供恢复路径用）。
      *
-     * @param judgedKeys 采集层本周期<b>判定过</b>的 key（写 0）——没被判定过的 key 会走
-     *                   "模块不可用 / 无结论"分支，语义不同，故必须显式列出
+     * @param judgedKeys 采集层本周期<b>判定过</b>的 key（写 0）——没被判定过的 key 若<b>缺席</b>，
+     *                   语义是"该维度本周期不适用"（世界被卸载等），告警据此正常恢复；
+     *                   若想表达"不可判定"，要用 {@link #noVerdictSnapshot} 写显式 -1
      */
     public MetricsSnapshot cleanSnapshot(long timestamp, String... judgedKeys) {
         MetricsSnapshot snap = new MetricsSnapshot();
         snap.timestamp = timestamp;
         for (String key : judgedKeys) {
             snap.alertLevels.put(key, 0);
+        }
+        return snap;
+    }
+
+    /**
+     * 造一份"采集层显式声明这些 key 本周期不可判定"的快照（哨兵路径：{@code msptAvg <= 0}、
+     * {@code processCpuLoad < 0}）。
+     *
+     * <p>与"键缺席"是两件事：缺席 = 该维度不适用（照常恢复），{@code -1} = 没测（转 unknown）。</p>
+     */
+    public MetricsSnapshot noVerdictSnapshot(long timestamp, String... unjudgedKeys) {
+        MetricsSnapshot snap = new MetricsSnapshot();
+        snap.timestamp = timestamp;
+        for (String key : unjudgedKeys) {
+            snap.alertLevels.put(key, MetricsSnapshot.ALERT_LEVEL_NO_VERDICT);
         }
         return snap;
     }

@@ -246,6 +246,12 @@ public final class AlertMessages {
         put(en, zh, "alert.log.module-down",
             "module {0} has been unavailable for more than {1} minutes; alert {2} moved to unknown",
             "模块 {0} 不可用超过 {1} 分钟，告警 {2} 转入 unknown 状态");
+        put(en, zh, "alert.log.verdict-missing",
+            "{0} has produced no verdict for {2} for more than {1} minutes "
+                + "(the metric is not measurable right now, e.g. a sentinel path); "
+                + "the alert is moved to unknown rather than announced as recovered",
+            "{0} 已连续超过 {1} 分钟未给出 {2} 的判定结果"
+                + "（该指标当前不可测，例如走了哨兵路径）；告警转入 unknown 状态，而不是宣布已恢复");
         put(en, zh, "alert.log.recovery-no-module",
             "recovery check: key={0} carries no module attribution (treated as a normal recovery)",
             "恢复判定：key={0} 未携带模块归因（按正常恢复处理）");

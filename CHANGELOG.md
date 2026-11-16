@@ -18,6 +18,70 @@
 
 > v1.4.4 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
 
+### Fixed — 采集坏了却报「已恢复正常」：`alertLevels` 引入显式「无判定」三态
+
+**现象**：某个维度明明没有被测量，告警层却在 3 个周期后推出一条「已恢复正常」，并把该告警
+移出活跃列表。用户看到的是一条与事实相反的推送 + 此后真故障不再被提醒。
+
+**两条约定各自都是对的，撞在一起才出错**：
+
+1. 采集层在**哨兵路径**刻意**不写** `snap.alertLevels` 的键 ——
+   `collectMSPT` 的 `msptAvg <= 0`（TPS 反推路径没有 MSPT）、`collectCPU` 的
+   `processCpuLoad < 0`（Windows 上进程 CPU 不采）与 `systemCpuLoad < 0`。
+   理由正当：给没测的维度写 `0` 等于宣称它健康，会同时污染 `/metrics` 的
+   `perfscope_alert`（HELP 明写 0/1/2）与 Grafana 的 `absent()` 判定。
+2. `AlertService` 的恢复判定把「键不在表里」与「键写 0」合并成「干净周期」。
+   理由也正当：绝大多数键（`tps:global` / `memory:global` / …）每周期必写，
+   缺席通常意味着没有结论——但当时没有为"没有结论"准备任何处置。
+
+**实测复现**（真实 `AlertService` 状态机夹具，`recovery-debounce-cycles: 3`）：
+
+| 输入 | 修复前 | 修复后 |
+|---|---|---|
+| [A] 消息缺席、`alertLevels=2` | active 1→1，resolve 0（保险生效） | 同左 |
+| [B] 消息缺席、`alertLevels` 缺键 | active 1→**0**，resolve **1**（误报恢复） | 键缺席视为"不适用"，仍恢复（见下） |
+| [B'] `alertLevels=-1`（无判定） | —（修复前不存在此取值） | active 1→1（转 unknown），resolve 0 |
+| [C] `alertLevels=0`（真干净） | active 1→0，resolve 1（正常） | 同左 |
+| [D] `msptAvg=-1`、`unavailable` 不含 mspt，3 周期 | active 1→1→**0**，resolve **1** | resolve 0，走 unknown |
+| [E] `processCpuLoad=-1`、`unavailable` 不含 cpu，3 周期 | active 1→1→**0**，resolve **1** | resolve 0，走 unknown |
+| [F] 对照：把 mspt 正确加进 `unavailable` | resolve 0，suspend 0 | 同左 |
+
+**修法：把"没判"变成一个显式取值，而不是让键缺席。**
+
+- `MetricsSnapshot.ALERT_LEVEL_NO_VERDICT`（`-1`）：采集层在哨兵路径**显式写出**它。
+  `MetricsTextRenderer` 遇负值整行不输出，因此 `perfscope_alert` 对外的 0/1/2 契约不变。
+- `AlertService` 收到 `-1` 时与「模块不可用」同路处置（`verdictMissing`）：不算干净周期、
+  保留恢复计数、按 `moduleDownSince` 计时，超过 `alerts.unknown-after-minutes` 转入 unknown；
+  unknown 状态下的「静默解决」同样要求先有结论，否则静默删除是同一句谎话的安静版本。
+- **键缺席的语义保持不变**：`chunks:world:<名>` / `entities:world:<名>` 在世界被卸载或
+  `worlds:` 覆盖被移除后就不再出现，那是"本周期不适用"，告警**应当**正常恢复。
+
+**为什么不用「键缺席一律当无判定」**（本轮一度实现过，被自己的测试推翻）：
+缺席有两种含义。把缺席一律读成"没测"，会让世界卸载后的 per-world 告警**永久卡在 unknown**，
+永远不再消失——那只是把误报换成了另一种失真。三态是这里的最小正确粒度。
+
+**为什么不用「哨兵路径补 `unavailable`」**（任务书倾向的方案）：
+`MODULE_CPU` 的粒度是模块级，而 CPU 的哨兵是**每键**的 —— Windows 上 `processCpuLoad` 恒为 `-1`，
+但 `systemCpuLoad` 正常。把 `MODULE_CPU` 加进 `unavailable` 会让
+`PerfScopeCommand:381` / `ReportGenerator:523,751,909` 整组渲染成「不可用」（连带吞掉本来有数据的
+system 值），并让 `perfscope_module_available{cpu}` 在每台 Windows 服务器上永久为 0 ——
+那是把健康说成盲区，与被修的 bug 同类。`mspt` 只有单个键，补 `unavailable` 可行，
+但两条路径两套语义；三态只用一条判据覆盖全部键（含将来新增的哨兵维度）。
+
+**验证**：
+- 新增 `MissingLevelKeyIsNotRecoveryTest`（7 个用例）：靶点（`-1` + 模块健康 → 不得 resolve）、
+  持续无结论转 unknown、unknown 不被静默删除、**反向保护**（键缺席 = 不适用 → 必须恢复；
+  `level=0` → 必须恢复，防止修过头把正常恢复堵死）、对照两条（`unavailable` 走 unknown；
+  `level=2` 消息缺席不得恢复）。先加测试跑一次为红，修复后 7/7 绿。
+- 新增 `MsptAlertLevelTest`（6 个用例）：MSPT 判定内核抽成纯函数 `msptAlertLevel`，
+  锁住"`<= 0` 一律是没判定"（`-1` / `0` / `NaN`）、阈值严格大于、两级顺序、标记为负值。
+- 渲染层补 `noVerdictMarkerIsNeverEmitted`：`-1` 不得出现在 `perfscope_alert` 输出里。
+- 全量 `mvn test`：729 通过 / 0 失败（7 skipped 为既有分布）。
+- 变异验证（`tools/mutate.mjs` 新增 M47–M53，全部 **KILLED**）：M47（哨兵被当成健康）、
+  M48（`>` 改 `>=`）、M49（全取当成没判定）、M50（没判定并回干净周期）、
+  M51（判定 0 也不恢复）、M52（unknown 的静默解决去掉判定要求）、M53（渲染层放行 `-1`）。
+- 门禁：`check-docs.mjs` / `check-i18n.mjs` / `check-sentinels.mjs` 全 PASS。
+
 ### Refactored — MSPT 探针判定逻辑抽成可测状态机（行为零变更）
 
 `ServerCompat.probeRuntimeAvailability` 的 76 行判定逻辑此前**零测试**：`ServerCompat` 的

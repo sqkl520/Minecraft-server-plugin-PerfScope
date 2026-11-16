@@ -118,13 +118,32 @@ public class MetricsSnapshot {
      * 若全集由告警层提供，服主关掉告警投递会让整套 Prometheus 序列一起消失，
      * 那是纯粹的信息丢失，而不是他想要的"别再推消息给我"。</p>
      *
-     * <p><b>不在全集里的键 = 该维度此刻不可判定</b>（模块被禁用 / 平台不支持 /
-     * 哨兵值 -1 / 尚未预热）。刻意<b>不</b>发 0，因为给没测的维度发 0 等于宣称它健康。
-     * 渲染层据此整行不输出，与 {@code MetricsTextRenderer} 的既有原则一致。</p>
+     * <h2>三态取值：{@code -1} / {@code 0} / {@code 1} / {@code 2}</h2>
      *
-     * <p>取值：{@code 0} = 正常，{@code 1} = 警告，{@code 2} = 严重。</p>
+     * <p><b>{@code -1}（{@link #ALERT_LEVEL_NO_VERDICT}）= 本周期<b>没有判定结果</b>，
+     * 必须写出来，而不是让键缺席。</b>这条是 v1.6 修的 bug 的核心：采集层在哨兵路径
+     * （{@code msptAvg <= 0} 的 TPS 反推、Windows 上 {@code processCpuLoad < 0}）原先<b>不写键</b>，
+     * 而告警层把"键缺席"读成"干净周期"，于是<b>采集坏了、告警却宣布「已恢复正常」</b>——
+     * 用户收到一条与事实相反的推送，且告警被移出活跃列表，真故障从此不再被提醒。</p>
+     *
+     * <p>为什么不能改写 {@code 0}：{@code 0} 是「测过了、健康」，写它等于宣称一个从未被测量的
+     * 维度是健康的。为什么不能靠"键缺席"表达：<b>缺席有第二种含义</b>——
+     * {@code chunks:world:<名>} / {@code entities:world:<名>} 在世界被卸载（或 {@code worlds:} 覆盖被
+     * 移除）之后就不再出现，那是"本周期不适用"，此时告警<b>应当</b>正常恢复。
+     * 把缺席一律读成 unknown 会让这类告警永久卡在 unknown 里，永远不再消失。</p>
+     *
+     * <p><b>取值域对外的契约不变</b>：{@code MetricsTextRenderer} 不输出负值，
+     * {@code perfscope_alert} 仍然只有 {@code 0/1/2} 三种取值，{@code -1} 是采集层与告警层之间的
+     * 内部信号。渲染层遇到负值时整行不输出，与"键缺席"的外在表现完全一致。</p>
      */
     public Map<String, Integer> alertLevels = new java.util.LinkedHashMap<>();
+
+    /**
+     * {@link #alertLevels} 的"没有判定结果"取值：本周期该维度不可判定（采集层走了哨兵路径）。
+     *
+     * <p>与"键缺席"（本周期该维度不适用）语义不同，两者都<b>不是</b>恢复。详见字段 javadoc。</p>
+     */
+    public static final int ALERT_LEVEL_NO_VERDICT = -1;
 
     // === 模块可用性（P0-5）：采集失败或被配置禁用的模块名集合 ===
     // 展示层约定：命中本集合的模块显示"不可用"（灰色），而非 0/空值

@@ -67,6 +67,11 @@ import java.util.logging.Level;
  *   <li><b>模块失效转 unknown</b>：告警所属模块连续不可用超过 {@code alerts.unknown-after-minutes}
  *       （默认 5 分钟）→ 该 key 转入 suspended（unknown）状态，不再算"活跃"；模块恢复后
  *       若问题仍在则静默接管，若已消失则静默解决（只记历史事件 resolved_by_disable，不发"已恢复正常"）；</li>
+ *   <li><b>无结论转 unknown</b>：与上一条同路的第二种"我们没有在测它"。采集层在哨兵路径
+ *       （{@code msptAvg <= 0} 的 TPS 反推、Windows 上 {@code processCpuLoad < 0}）刻意<b>不写</b>
+ *       {@code alertLevels} 的键——给没测的维度写 0 等于宣称它健康。因此"键缺席"必须读作
+ *       「本周期没有判定结果」，而不是「干净」。把它当干净会推出一条与事实相反的「已恢复正常」，
+ *       并把告警移出活跃列表，真故障从此不再被提醒；</li>
  *   <li><b>告警风暴收敛</b>：{@code alerts.digest-mode=true} 时同一检查周期内的所有<b>新增</b>告警
  *       合并成一条消息（按模块分组，最多列 5 条 + "等 N 条"）；升级/重推仍即时发；</li>
  *   <li><b>可行动文案</b>：推送前统一加「服名 + key + 值/阈值 + 持续时长 + 一行下一步」，
@@ -1048,10 +1053,25 @@ public class AlertService {
             // 这种键在 current 里缺席，但它的事实是"问题还在"，若当作干净周期处理，
             // 就会推出一条与事实相反的"已恢复正常"。
             //
-            // 判据用 snap.alertLevels：采集层对每个**判定过**的键每周期必写一次（健康时写 0），
-            // 它是"判定结果"而非"要不要发消息"的派生值，因此正好能区分这两种缺席：
-            //   · 键在表里且 >0 → 判定过、确实越界，只是消息被更具体的同级告警覆盖了；
-            //   · 键不在表里 / 值为 0 → 模块没判定它，或它真的干净了 → 走正常恢复流程。
+            // 判据用 snap.alertLevels：它记录的是**本周期有没有判定结果**，而不是"要不要发消息"。
+            // 四种情况必须分开，把前两种混成一种就是一次误报的"已恢复"：
+            //   · 键在表里且 >0                    → 判定过、确实越界，只是消息被更具体的同级告警
+            //                                        覆盖了 → 保持活跃；
+            //   · 键在表里且 = 0                   → 判定过、健康 → 走正常恢复流程；
+            //   · 键在表里且 = ALERT_LEVEL_NO_VERDICT（-1）→ **本周期没有判定结果** →
+            //                                        走 unknown 路径（见下方 verdictMissing）；
+            //   · 键不在表里                       → 该维度本周期**不适用**（世界被卸载 /
+            //                                        worlds 覆盖被移除）→ 照常恢复。
+            //
+            // 第三种曾被并进第二种，代价是"采集坏了，告警却宣布已恢复"。两条约定各自都正当：
+            // 采集层在哨兵路径（msptAvg<=0 的 TPS 反推、Windows 上 processCpuLoad<0）不能写 0，
+            // 因为给没测的维度写 0 等于宣称它健康；而告警层原先把"键不在表里"读成"干净"，
+            // 因为大多数键每周期必写。撞在一起后用户既收到一条与事实相反的推送，
+            // 告警又被移出活跃列表——真正的故障从此不再被提醒。
+            //
+            // 为什么"没判"用显式 -1 而不是留空：留空有第二种含义（见上方第四种情况）。
+            // 把留空一律读成 unknown，`chunks:world:<已卸载的世界>` 会永久卡在 unknown 里。
+            //
             // 本保险只在键**已处于活跃态**时生效（循环只遍历 activeAlerts），所以它只能
             // 阻止一次误报的"已恢复"，不可能让从没告过警的键卡在活跃态。
             Integer judgedLevel = snap.alertLevels == null ? null : snap.alertLevels.get(key);
@@ -1061,16 +1081,26 @@ public class AlertService {
                 continue;
             }
             String module = rec.module;
-            if (module != null && snap.unavailable.contains(module)) {
-                // 模块不可用：不算恢复（"消息消失"不等于"故障恢复"），先统计不可用时长
+            // 两种"本周期没有结论"的成因不同、处置相同（都不算干净周期，超时转 unknown）：
+            //   · verdictMissing：采集层显式声明这一维度不可判定（哨兵路径 / 平台不支持）；
+            //   · moduleDown：采集失败或被配置禁用。
+            boolean verdictMissing = judgedLevel != null && judgedLevel == MetricsSnapshot.ALERT_LEVEL_NO_VERDICT;
+            boolean moduleDown = module != null && snap.unavailable.contains(module);
+            if (verdictMissing || moduleDown) {
+                // 不算恢复（"消息消失"不等于"故障恢复"），先统计无结论时长
                 long since = moduleDownSince.computeIfAbsent(key, k -> now);
                 if (now - since >= unknownAfterMs) {
                     suspendedAlerts.put(key, rec);
                     suspendedKeys.add(key);
                     recordEvent("suspend", rec);
                     stateDirty = true;
-                    plugin.getLogger().info(logText("alert.log.module-down",
-                        module, opt.unknownAfterMinutes, key));
+                    if (verdictMissing) {
+                        plugin.getLogger().info(logText("alert.log.verdict-missing",
+                            module != null ? module : key, opt.unknownAfterMinutes, key));
+                    } else {
+                        plugin.getLogger().info(logText("alert.log.module-down",
+                            module, opt.unknownAfterMinutes, key));
+                    }
                 }
                 continue;
             }
@@ -1154,6 +1184,14 @@ public class AlertService {
             }
             if (current.containsKey(key)) {
                 continue; // 模块恢复且问题仍在：由步骤 2 的 suspendedRec 分支静默接管（不影响本次遍历）
+            }
+            // 与步骤 3 同一条判据：这条 key **本周期没有判定结果**时，静默解决同样是一句与事实相反
+            // 的话——把它从 unknown 里删掉，问题就彻底从所有可见列表里消失了。只有"判定过、健康"
+            // （level = 0）或"本周期不适用"（键缺席，例如世界已被卸载）才算真的解决；
+            // 显式的"没判定"（-1）时保持 unknown，等采集层给出结论。
+            Integer judgedLevel = snap.alertLevels == null ? null : snap.alertLevels.get(key);
+            if (judgedLevel != null && judgedLevel == MetricsSnapshot.ALERT_LEVEL_NO_VERDICT) {
+                continue; // 仍无结论：留在 unknown（不计恢复、不删除）
             }
             suspendedAlerts.remove(key);
             moduleDownSince.remove(key);
