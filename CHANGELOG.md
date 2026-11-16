@@ -72,7 +72,11 @@ system 值），并让 `perfscope_module_available{cpu}` 在每台 Windows 服�
 - 新增 `MissingLevelKeyIsNotRecoveryTest`（7 个用例）：靶点（`-1` + 模块健康 → 不得 resolve）、
   持续无结论转 unknown、unknown 不被静默删除、**反向保护**（键缺席 = 不适用 → 必须恢复；
   `level=0` → 必须恢复，防止修过头把正常恢复堵死）、对照两条（`unavailable` 走 unknown；
-  `level=2` 消息缺席不得恢复）。先加测试跑一次为红，修复后 7/7 绿。
+  `level=2` 消息缺席不得恢复）。
+  **先红后绿的实测**：把 `AlertService` 退回修复前实现，用最终版测试跑
+  → `Tests run: 7, Failures: 3`（`noVerdictMustNotAnnounceRecovery` /
+  `persistentlyNoVerdictEventuallyGoesSuspendedNotResolved` /
+  `suspendedAlertSurvivesCyclesWithoutAVerdict`）；恢复修复后 7/7 绿。
 - 新增 `MsptAlertLevelTest`（6 个用例）：MSPT 判定内核抽成纯函数 `msptAlertLevel`，
   锁住"`<= 0` 一律是没判定"（`-1` / `0` / `NaN`）、阈值严格大于、两级顺序、标记为负值。
 - 渲染层补 `noVerdictMarkerIsNeverEmitted`：`-1` 不得出现在 `perfscope_alert` 输出里。
