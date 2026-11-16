@@ -368,6 +368,33 @@ const MUTATIONS = [
         expect: null,
         gate: 'tools/check-reload-rebuild.mjs',
     },
+    {
+        id: 'M36',
+        file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
+        from: '        return Math.round(value * 100.0) / 100.0;',
+        to: '        return Math.round(value * 10.0) / 10.0;',
+        desc: 'round2 只保留一位小数 —— TPS 19.99 变成 20.0，'
+            + '「是否满 TPS」的目视判断直接反转',
+        expect: 'CollectorFormattingTest',
+    },
+    {
+        id: 'M37',
+        file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
+        from: '        return t.getClass().getSimpleName() + (msg == null ? "" : ": " + msg);',
+        to: '        return (msg == null ? "" : msg);',
+        desc: 'describeThrowable 丢掉类名 —— 服主搜 IllegalStateException 搜不到，'
+            + '只剩一句消息无从判断严重程度；无消息时更退化成一个空串',
+        expect: 'CollectorFormattingTest',
+    },
+    {
+        id: 'M38',
+        file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
+        from: '        if (t == null) {\n            return Messages.get("run.collector.unknown-error");',
+        to: '        if (false) {\n            return Messages.get("run.collector.unknown-error");',
+        desc: 'describeThrowable 去掉 null 守卫 —— 采集失败的日志变成'
+            + '「记日志时又抛了一个 NPE」，原本要报告的错误被掩盖',
+        expect: 'CollectorFormattingTest',
+    },
 ];
 
 // ---------------------------------------------------------------------------
