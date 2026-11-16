@@ -654,6 +654,19 @@ const MUTATIONS = [
             + '这正是本次修复前的形状，且当时全量 749 个用例零失败',
         expect: 'ThresholdTextMatchesOperatorTest',
     },
+    {
+        id: 'M61',
+        file: 'src/main/java/cn/perfscope/metrics/ThresholdOperator.java',
+        from: '        new Rule("players:global", Direction.HIGH_IS_BAD, '
+            + 'Comparison.INCLUSIVE, Comparison.INCLUSIVE);',
+        to: '        new Rule("players:global", Direction.HIGH_IS_BAD, '
+            + 'Comparison.INCLUSIVE, Comparison.STRICT);',
+        desc: 'players 的 <b>warning 档</b>从闭区间 `>=` 改成 `>`（critical 保持闭区间）——'
+            + '恰好 90%（18/20 人，最常见的满员配置）从 warning 掉回健康。'
+            + '与 M58 改的是不同档：这条由文案测试而非行为测试杀死，'
+            + '证明「改算子 → 告警文案自动跟随」不是口号而是有测试看着的',
+        expect: 'ThresholdTextMatchesOperatorTest',
+    },
 ];
 
 // ---------------------------------------------------------------------------
