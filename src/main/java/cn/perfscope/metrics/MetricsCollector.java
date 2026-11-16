@@ -1725,37 +1725,91 @@ public class MetricsCollector {
         try {
             Object server = Bukkit.getServer();
             long[] arr = (long[]) getTickTimesMethod.invoke(server);
-            long sum = 0;
-            long min = Long.MAX_VALUE;
-            long max = 0;
-            int n = 0;
-            if (arr != null) {
-                for (long t : arr) {
-                    if (t <= 0) {
-                        continue; // 跳过未填充槽位/无效采样
-                    }
-                    sum += t;
-                    n++;
-                    if (t < min) {
-                        min = t;
-                    }
-                    if (t > max) {
-                        max = t;
-                    }
-                }
+            MsptStats stats = reduceTickTimes(arr);
+            snap.msptAvg = stats.avgMs();
+            snap.msptMin = stats.minMs();
+            snap.msptMax = stats.maxMs();
+            if (stats.hasSamples()) {
+                snap.msptSource = MetricsSnapshot.MSPT_SOURCE_TICK_TIMES;
             }
-            if (n == 0) {
-                snap.msptAvg = -1;
-                snap.msptMin = -1;
-                snap.msptMax = -1;
-                return;
-            }
-            snap.msptAvg = round2(sum / (double) n / 1_000_000.0);
-            snap.msptMin = round2(min / 1_000_000.0);
-            snap.msptMax = round2(max / 1_000_000.0);
-            snap.msptSource = MetricsSnapshot.MSPT_SOURCE_TICK_TIMES;
         } catch (Exception e) {
             collectMSPT_BukkitAvg(snap);
+        }
+    }
+
+    /**
+     * Paper {@code getTickTimes()} 返回值的规约内核：把 {@code long[]}（纳秒）折成毫秒统计量。
+     *
+     * <p><b>为什么把它单独抽出来</b>：这段循环是 MSPT 一级路径的全部算法，而它此前零测试——
+     * {@code collectMSPT_Paper} 的前两行是 {@code Bukkit.getServer()} 与反射 {@code invoke}，
+     * 于是整条路因为"前面两行测不了"而连算法一起失去了保护。抽成纯函数后，输入只是
+     * {@code long[]}，问题从"怎么造一个 CraftServer"变成"怎么造一个数组"。</p>
+     *
+     * <p><b>三个哨兵语义（都容易被改坏，且改坏后不报错）</b>：</p>
+     * <ul>
+     *   <li>{@code t <= 0} 的槽位<b>跳过</b>而不是当 0 计入——未填充槽位是"这段窗口还没 tick"，
+     *       把它算进 min 会让 min 恒为 0，而展示层用 {@code msptMin <= 0} 判"未采集"，
+     *       于是<b>有效极值被渲染成"未采集"</b>。跳过条件写成 {@code t < 0} 就正是这个错。</li>
+     *   <li>{@code n == 0}（数组全零 / 空 / null）→ 三个值都置 {@code -1} 哨兵，
+     *       <b>不是</b> 0。MSPT 里 0 是合法读数（一个 tick 几乎没耗时），
+     *       用它表示"没采到"会让"服务器极快"与"采不到"无法区分。</li>
+     *   <li>{@code max} 初值取 {@code 0} 而非 {@code Long.MIN_VALUE}：能进循环的 {@code t} 必为正，
+     *       所以 0 不会漏掉任何真实样本。改成 {@code Long.MIN_VALUE} 在 {@code n == 0} 时
+     *       会算出荒谬的巨大值——但那条路已被 {@code n == 0} 的哨兵拦住。</li>
+     * </ul>
+     *
+     * <p>单位：入参是<b>纳秒</b>（Paper {@code getTickTimes()} 的语义），出参是<b>毫秒</b>。
+     * 除以 1e6 这一步三处（avg/min/max）必须同改——漏改一处会得到量级差 1000 的混排。</p>
+     *
+     * @param arr {@code getTickTimes()} 的返回值，可为 {@code null}
+     * @return 规约结果；无有效样本时三个值为 {@code -1} 且 {@code validSamples == 0}
+     */
+    static MsptStats reduceTickTimes(long[] arr) {
+        long sum = 0;
+        long min = Long.MAX_VALUE;
+        long max = 0;
+        int n = 0;
+        if (arr != null) {
+            for (long t : arr) {
+                if (t <= 0) {
+                    continue; // 跳过未填充槽位/无效采样
+                }
+                sum += t;
+                n++;
+                if (t < min) {
+                    min = t;
+                }
+                if (t > max) {
+                    max = t;
+                }
+            }
+        }
+        if (n == 0) {
+            return new MsptStats(-1, -1, -1, 0);
+        }
+        return new MsptStats(
+            round2(sum / (double) n / 1_000_000.0),
+            round2(min / 1_000_000.0),
+            round2(max / 1_000_000.0),
+            n);
+    }
+
+    /**
+     * {@link #reduceTickTimes} 的结果。
+     *
+     * <p>暴露 {@code validSamples} 而不只是三个 double，是因为"min 对但 avg 的分母错"这类
+     * 半对错误无法从三个值看出来——分母错了 avg 会偏，但若样本恰好均匀就看不出来。</p>
+     *
+     * @param avgMs        平均每 tick 毫秒；无样本时 {@code -1}
+     * @param minMs        最小每 tick 毫秒；无样本时 {@code -1}
+     * @param maxMs        最大每 tick 毫秒；无样本时 {@code -1}
+     * @param validSamples 有效（{@code > 0}）样本数
+     */
+    record MsptStats(double avgMs, double minMs, double maxMs, int validSamples) {
+
+        /** 本轮是否采到了有效样本（{@code false} 时三个值都是哨兵）。 */
+        boolean hasSamples() {
+            return validSamples > 0;
         }
     }
 
@@ -2381,11 +2435,22 @@ public class MetricsCollector {
         snap.alertLevels.put(key, level);
     }
 
-    private double round2(double value) {
+    /**
+     * 两位小数舍入。
+     *
+     * <p>刻意是 {@code static}：{@link #reduceTickTimes} 是纯静态方法，不该为了调一个
+     * 不读实例状态的辅助方法而先造一个 collector。</p>
+     *
+     * <p><b>已知边界（{@code CollectorFormattingTest} 有专门用例记录，不修正）</b>：
+     * {@code round2(NaN) == 0.0}（{@code Math.round(NaN)} 是 0）、
+     * {@code round2(Infinity)} 饱和到 {@code 9.2e16}、
+     * 负数半值与正数不对称。当前所有调用点都有前置守卫，所以都不可达。</p>
+     */
+    static double round2(double value) {
         return Math.round(value * 100.0) / 100.0;
     }
 
-    private double round4(double value) {
+    static double round4(double value) {
         return Math.round(value * 10000.0) / 10000.0;
     }
 }
