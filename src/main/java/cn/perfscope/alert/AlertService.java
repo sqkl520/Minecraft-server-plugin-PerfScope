@@ -22,6 +22,7 @@ import cn.perfscope.compat.SchedulerAdapter;
 import cn.perfscope.compat.ServerCompat;
 import cn.perfscope.config.ConfigManager;
 import cn.perfscope.metrics.MetricsSnapshot;
+import cn.perfscope.metrics.ThresholdOperator;
 import cn.perfscope.util.DurationFormat;
 import cn.perfscope.util.Messages;
 import net.kyori.adventure.text.Component;
@@ -1704,7 +1705,19 @@ public class AlertService {
         return Double.isFinite(v) ? v : null;
     }
 
-    /** 9A-14：按 key 反查当前阈值文案（采集层已判定，这里只用于"值/阈值"展示；不改判定口径）。 */
+    /**
+     * 9A-14：按 key 反查当前阈值文案（采集层已判定，这里只用于"值/阈值"展示；不改判定口径）。
+     *
+     * <p><b>比较符从算子表取，不写在文案模板里</b>：{@code {2}} / {@code {3}} 是
+     * {@link ThresholdOperator.Rule#warningSymbol()} / {@code criticalSymbol()} 的返回值。
+     * 此前模板硬编码了符号，而 {@code players} 的判定是闭区间（18/20 人 = 恰好 90% 最常见的
+     * 满员配置）：读数 90 时告警已经触发，文案却写着"大于 90 才算"。硬编码符号是算子表的
+     * 第五份副本，改算子忘改文案不会有任何测试变红——所以这里不复制字形，只复制引用。</p>
+     *
+     * <p>CPU 是唯一例外：它走迟滞状态机、不在算子表里，符号用
+     * {@link ThresholdOperator#CPU_ENTRY_SYMBOL}（进入线严格 {@code >}，
+     * 真值由 {@code MetricsCollector.latched} 决定）。</p>
+     */
     private String thresholdText(String key) {
         ConfigManager.ConfigData c = configManager.get();
         if (c == null) {
@@ -1714,27 +1727,38 @@ public class AlertService {
             switch (metricOf(key)) {
                 case "tps":
                     return Messages.get("alert.threshold.tps",
-                        c.tps_warningThreshold, c.tps_criticalThreshold);
+                        c.tps_warningThreshold, c.tps_criticalThreshold,
+                        ThresholdOperator.TPS.warningSymbol(), ThresholdOperator.TPS.criticalSymbol());
                 case "mspt":
                     return Messages.get("alert.threshold.mspt",
-                        c.mspt_warningThreshold, c.mspt_criticalThreshold);
+                        c.mspt_warningThreshold, c.mspt_criticalThreshold,
+                        ThresholdOperator.MSPT.warningSymbol(), ThresholdOperator.MSPT.criticalSymbol());
                 case "players":
                     return Messages.get("alert.threshold.players",
-                        c.players_warningThreshold, c.players_criticalThreshold);
+                        c.players_warningThreshold, c.players_criticalThreshold,
+                        ThresholdOperator.PLAYERS.warningSymbol(), ThresholdOperator.PLAYERS.criticalSymbol());
                 case "entities":
                     return key.startsWith("entities:world:")
                         ? Messages.get("alert.threshold.entities.world")
                         : Messages.get("alert.threshold.entities",
-                            c.entities_totalWarningThreshold, c.entities_totalCriticalThreshold);
+                            c.entities_totalWarningThreshold, c.entities_totalCriticalThreshold,
+                            ThresholdOperator.ENTITIES_GLOBAL.warningSymbol(),
+                            ThresholdOperator.ENTITIES_GLOBAL.criticalSymbol());
                 case "chunks":
                     return Messages.get("alert.threshold.chunks",
-                        c.chunks_loadedWarningThreshold, c.chunks_loadedCriticalThreshold);
+                        c.chunks_loadedWarningThreshold, c.chunks_loadedCriticalThreshold,
+                        ThresholdOperator.CHUNKS_WORLD.warningSymbol(),
+                        ThresholdOperator.CHUNKS_WORLD.criticalSymbol());
                 case "memory":
                     return Messages.get("alert.threshold.memory",
-                        c.memory_heapWarningThreshold, c.memory_heapCriticalThreshold);
+                        c.memory_heapWarningThreshold, c.memory_heapCriticalThreshold,
+                        ThresholdOperator.MEMORY.warningSymbol(),
+                        ThresholdOperator.MEMORY.criticalSymbol());
                 case "cpu":
+                    // 迟滞闩锁不在算子表里：两路进入判据都是严格 `>`，退出线另由迟滞提示说明
                     return Messages.get("alert.threshold.cpu",
-                        c.cpu_processWarningThreshold, c.cpu_systemWarningThreshold);
+                        c.cpu_processWarningThreshold, c.cpu_systemWarningThreshold,
+                        ThresholdOperator.CPU_ENTRY_SYMBOL, ThresholdOperator.CPU_ENTRY_SYMBOL);
                 default:
                     return "";
             }

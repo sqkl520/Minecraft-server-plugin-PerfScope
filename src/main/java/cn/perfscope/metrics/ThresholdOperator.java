@@ -49,6 +49,24 @@ import java.util.List;
  * {@code >} 改成 {@code >=}」这种半格挪动无法被变异验证单独命中——那正是此前实测里存活的方向之一。
  * 拆成两个字段后，每个方向都能被单独改坏、单独被测试杀死。</p>
  *
+ * <h2>为什么告警文案的比较符也从这里取</h2>
+ *
+ * <p>算子在本仓库里曾有<b>四份副本</b>：本表、{@code ThresholdColors}（展示层闭区间，有意不同）、
+ * README 的散文说明、以及 {@code AlertMessages} 里 {@code alert.threshold.*} 那段
+ * 「warning &gt; {0} / critical &gt; {1}」的模板。前两份有测试守着，后两份没有——而第四份
+ * 面对的是服主：{@code players} 的判定是闭区间 {@code >=}（18/20 人 = 恰好 90% 是最常见的
+ * 满员配置），模板却写着「大于」，于是一个真的在告警的读数会被文案描述成"还没到线"。
+ * 这不是笔误，是<b>副本之间必然发生的漂移</b>。</p>
+ *
+ * <p>因此字形也由本表派生：{@link Comparison#symbolFor(Direction)} 把
+ * 「方向 × 闭合性」投影成一个符号，{@link Rule#warningSymbol()} / {@link Rule#criticalSymbol()}
+ * 是它的两条出口，{@code AlertService.thresholdText} 再把符号作为 {@code {2}} / {@code {3}}
+ * 传给文案模板。改这张表里的算子，告警文案自动跟随——而不是等某天有人凑巧发现。</p>
+ *
+ * <p>唯一不在本表里的 CPU 除外：它的进入判据是 {@code value > threshold}（严格），
+ * 退出判据 {@code >= threshold - margin} 由迟滞提示单独说明，文案里那句
+ * {@code process > {0}%} 指的就是进入线，属实。</p>
+ *
  * <h2>CPU 为什么不在表里</h2>
  *
  * <p>CPU 两路判定用的是<b>带迟滞的状态机</b>（{@link MetricsCollector} 的 {@code latched}）：
@@ -82,8 +100,40 @@ public final class ThresholdOperator {
         /** 严格比较：高值差 {@code >}、低值差 {@code <}。 */
         STRICT,
         /** 闭区间：高值差 {@code >=}、低值差 {@code <=}。 */
-        INCLUSIVE
+        INCLUSIVE;
+
+        /**
+         * 该闭合性在给定方向下对应的<b>字形</b>（给告警文案用）。
+         *
+         * <p>这是 {@code alert.threshold.*} 模板里那些比较符的唯一出处。字形随
+         * 闭合性走，闭区间用 {@code ≥}/{@code ≤}（与既有 {@code memory} 文案逐字一致，
+         * 中文界面读起来也更自然），严格用 ASCII 的 {@code >}/{@code <}。</p>
+         *
+         * <p>不返回 {@code ">="} 这类"两字符合成"给闭区间：告警正文会进控制台、
+         * Discord/企业微信/飞书/钉钉四家 webhook 与 {@code alerts.state} 落盘，
+         * 两个字符的写法在窄列里容易被读成"大于"。</p>
+         *
+         * @param direction 判定方向；{@code null} 按高值差处理（防御性，调用方不会传 null）
+         */
+        public String symbolFor(Direction direction) {
+            boolean lowIsBad = direction == Direction.LOW_IS_BAD;
+            return switch (this) {
+                case STRICT -> lowIsBad ? "<" : ">";
+                case INCLUSIVE -> lowIsBad ? "≤" : "≥";
+            };
+        }
     }
+
+    /**
+     * CPU 两路迟滞闩锁的<b>进入线字形</b>。
+     *
+     * <p>CPU 不在 {@link #ALL} 表里（迟滞状态机不是两档规则，见类注释），但它的进入判据
+     * 同样是"严格大于"——所以字形也要有唯一出处，而不是在 {@code alert.threshold.cpu}
+     * 模板里再写一个 {@code >}。真值由 {@code MetricsCollector.latched} 决定，
+     * {@code ThresholdTextMatchesOperatorTest} 会反射调用它，验证"进入线确实是严格的"
+     * 与这个字形一致。</p>
+     */
+    public static final String CPU_ENTRY_SYMBOL = ">";
 
     /**
      * 一条判定规则：{@code key} 只用于人读与测试定位（与 {@code Alert.key()} 同一命名），
@@ -128,6 +178,25 @@ public final class ThresholdOperator {
                 case STRICT -> highIsBad ? value > threshold : value < threshold;
                 case INCLUSIVE -> highIsBad ? value >= threshold : value <= threshold;
             };
+        }
+
+        /**
+         * warning 档越界时用的比较符（{@code <} / {@code ≤} / {@code >} / {@code ≥}）。
+         *
+         * <p>与 {@link #trips} 的 warning 分支一一对应：改那边的算子，这里返回的符号随之变化，
+         * 告警文案因此不可能与判定说两套话。消费者是 {@code AlertService.thresholdText}。</p>
+         */
+        public String warningSymbol() {
+            return warningComparison.symbolFor(direction);
+        }
+
+        /**
+         * critical 档越界时用的比较符。
+         *
+         * @see #warningSymbol()
+         */
+        public String criticalSymbol() {
+            return criticalComparison.symbolFor(direction);
         }
     }
 

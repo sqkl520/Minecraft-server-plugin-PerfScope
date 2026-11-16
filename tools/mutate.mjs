@@ -625,6 +625,35 @@ const MUTATIONS = [
             + '而这正是「满了」的典型读数；同时也是百分比族与计数族口径是否真的分开的证据',
         expect: 'ThresholdOperatorBehaviorTest',
     },
+    // ---------------------------------------------------------------------------------
+    // 告警文案的比较符（ThresholdTextMatchesOperatorTest）：符号此前硬编码在
+    // AlertMessages 的模板里，是算子表的第五份副本 —— `players` 判定是闭区间 `>=`，
+    // 文案却写 `>`，读数恰好 90%（18/20 人，最常见的满员配置）时告警已经触发而文案说"还没到线"。
+    // 下面两条：一条改算子（文案必须跟着变），一条把硬编码符号塞回模板（必须被抓住）。
+    // ---------------------------------------------------------------------------------
+    {
+        id: 'M59',
+        file: 'src/main/java/cn/perfscope/metrics/ThresholdOperator.java',
+        from: '                case INCLUSIVE -> lowIsBad ? "≤" : "≥";',
+        to: '                case INCLUSIVE -> lowIsBad ? "≤" : ">";',
+        desc: '闭区间的字形从 `>=`（≥）退回成 `>` —— 判定仍是闭区间，文案却开始说谎。'
+            + '这不是"改坏了编译器会拦住"的那一类：算子表本身没动，'
+            + '只有服主读到的那串字变成了错的事实（此前 AlertMessages 里的真实形状）',
+        expect: 'ThresholdTextMatchesOperatorTest',
+    },
+    {
+        id: 'M60',
+        file: 'src/main/java/cn/perfscope/alert/AlertMessages.java',
+        from: '        put(en, zh, "alert.threshold.players",\n'
+            + '            "warning {2} {0} / critical {3} {1}", '
+            + '"warning {2} {0} / critical {3} {1}");',
+        to: '        put(en, zh, "alert.threshold.players",\n'
+            + '            "warning > {0} / critical > {1}", "warning > {0} / critical > {1}");',
+        desc: '把硬编码的 `>` 塞回 players 的告警模板（第五份副本回潮）—— 占位符 {2}/{3} 消失后，'
+            + '模板不再跟随算子表，改 PLAYERS 的闭合性时文案不动。'
+            + '这正是本次修复前的形状，且当时全量 749 个用例零失败',
+        expect: 'ThresholdTextMatchesOperatorTest',
+    },
 ];
 
 // ---------------------------------------------------------------------------

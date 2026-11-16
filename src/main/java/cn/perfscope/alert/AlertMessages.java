@@ -130,23 +130,30 @@ public final class AlertMessages {
         put(en, zh, "alert.msg.digest-off", "off", "关");
 
         // ==================== 阈值说明（按指标，比较方向各不相同） ====================
+        // 比较符不写死在这里：{2}/{3} 由 AlertService.thresholdText 从 ThresholdOperator 取
+        // （Rule.warningSymbol() / criticalSymbol()）。此前它们是硬编码字面量，`players` 那行
+        // 写着「>」而判定是闭区间「>=」——18/20 人恰好 90% 正在告警，文案却说"还没到线"。
+        // 这不是笔误，是第五份副本必然发生的漂移；符号跟随算子表之后，改算子文案自动跟随。
+        // CPU 不在算子表里（迟滞状态机），{2}/{3} 传的是 ThresholdOperator.CPU_ENTRY_SYMBOL。
         put(en, zh, "alert.threshold.tps",
-            "warning < {0} / critical < {1}", "warning < {0} / critical < {1}");
+            "warning {2} {0} / critical {3} {1}", "warning {2} {0} / critical {3} {1}");
         put(en, zh, "alert.threshold.mspt",
-            "warning > {0}ms / critical > {1}ms", "warning > {0}ms / critical > {1}ms");
+            "warning {2} {0}ms / critical {3} {1}ms", "warning {2} {0}ms / critical {3} {1}ms");
         put(en, zh, "alert.threshold.players",
-            "warning > {0} / critical > {1}", "warning > {0} / critical > {1}");
+            "warning {2} {0} / critical {3} {1}", "warning {2} {0} / critical {3} {1}");
         put(en, zh, "alert.threshold.entities",
-            "warning > {0} / critical > {1}", "warning > {0} / critical > {1}");
+            "warning {2} {0} / critical {3} {1}", "warning {2} {0} / critical {3} {1}");
         put(en, zh, "alert.threshold.entities.world",
             "see the worlds section for per-world thresholds", "世界阈值见 worlds 段");
         put(en, zh, "alert.threshold.chunks",
-            "warning > {0} / critical > {1}", "warning > {0} / critical > {1}");
+            "warning {2} {0} / critical {3} {1}", "warning {2} {0} / critical {3} {1}");
         put(en, zh, "alert.threshold.memory",
-            "warning ≥ {0}% / critical ≥ {1}%", "warning ≥ {0}% / critical ≥ {1}%");
-        // CPU 两个指标共用一个 metric 前缀，二者阈值同时给出
+            "warning {2} {0}% / critical {3} {1}%", "warning {2} {0}% / critical {3} {1}%");
+        // CPU 两个指标共用一个 metric 前缀，二者阈值同时给出。
+        // 符号只有一个：两侧进入判据都是严格 `>`（MetricsCollector.latched 的未闩锁分支），
+        // 退出线由 alert.msg.hysteresis 单独说明。
         put(en, zh, "alert.threshold.cpu",
-            "process > {0}% / system > {1}%", "进程 > {0}% / 系统 > {1}%");
+            "process {2} {0}% / system {2} {1}%", "进程 {2} {0}% / 系统 {2} {1}%");
 
         // ==================== 下一步（runbook；命令逐字保留） ====================
         put(en, zh, "alert.next-step.tps",
