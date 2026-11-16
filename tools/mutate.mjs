@@ -395,6 +395,25 @@ const MUTATIONS = [
             + '「记日志时又抛了一个 NPE」，原本要报告的错误被掩盖',
         expect: 'CollectorFormattingTest',
     },
+    {
+        id: 'M39',
+        file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
+        from: '        if (snap.totalEntities > cfg.entities_totalCriticalThreshold) {',
+        to: '        if (snap.totalEntities >= cfg.entities_totalCriticalThreshold) {',
+        desc: '把 entities 的采集层判定从开区间改成闭区间 —— 与展示层「统一」了，'
+            + '但会让读数恰好等于 30000 的一批服务器突然开始报 critical。'
+            + '本变异用来验证「差异清单」这条断言真的会亮',
+        expect: 'ThresholdBoundaryAsymmetryTest',
+    },
+    {
+        id: 'M40',
+        file: 'src/main/java/cn/perfscope/util/ThresholdColors.java',
+        from: '                if (value >= critical) return Level.CRITICAL;',
+        to: '                if (value > critical) return Level.CRITICAL;',
+        desc: '把展示层的闭区间改成开区间 —— 恰好到线的数字不再变红，'
+            + '违反 ThresholdColorsTest「30000 必须已经变红」的 UI 契约',
+        expect: 'ThresholdBoundaryAsymmetryTest',
+    },
 ];
 
 // ---------------------------------------------------------------------------
