@@ -42,6 +42,69 @@
   一级成功只写三个字段、`wasPrimaryAvailable` 与 `wasAvailable` 不合并、`probed` 先于分支），
   全部被测试杀死。
 
+### Refactored — 抽出 `reduceTickTimes`，让 Paper MSPT 规约内核第一次可测
+
+`collectMSPT_Paper` 里那 28 行循环是 MSPT 一级路径（`CraftServer.getTickTimes()`）的**全部算法**，
+而它此前零测试——因为该方法前两行是 `Bukkit.getServer()` 与反射 `invoke`，
+整条路因为"前两行测不了"连算法一起失去了保护。
+
+抽成 `static MsptStats reduceTickTimes(long[])` 后输入只剩 `long[]`，
+问题从"怎么造一个 CraftServer"变成"怎么造一个数组"。**调用点 1 个**。
+
+签名里返回 `validSamples` 而不只是三个 double，是因为"min 对但 avg 的分母错"这类**半对错误**
+无法从三个值看出来——分母错了 avg 会偏，但若样本恰好均匀就看不出来。
+
+`MsptReduceTest`（12 个用例）重点锁三处**改坏后不报错**的语义：
+
+| 语义 | 改坏后的后果 |
+|---|---|
+| `t <= 0` 的槽位跳过 | 宽松成 `< 0` 后未填充槽位 0 计入 min → min 恒为 0 → 展示层（`msptMin <= 0` 判未采集）**把有效极值渲染成"没数据"** |
+| 无样本时置 `-1` 哨兵 | 改成 0 后"MSPT 里 0 是合法读数"（一个 tick 几乎没耗时会舍到 0.0），于是**"服务器极快"与"采不到"无法区分** |
+| 除以 1e6 三处同改 | 漏改一处得到量级差 1000 的混排（min 是毫秒、max 是微秒） |
+
+顺带把 `round2` / `round4` 改成 `static`——它们不读实例状态，而 `reduceTickTimes` 是静态方法。
+
+### Refactored — 四份不可用标记块收成 `markDedicatedModuleUnavailable`
+
+`entities` / `chunks` / `tile_entities` / `hotspots` 的缓存回放此前是**四份逐字相同的 10 行块**，
+唯一的差别是模块名与三个布尔量。
+
+四份手写的真实代价不是重复本身，而是**漏一个标记不会有任何提示**：
+`freezeCollections` 里的 `repairSubsetContracts` 会事后补上，但"事后补救"意味着
+**数据已经错了一轮**才被纠正，且只在日志里留一行限频 WARNING。
+
+收口后，"写 `platformSkipped` 却忘了写 `disabledModules`"这类错在结构上不再可能——
+三个集合在同一个方法体里一次写完。**调用点 4 个**。
+
+`ModuleUnavailableMarkingTest`（6 个用例）含**三个布尔量的完整 8 种组合真值表**，
+外加一条衔接断言：标记完整后 `repairSubsetContracts` 必须什么都**不做**
+（兜底逻辑是保险，不是常规路径；它若报告修复过，说明写入本身不完整）。
+
+### Changed — 补上 `chunks` 逐世界判定与 `entities` 口径不同的说明（行为不变）
+
+Agent 审查发现两处对"世界的世界集合"口径不同，而注释只解释了其中一边：
+
+- `collectEntities` 对**没有 `worlds` 覆盖**的世界 `continue`（不判定、不写 `entities:world:<名>`）——
+  因为它有"全服总数"口径 `entities:global` 兜底，没覆盖的世界的实体仍计入全服合计；
+- `collectChunks` 对**每个**世界都判、都写 `chunks:world:<名>`，用全局阈值——
+  因为 **chunks 没有全服口径**（`Metric` 枚举里只有 `CHUNKS_WORLD`，
+  `Metric.ofKey` 的注释写着"全服区块数不是告警指标，旧版本也从未告警过"）。
+  若这里也跳过没覆盖的世界，那些世界的区块超限会**完全失声**。
+
+**所以这个不一致是刻意的，不是遗漏**——但注释此前只写了 entities 那边为什么跳过。
+已补上 chunks 这边的理由，以及它的副效果：用户新增一个世界却不配覆盖时，
+`chunks:world:<新世界>` 会出现、`entities:world:<新世界>` 不会出现，
+两族指标的键集合因此不对称，Prometheus 侧查询的预期要分开写。
+
+### Removed — `applyJvmCache(MetricsSnapshot)` 单参重载（零调用点的死代码）
+
+唯一调用点（`collectSyncOnce`）早已改成显式传 `cfg`——因为 reload 期间再经
+`configManager.get()` 回读，会让同一份快照的"JVM 段"用新一代配置、前半段用旧一代
+（9A-10 #2）。
+
+那个重载因此是死代码，且它**保留着已被淘汰的那种危险写法**：谁若误用它，
+9A-10 #2 那个 bug 会原样复发。删掉比留着安全。
+
 ### Added — 测试：阈值边界的「双层口径差异」（采集层开区间 vs 展示层闭区间）
 
 这是一个**真实存在的、此前从未被记录的**不一致：同一份配置、同一个读数，两处结论不同。
