@@ -449,6 +449,28 @@ const MUTATIONS = [
             + '甚至可能小于 min（「平均比最快还快」）',
         expect: 'MsptReduceTest',
     },
+    {
+        id: 'M45',
+        file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
+        from: '        if (platformSkipped) {\n            // 契约要求 platformSkipped ⊆ disabledModules：平台限制同时是"服主没配过但平台不让采"，\n'
+            + '            // 展示层据此渲染更精确的原因而不是笼统的「已禁用」。\n'
+            + '            snap.disabledModules.add(module);\n'
+            + '            snap.platformSkipped.add(module);   // 9B-3',
+        to: '        if (platformSkipped) {\n            snap.platformSkipped.add(module);   // 9B-3',
+        desc: '退回四份手写块最容易犯的错：写 platformSkipped 却忘了写 disabledModules —— '
+            + '展示层按 platformSkipped → disabledModules → unavailable 顺序判定，'
+            + 'Folia 上会显示红色「采集失败」而不是灰色「平台限制」',
+        expect: 'ModuleUnavailableMarkingTest',
+    },
+    {
+        id: 'M46',
+        file: 'src/main/java/cn/perfscope/metrics/MetricsCollector.java',
+        from: '        snap.unavailable.add(module);\n        if (disabled) {',
+        to: '        if (disabled) {\n            snap.unavailable.add(module);',
+        desc: 'unavailable 只在 disabled 时写 —— 采集真的失败（disabled=false）时模块既不进 '
+            + 'unavailable 也不进其他集合，/metrics 会输出它的 0 值',
+        expect: 'ModuleUnavailableMarkingTest',
+    },
 ];
 
 // ---------------------------------------------------------------------------
