@@ -90,7 +90,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class ReportStaleMarkerTest {
 
-    private static final String PLUGIN_VERSION = "1.4.4";
+    private static final String PLUGIN_VERSION = "1.4.5-SNAPSHOT-fix1";
 
     /** 报告头「生成时间 / 数据采集于」用的格式（与生产 {@code DISPLAY_TS} 同形）。 */
     private static final DateTimeFormatter DISPLAY_TS = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");

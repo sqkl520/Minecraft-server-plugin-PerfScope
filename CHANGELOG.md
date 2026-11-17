@@ -3,7 +3,7 @@
 本项目：**PerfScope** —— Minecraft 服务器性能监测插件（Paper 1.20.4+ / Purpur / Pufferfish / Folia / Leaves，Java 17）。
 后台定时采集性能快照 → 游戏内 17 个子命令一屏诊断 → HTML/TXT/JSON 报告导出 → ActionBar 实时监测 → 阈值告警。
 
-> **仓库**：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope> ｜ **版本**：`1.4.4`（当前正式版，补丁）｜ **上一个正式版**：`1.4.3`（`versions/PerfScope-1.4.3.jar`）｜ `[Unreleased]` 当前为空
+> **仓库**：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope> ｜ **版本**：`1.4.5-SNAPSHOT-fix1`（当前构建）｜ **上一个归档**：`1.4.4`（`versions/PerfScope-1.4.4.jar`）
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/)。v1.2「找得到」开发周期已收尾，各段以 **Wave（开发波次）** 划分并标注对应提交哈希。
 
@@ -14,9 +14,48 @@
 
 ---
 
-## [Unreleased]
+## [1.4.5-SNAPSHOT-fix1] — 待发布 — 版本号方案变更 + 未发布修复
 
-> v1.4.4 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
+> 本节原本是 `[Unreleased]`，与版本段合并而非另起一段：`release.yml` 的正文提取按
+> 「第一个提到版本号的 `## ` 标题」向下截取，若同时保留空的 `[Unreleased]` 和本段，
+> Release 正文就只剩一句「尚无新改动」。合并后正文即本节全文。
+
+### Changed — 版本号改用 `基础版本-SNAPSHOT-fixN`（对齐 sqkl520/dsh-fcl-android-launcher）
+
+从本版起版本号写作 `1.4.5-SNAPSHOT-fix1`：`-SNAPSHOT` 是这条补丁线的标识，`fixN` 是该线上的
+补丁序号，从 1 开始递增；同一条线上 `fixN` 越大越新。参照仓库 `sqkl520/dsh-fcl-android-launcher`
+自 0.1.1 起就是这个形式（`0.1.6-SNAPSHOT-fix1` … `fix22`）。
+
+**它看起来像快照，但它是唯一在维护的构建。** 发布形态同步参照仓库：Release 标题不带 `v`
+（tag 是 `v1.4.5-SNAPSHOT-fix1`，标题是 `1.4.5-SNAPSHOT-fix1`），且一律标 **Pre-release**。
+
+**连带后果，写在这里免得以后当成 bug 查**：GitHub 的 `releases/latest` 只认非预发布，
+所以 1.4.x-SNAPSHOT 期间该链接**不再指向任何东西**。README 的下载链接已从 `/releases/latest`
+改到 `/releases` 列表页，并补了一段版本号说明。
+
+**版本号仍然只有一个源**：`pom.xml` 的 `<version>`。`plugin.yml` 的 `version: ${project.version}`
+在打包期由 resources filtering 替换，JAR 文件名由 `finalName` 取自同一个值。没有照搬参照仓库的
+`dshFixLabel` 式额外属性——那是 Gradle 拼 `versionName` 的需要；Maven 已在 `${project.version}`
+里拿全量字符串，再存一份只会制造漂移。
+
+**这个非 semver 字符串为什么在各处都安全（逐项实测，非推断）**：
+
+- Maven 接受它 —— `mvn help:evaluate -Dexpression=project.version` 原样输出 `1.4.5-SNAPSHOT-fix1`。
+- `plugin.yml` 接受它 —— Paper 1.20.4 的 `PluginDescriptionFile.version` 是裸 `String` 字段，
+  `javap` 确认赋值路径是普通 `putfield`，**没有任何格式校验**。
+- 生产代码不解析它 —— 全部用途都是字符串拼接（webhook 的 `User-Agent`、启动横幅、报告页脚与
+  标题、JSON 的 `plugin_version`），没有 split / parse / compare。所以 `-SNAPSHOT-fix1` 会
+  原样出现在这些地方，这是预期行为。
+- CI 的 tag 校验仍然成立 —— `TAG="${GITHUB_REF_NAME#v}"` 只剥掉开头的 `v`，
+  `v1.4.5-SNAPSHOT-fix1` → `1.4.5-SNAPSHOT-fix1`，与 pom 相等。
+
+**历史归档不改名。** `versions/` 里 1.4.4 及更早的文件名与 tag 保持原样，因为
+`tools/verify-release-artifact.mjs` 断言「归档与同名 tag 逐字节一致」，把老归档改成新命名会让
+这条断言失去意义。`versions/README.md` 已写明这一点。
+
+**测试夹具同步**：`ReportCardLevelTest` 与 `ReportStaleMarkerTest` 的 `PLUGIN_VERSION` 常量
+改成新格式。这本身是个顺带的正向验证——它证明带 `-SNAPSHOT-fixN` 的字符串能原样穿过
+`PluginDescriptionFile` 与报告渲染，不被任何一层改写。
 
 ### Fixed — `/perfscope entities|chunks <world>` 的总计行仍打全服值
 

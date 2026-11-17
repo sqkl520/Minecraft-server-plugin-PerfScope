@@ -5,9 +5,17 @@
 
 ## 当前版本
 
+> **版本号方案变更（2026-11-18）**：从本版起采用 `基础版本-SNAPSHOT-fixN` 形式，`N` 为该线的补丁序号。
+> 所有 GitHub Release 一律标为 Pre-release，因此 `/releases/latest` 不再指向任何东西——请从
+> Releases 列表页取最上面一条。**历史归档不改名**：下表中 1.4.4 及更早的文件名与 GitHub tag 保持原样，
+> 因为 `tools/verify-release-artifact.mjs` 断言「归档与同名 tag 逐字节一致」，改名会让这条断言失去意义。
+
 | 版本 | 文件 | 说明 |
 |---|---|---|
-| **1.4.4** | `PerfScope-1.4.4.jar` | **推荐使用**（最新已发布版本）。**补丁版**，两个修复：
+| **1.4.5-SNAPSHOT-fix1** | `PerfScope-1.4.5-SNAPSHOT-fix1.jar` | **推荐使用**（当前构建）。版本号启用 `-SNAPSHOT-fixN` 方案，本版 `fix1`。功能与行为同 1.4.4，只有版本号与发布形态变化。<br>
+`pom.xml` 是唯一版本源，`plugin.yml` 与 JAR 文件名都由它派生。<br>
+GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases> |
+| **1.4.4** | `PerfScope-1.4.4.jar` | **补丁版**，两个修复：
 
 ① **致命**：模块关掉时 `/metrics` 仍报 0。`tps.enabled: false` 会发出 `perfscope_tps 0`，
 Grafana 读作"服务器冻结"，任何 `perfscope_tps < 15` 的告警在这种服上永久 firing。
@@ -65,6 +73,12 @@ node tools/verify-release-artifact.mjs --ref v<版本> --version <版本>
 它会在临时目录里按该 tag 重新构建，再与归档逐条目比对（SHA256 / 每个类文件 / config 键 /
 消息键计数 / plugin.yml 版本 / 该 tag 是否存在并与版本号一致）。
 
+注意 `--version` 现在要传**完整**版本字符串，例如：
+
+```bash
+node tools/verify-release-artifact.mjs --ref v1.4.5-SNAPSHOT-fix1 --version 1.4.5-SNAPSHOT-fix1
+```
+
 各版本的关键差异：
 
 - **1.4.0 起**才有 Prometheus 端点（`perfscope.*` 指标、默认 `127.0.0.1:8940/metrics`）、
@@ -101,16 +115,14 @@ This directory holds **local** build artifacts; JARs are not tracked by git (exc
 `.gitignore`, with this `README.md` as the only exception). Use GitHub Releases for official
 downloads.
 
-**Latest released version: 1.4.1** (`PerfScope-1.4.1.jar`, patch release).
+**Latest build: 1.4.5-SNAPSHOT-fix1** (`PerfScope-1.4.5-SNAPSHOT-fix1.jar`).
 
-1.4.1 fixes one thing: the Prometheus endpoint's request handler only caught `Exception`, so a
-`LinkageError` in the render path (class-link failure, a jlink-trimmed JDK without
-`jdk.httpserver`, …) killed the request thread and the scraper got a **dropped connection**
-(`HTTP/1.1 header parser received no bytes`) — a symptom indistinguishable from "endpoint not
-running", "port closed" or "firewall". It now returns a clean 500 with a rate-limited warning in
-the log. Bytecode check: `handle` has 0 `LinkageError` catch entries in 1.4.0, 5 in 1.4.1.
-**Upgrading from 1.4.0 needs no changes** — just swap the jar. Everything else in this release is
-test coverage.
+From this version on, version numbers use the form `base-SNAPSHOT-fixN`, where `N` is the patch
+number along that line. Behaviour is identical to 1.4.4; only the version string and the release
+format changed. All GitHub Releases are flagged Pre-release, so `/releases/latest` no longer
+resolves — take the topmost entry on the Releases page. Historical archives keep their original
+names, because `tools/verify-release-artifact.mjs` asserts that an archive is byte-identical to
+its same-named tag.
 
 ## How each archive maps to a tag
 

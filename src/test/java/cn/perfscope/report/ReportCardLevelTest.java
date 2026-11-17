@@ -72,8 +72,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class ReportCardLevelTest {
 
-    /** 页脚与 JSON 的 plugin_version 都取自它。 */
-    private static final String PLUGIN_VERSION = "1.4.4";
+    /** 页脚与 JSON 的 plugin_version 都取自它。带 -SNAPSHOT-fixN 是刻意的：证明这种非 semver
+     *  的版本字符串能原样穿过 {@code PluginDescriptionFile} 与报告渲染，不被任何一层改写。 */
+    private static final String PLUGIN_VERSION = "1.4.5-SNAPSHOT-fix1";
 
     /** 一条 HTML 卡片里 {@code class="card ..."} 的修饰类。 */
     private static final String CARD_OPEN = "<div class=\"card ";

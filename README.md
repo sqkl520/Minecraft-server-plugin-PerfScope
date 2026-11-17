@@ -146,9 +146,11 @@ GC: 42 次 / 5.23 秒
 
 ## 安装
 
-> **下载**：[GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest)（最新正式版 **v1.4.4**，`PerfScope-1.4.4.jar`）
+> **下载**：[GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases)（当前版本 **1.4.5-SNAPSHOT-fix1**，`PerfScope-1.4.5-SNAPSHOT-fix1.jar`）
 
-> **版本注意**：本文档描述的就是 **v1.4.4** 的行为。1.4.x 是连续的补丁版，修的都是同一类问题：「把健康说成毛病 / 把毛病说成健康」的判定错误。无配置变更，可直接替换 jar。功能面（Prometheus 指标端点、`/perfscope webhook status|test`、企业微信 / 飞书 / 钉钉通道）自 1.4.0 起提供。`alerts.enabled` 默认值与 `entities` / `chunks` 默认阈值在 1.4.0 有变更，**从 1.3.x 升级前请先读下方「升级注意」**。
+> **版本号说明**：从 1.4.5 起版本号采用 `基础版本-SNAPSHOT-fixN` 的形式，`N` 是这一条线上的补丁序号。它看起来像快照，但**是唯一在维护的构建**——所有发布都标为 Pre-release，因此 GitHub 的 `/releases/latest` 不再指向任何东西，请从 Releases 列表页挑最上面那一条。`fixN` 号越大越新，同一条线内可以直接替换 jar。
+
+> **版本注意**：本文档描述的就是 **1.4.5-SNAPSHOT-fix1** 的行为。1.4.x 是连续的补丁版，修的都是同一类问题：「把健康说成毛病 / 把毛病说成健康」的判定错误。无配置变更，可直接替换 jar。功能面（Prometheus 指标端点、`/perfscope webhook status|test`、企业微信 / 飞书 / 钉钉通道）自 1.4.0 起提供。`alerts.enabled` 默认值与 `entities` / `chunks` 默认阈值在 1.4.0 有变更，**从 1.3.x 升级前请先读下方「升级注意」**。
 
 1. 下载最新版本的 JAR 文件
 2. 放入服务器的 `plugins/` 目录

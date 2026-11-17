@@ -6,7 +6,26 @@
 
     <groupId>cn.perfscope</groupId>
     <artifactId>PerfScope</artifactId>
-    <version>1.4.4</version>
+    <!--
+      版本号方案（2026-11-18 起，与 sqkl520/dsh-fcl-android-launcher 对齐）：
+
+        <基础版本>-SNAPSHOT-fixN       补丁构建，N 从 1 递增
+        <基础版本>-SNAPSHOT           基础快照（该线的第一个构建）
+        <基础版本>                    仅首个版本无后缀
+
+      这里**只有一个版本号源**：plugin.yml 的 `version: ${project.version}` 在打包期由
+      resources filtering 替换，JAR 文件名由 `finalName` 取自同一个值。不需要额外的
+      `fixLabel` 属性 —— 参照仓库有 `dshFixLabel` 是因为 Gradle 要拼 versionName，
+      Maven 已在 `${project.version}` 里拿全量字符串，再存一份只会制造漂移。
+
+      为什么这个非 semver 字符串在各处都安全（已逐项实测，不是推断）：
+        - Maven 接受它：`mvn help:evaluate -Dexpression=project.version` 原样输出；
+        - plugin.yml 接受它：Paper 1.20.4 的 PluginDescriptionFile.version 是裸 String
+          字段，`javap` 确认赋值路径是普通 putfield，**无任何格式校验**；
+        - 生产代码不解析它：全部用途是字符串拼接（User-Agent / 横幅 / 报告页脚 /
+          JSON 的 plugin_version），没有 split/parse/compare。
+    -->
+    <version>1.4.5-SNAPSHOT-fix1</version>
     <packaging>jar</packaging>
 
     <name>PerfScope</name>

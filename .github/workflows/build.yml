@@ -335,6 +335,9 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME#v}"
+          # Release 标题 = 去掉 v 的 tag。单写一行到 GITHUB_OUTPUT，别在 yaml 里用
+          # `${{ github.ref_name }}` 再去 v —— yaml 侧没有字符串裁剪函数。
+          echo "release_name=$TAG" >> "$GITHUB_OUTPUT"
           # Take the block that starts at the first heading mentioning this version and ends at
           # the next heading of the same or higher level. Falls back to a pointer when absent.
           awk -v v="$TAG" '
@@ -346,22 +349,39 @@ jobs:
           ' CHANGELOG.md > release-notes.md || true
           if [ ! -s release-notes.md ]; then
             {
-              echo "Release $GITHUB_REF_NAME"
+              echo "Release $TAG"
               echo
               echo "See [CHANGELOG.md](CHANGELOG.md) for the full history."
             } > release-notes.md
             echo '::warning::no CHANGELOG section found for this version; using a placeholder'
           fi
+          # 正文尾部补产物指纹（参照仓库每条 release 都带 sha256），让下载方能校验字节。
+          JAR=$(ls target/PerfScope-*.jar | grep -v original | head -n 1)
+          {
+            echo ''
+            echo '---'
+            echo ''
+            echo "**JAR**：\`$(basename "$JAR")\`（附件，$(stat -c%s "$JAR") 字节）"
+            echo ''
+            echo "**sha256**：\`$(sha256sum "$JAR" | cut -d' ' -f1)\`"
+          } >> release-notes.md
           cat release-notes.md
 
       - name: Create GitHub Release with the jar
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ github.ref_name }}
+          # Release 标题不带 `v`，与 tag 分开：tag 是 v1.4.5-SNAPSHOT-fix1，标题是
+          # 1.4.5-SNAPSHOT-fix1。参照仓库 sqkl520/dsh-fcl-android-launcher 即此格式。
+          name: ${{ steps.notes.outputs.release_name }}
           body_path: release-notes.md
           files: target/PerfScope-*.jar
           fail_on_unmatched_files: true
-          draft: true           # a human publishes; the gate proves the bytes, not the wording
+          # 所有发布都标 Pre-release（参照仓库 28 个 release 无一例外）。后果要知道：
+          # GitHub 的 releases/latest 只认非预发布，因此 1.4.x-SNAPSHOT 期间
+          # /releases/latest 会一直停在最后一个非预发布版本上。
+          prerelease: true
+          # 仍为草稿：门禁只能证明字节，措辞与「现在该不该发」由人决定（项目铁律 Step 6）。
+          draft: true
           generate_release_notes: false
 
       - name: Remind about the local gates this job cannot run
