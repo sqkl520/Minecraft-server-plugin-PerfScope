@@ -18,6 +18,56 @@
 
 > v1.4.4 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
 
+### Fixed — `/perfscope entities|chunks <world>` 的总计行仍打全服值
+
+**症状**：世界视图的标题早就切成了 `=== 实体统计 - <世界> ===`，紧接着的第一行"总实体数"
+打印的却是 `snap.totalEntities`（全部世界之和），并且按**全局**阈值上色。同一屏再往下两行，
+逐世界行打的又是该世界自己的数字、按**该世界**阈值上色。于是用户在同一屏看到两个互相矛盾的
+「实体数」，而第一行那个显然是标题所指世界的——它其实不是。
+
+`/perfscope chunks <world>` 同构：标题按世界切换，两条总计行（加载区块 / 强加载区块）
+打的仍是 `snap.totalLoadedChunks` / `snap.totalForceLoadedChunks`，与 `world` 参数无关。
+
+**这是文档与代码分叉，不是新发现的疏忽**：本文件 1.3.0 段的 Fixed 明写
+「单世界视图改判**该世界自己的**实体数与覆盖阈值，无覆盖时回退全局；世界不在统计里视为 0 实体、
+不报警」。那次改动只落到**告警段**（`showEntities` 末尾的 `entitiesByWorld.get(...)` 与
+`getWorldSettings`），**显示行漏掉了**。文档说改完了，代码里两个版本都没改。
+
+**评审文档给出的可证伪点**（`docs/01-reviews/critique-round2-arch-product.md`
+§5「世界维度的视图在命令层手写过滤」，原文）：
+
+> 在只有 world 一个世界的服务器上，`/perfscope entities world` 与 `/perfscope entities`
+> 输出的"总实体数"数值完全相同——证明该字段不随 world 参数变化（代码路径 :494-497 未引用 world）。
+
+读代码确认改前仍然成立：总计行的取值表达式里**没有 `world` 这个符号**。
+
+**修了什么**：
+
+- 新增 `PerfScopeCommand.worldOrTotal(String worldName, Map<String,Integer> byWorld, int serverTotal)`
+  —— 世界视图取 `byWorld.get(worldName)`，全服视图取 `serverTotal`。
+- `showEntities` 的总计行改走它，并且**颜色判定也带上世界名**
+  （`thresholdColors.levelOf(ENTITIES, value, world.getName())`，`worlds` 段有覆盖则用覆盖阈值，
+  否则回退全局——与下面逐世界行、与告警段同一口径）。
+- `showChunks` 的两条总计行改走它。**颜色保持原样（WHITE）**：那两行历史上不上色，
+  本次只修数字，配色属于另一项改动。
+- **无 `world` 参数的行为一个字没变**：仍打全服总数、仍按全局阈值上色。
+
+**该世界不在快照 map 里时选了口径：显示 0**。理由不是随手选的——告警段读
+`snap.entitiesByWorld.get(world.getName())`，为 `null` 即视为 0 实体、不报警；
+总计行跟它走，同一屏才不会出现两种"缺失"表示。`worldOrTotal` 因此返回 `null`
+（调用方渲染 0），而**不是**回退到全服总值——后者正是本次要修的那个形状。
+
+**单世界场景的"巧合相同"与"逻辑相同"**：单世界服上两个视图的数值修前修后都相等，
+所以「相等」这一点本身**不能**作为修复的判据，也不能作为测试的靶点。判据必须是**多世界**：
+`world=100, nether=900, total=1000` 时世界视图必须是 100 而不是 1000。
+`WorldViewTotalTest` 里两种用例都在，且注释写明哪条是靶点、哪条只是把评审文档的场景钉成说明。
+
+**测试与变异**：新建 `WorldViewTotalTest`（6 个用例，其中 3 条打在多世界/缺失口径这两个真靶点上，
+另 1 条是"接线"检查——断言两处总计行确实把 `world.getName()` 与逐世界 map 传给了 `worldOrTotal`，
+因为纯函数测试锁不住调用点被改回 `snap.totalEntities`）。变异 M63（总计行退回全服值）与
+M69（`worldOrTotal` 世界分支直接返回全服总数）**均 KILLED**，分别打在接线层与语义层。
+
+
 ### Fixed — 报告不记录「数据是否新鲜」（`MetricsCollector#isStale` 的最后一处欠账）
 
 **症状**：报告头的"生成时间"用的是 `LocalDateTime.now()`，不是快照的 `timestamp`。

@@ -554,6 +554,33 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
 
     // ==================== 专项检测: 实体 ====================
 
+    /**
+     * 世界视图的"总计"行该取哪个数字。
+     *
+     * <p><b>为什么必须有这个函数</b>：{@code /perfscope entities <world>} 的标题早就切成了
+     * 「实体统计 - 世界名」，紧接着的总计行却一直打印 {@code snap.totalEntities}（全服值）——
+     * 标题说一个世界、数字是全部世界之和。{@code CHANGELOG} 里 1.3.0 那条
+     * 「单世界视图改判该世界自己的实体数据」当时只落到<b>告警段</b>（{@code showEntities} 末尾），
+     * 显示行漏掉了，于是同一屏上：总计行是全服数字 + 全局阈值色，下面逐世界行却是该世界数字 +
+     * 该世界阈值色。<b>文档与代码分叉了两个大版本。</b></p>
+     *
+     * <p><b>该世界不在 map 里怎么办</b>（世界刚卸载、或快照早于世界创建）：返回 {@code null}，
+     * 由调用方按 0 渲染。这不是随手选的——{@code showEntities} 的告警段就是这条口径
+     * （{@code snap.entitiesByWorld.get(...)} 为 null 即视为 0 实体、不报警），
+     * 总计行跟着走才能同屏一致。返回全服总值是这里最糟的选项：它正是本条要修的那个 bug。</p>
+     *
+     * @param worldName   世界名（{@code null} 表示全服视图）
+     * @param byWorld     该指标的逐世界 map（可能为 null）
+     * @param serverTotal 该指标的全服总数
+     * @return 世界视图下该世界的读数；世界不在 map 里时为 {@code null}；全服视图下为 {@code serverTotal}
+     */
+    static Integer worldOrTotal(@Nullable String worldName, Map<String, Integer> byWorld, int serverTotal) {
+        if (worldName == null) {
+            return serverTotal;
+        }
+        return byWorld == null ? null : byWorld.get(worldName);
+    }
+
     private void showEntities(CommandSender sender, String worldName) {
         MetricsSnapshot snap = collector.getLatest();
         if (snap == null) { noData(sender); return; }
@@ -574,11 +601,20 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             return;
         }
 
-        // v1.2 A8：改为读 config 阈值（原硬编码 200/全局warn）
+        // f-s02-logic-04：总计行与标题、逐世界行同口径——世界视图打该世界自己的读数、
+        // 按该世界阈值（worlds 段覆盖，无覆盖回退全局）上色；全服视图保持原行为（全服总数 + 全局阈值）。
+        // 修前这里无条件打 snap.totalEntities 并按全局阈值上色，于是「实体统计 - 某世界」的
+        // 第一行数字是全部世界之和，与下面那行逐世界数字自相矛盾。
+        // 世界不在快照 map 里（刚卸载/快照早于世界创建）按 0 渲染——与末尾告警段
+        // （get(...) 为 null 即视为 0 实体、不报警）同一口径，避免同屏两种"缺失"表示。
+        Integer entityTotal = worldOrTotal(world != null ? world.getName() : null,
+            snap.entitiesByWorld, snap.totalEntities);
+        int entityTotalValue = entityTotal == null ? 0 : entityTotal;
         TextColor entityColor = thresholdColors.colorOf(
-            thresholdColors.levelOf(ThresholdColors.Metric.ENTITIES, snap.totalEntities));
+            thresholdColors.levelOf(ThresholdColors.Metric.ENTITIES, entityTotalValue,
+                world != null ? world.getName() : null));
         sender.sendMessage(goldLabel(Messages.get("cmd.entities.total-label"))
-            .append(Component.text(String.valueOf(snap.totalEntities), entityColor, TextDecoration.BOLD)));
+            .append(Component.text(String.valueOf(entityTotalValue), entityColor, TextDecoration.BOLD)));
 
         sender.sendMessage(Component.text(""));
         sender.sendMessage(Component.text(Messages.get("cmd.label.by-world"), GRAY));
@@ -702,10 +738,18 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             sender.sendMessage(goldLabel(Messages.get("cmd.chunks.total-label")).append(Component.text(Messages.get("cmd.state.unavailable"), GRAY)));
             return;
         }
+        // f-s02-logic-04：与 showEntities 同构——世界视图的两条总计行都取该世界自己的读数。
+        // 修前这里无条件打 snap.totalLoadedChunks / snap.totalForceLoadedChunks：标题写着某个世界，
+        // 数字却是全服合计。缺失口径同 showEntities（不在 map 里按 0，与告警段一致）。
+        // 颜色保持原样（WHITE，本行历史上不上色），本条只修数字不修配色。
+        Integer chunkTotal = worldOrTotal(world != null ? world.getName() : null,
+            snap.chunksByWorld, snap.totalLoadedChunks);
+        Integer forceTotal = worldOrTotal(world != null ? world.getName() : null,
+            snap.forceLoadedChunksByWorld, snap.totalForceLoadedChunks);
         sender.sendMessage(goldLabel(Messages.get("cmd.chunks.total-label"))
-            .append(Component.text(String.valueOf(snap.totalLoadedChunks), WHITE, TextDecoration.BOLD)));
+            .append(Component.text(String.valueOf(chunkTotal == null ? 0 : chunkTotal), WHITE, TextDecoration.BOLD)));
         sender.sendMessage(goldLabel(Messages.get("cmd.chunks.force-total-label"))
-            .append(Component.text(String.valueOf(snap.totalForceLoadedChunks), WHITE)));
+            .append(Component.text(String.valueOf(forceTotal == null ? 0 : forceTotal), WHITE)));
 
         sender.sendMessage(Component.text(""));
         sender.sendMessage(Component.text(Messages.get("cmd.label.by-world"), GRAY));

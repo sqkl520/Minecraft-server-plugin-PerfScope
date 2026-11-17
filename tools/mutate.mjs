@@ -682,6 +682,18 @@ const MUTATIONS = [
             + '所以本地开发机与默认配置都复现不出来',
         expect: 'HeapPercentFloorTest',
     },
+    {
+        id: 'M63',
+        file: 'src/main/java/cn/perfscope/command/PerfScopeCommand.java',
+        from: '        Integer entityTotal = worldOrTotal(world != null ? world.getName() : null,\n'
+            + '            snap.entitiesByWorld, snap.totalEntities);',
+        to: '        Integer entityTotal = snap.totalEntities;',
+        desc: '`/perfscope entities <world>` 的总计行退回全服值 —— 标题写着「实体统计 - 某世界」，'
+            + '第一行数字却是所有世界之和（同一屏再往下的逐世界行又是该世界自己的数字）。'
+            + '这正是 CHANGELOG 1.3.0 声称修好、实际只改到告警段的那个形状：'
+            + '文档说改完了、代码里没改，分叉了两个大版本',
+        expect: 'WorldViewTotalTest',
+    },
     // ---------------------------------------------------------------------------------
     // 报告层的数据新鲜度标记（ReportStaleMarkerTest）：`MetricsCollector#isStale()` 的
     // 注释里写着"报告层 health 段应增加 stale 标记"，是本项目唯一自己承认的欠账。
@@ -699,6 +711,22 @@ const MUTATIONS = [
             + 'JSON 一侧尤其致命——巡检脚本据 isStale 区分"指标冻住了"与"服务端正常"，'
             + '掐断后两者又变成同一个形状',
         expect: 'ReportStaleMarkerTest',
+    },
+    // ---------------------------------------------------------------------------------
+    // 单世界视图的总计行（WorldViewTotalTest）：`/perfscope entities <world>` 的标题早就切成了
+    // 「实体统计 - 某世界」，第一行数字却取 snap.totalEntities（全服值）。上面 M63 改接线，
+    // 这条改 worldOrTotal 自身的语义 —— 两层都必须是 KILLED 才算真的锁住。
+    // ---------------------------------------------------------------------------------
+    {
+        id: 'M69',
+        file: 'src/main/java/cn/perfscope/command/PerfScopeCommand.java',
+        from: '        return byWorld == null ? null : byWorld.get(worldName);',
+        to: '        return serverTotal;',
+        desc: 'worldOrTotal 的世界分支直接返回全服总数 —— 调用点仍把世界名传了进来，'
+            + '提取函数却把它丢掉，等价于「world 参数完全不影响总计行」。'
+            + '与 M63 改的是不同层：M63 改接线（由源码断言抓住），这条改语义'
+            + '（由多世界纯函数用例抓住）',
+        expect: 'WorldViewTotalTest',
     },
 ];
 
