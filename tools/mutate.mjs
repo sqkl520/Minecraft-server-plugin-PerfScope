@@ -833,6 +833,26 @@ function main() {
     }
 
     const results = [];
+    // 被外部信号杀掉时（TaskStop / Ctrl-C / 超时 kill）同步 finally 来不及跑，
+    // 工作树会留着一个变异体。下次运行会被 "工作树不干净" 的守卫拦住，
+    // 而那时没人知道是哪个文件脏了——实测踩过两次（ThresholdOperator 的
+    // ENTITIES_GLOBAL、MetricsCollector 的 describeThrowable）。
+    // 这里登记"当前正在变异哪个文件"，信号到来时按原内容写回。
+    let inFlight = null;
+    const restoreOnSignal = (sig) => {
+        if (inFlight) {
+            try {
+                fs.writeFileSync(inFlight.abs, inFlight.original, 'utf8');
+                console.error(`\n[mutate] ${sig}：已还原 ${inFlight.file}（${inFlight.id}）`);
+            } catch (e) {
+                console.error(`\n[mutate] ${sig}：还原失败，请手动 git checkout -- ${inFlight.file}`);
+            }
+        }
+        process.exit(130);
+    };
+    process.on('SIGINT', () => restoreOnSignal('SIGINT'));
+    process.on('SIGTERM', () => restoreOnSignal('SIGTERM'));
+
     for (const m of targets) {
         process.stdout.write(`${m.id}  ${m.desc.split('——')[0].trim()} ... `);
         const abs = path.join(ROOT, m.file);
@@ -844,6 +864,7 @@ function main() {
         }
         try {
             fs.writeFileSync(abs, original.replace(m.from, m.to), 'utf8');
+            inFlight = { abs, original, file: m.file, id: m.id };
             // expect: null + gate: '...' 的形态用于"单测够不着、由源码门禁守"的改动。
             // 判据同样只有一条：门禁脚本的退出码非零 = 门禁有效 = KILLED。
             let r;
@@ -871,9 +892,9 @@ function main() {
         } finally {
             fs.writeFileSync(abs, original, 'utf8');
             restore(m.file);
+            inFlight = null;
         }
     }
-
     console.log('\n────────────────────────────────');
     const killed = results.filter(r => r.verdict === 'KILLED').length;
     const survived = results.filter(r => r.verdict === 'SURVIVED').length;
