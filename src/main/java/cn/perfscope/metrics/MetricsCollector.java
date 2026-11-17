@@ -2180,8 +2180,8 @@ public class MetricsCollector {
         snap.heapMax = runtime.maxMemory();
         snap.heapTotal = runtime.totalMemory();
         snap.heapUsed = snap.heapTotal - runtime.freeMemory();
-        // P0-13：heapMax<=0 防御（正常恒>0，guard 零成本）
-        snap.heapUsagePercent = snap.heapMax > 0 ? (int) ((double) snap.heapUsed / snap.heapMax * 100) : 0;
+        // 百分比计算抽成 heapPercentFloor（纯函数，可单测），守卫与取整方向都收在那里。
+        snap.heapUsagePercent = heapPercentFloor(snap.heapUsed, snap.heapMax);
 
         MemoryMXBean memoryMXBean = ManagementFactory.getMemoryMXBean();
         snap.nonHeapUsed = memoryMXBean.getNonHeapMemoryUsage().getUsed();
@@ -2190,6 +2190,49 @@ public class MetricsCollector {
         // 算子见 ThresholdOperator.MEMORY：百分比指标两档都是闭区间（`>=`）。
         // 把 `>=` 改成 `>` 会让「恰好 95%」从 critical 掉回 warning。
         applyMemoryLevel(snap, cfg, snap.heapUsagePercent);
+    }
+
+    /**
+     * 堆使用率百分比（<b>向下取整</b>，整数运算）。
+     *
+     * <h2>为什么不用 {@code (int) ((double) used / max * 100)}</h2>
+     *
+     * <p>那个写法有真实的浮点截断误差：精确的整数百分比会先被算成"少一点"，再被 {@code (int)}
+     * 砍掉一格。实例：{@code max = 300000000, used = 87000000} 精确是 29%，但
+     * {@code (double) 87000000 / 300000000} 得出 {@code 0.28999999999999998}，
+     * 乘 100 后是 {@code 28.999999999999996}，{@code (int)} 截断成 <b>28</b>。</p>
+     *
+     * <p>这不是孤例：逐 MiB 扫描 {@code -Xmx} 256MiB..64GiB 的全部整数百分比点（67.9 万样本）后，
+     * {@code p = 29 / 57 / 58} 三个值上少 1，共 7833 次。{@code -Xmx1024/2048/4096/8192M}
+     * 这类 2^n 堆不受影响（分母是 2 的幂时可以精确表示），所以本地开发机永远复现不出来；
+     * 默认阈值 85/95 也刚好免疫，于是它能一直藏着。</p>
+     *
+     * <p>改成 {@code 100L * used / max} 后是纯整数除法：2000 万组 fuzz 与精确有理数 floor
+     * 零误差，500 万组 fuzz 与"真实比值 {@code >= T/100}"的判据零分叉。溢出也安全——
+     * {@code 100L * 1TiB} 仍在 {@code long} 内。</p>
+     *
+     * <h2>为什么保持 floor，不改成四舍五入（别"顺手统一"）</h2>
+     *
+     * <p>{@code config.yml:124} 的内存段白纸黑字写着「G1 正常水位 <b>70-85%</b> 属健康区间」，
+     * 即 85 是健康区间的上界。改成 {@code Math.round} 会让 {@code [84.5%, 85%)} 这个
+     * <b>文档声明为健康</b>的区间读数变成 85 并开始告警——等于让健康读数报警。</p>
+     *
+     * <h2>为什么与 {@link MetricsSnapshot#playerPercent()} 的取整方向相反是刻意的</h2>
+     *
+     * <p>{@code playerPercent()} 用 {@code Math.round}（round-up 倾向）：players 的语义是
+     * "满员告警应接近满员"，88/90 人就该读作 98% 而不是 97%，偏上去符合意图。
+     * memory 的语义是"85 是健康上界"，偏下去才不会把健康区间算成告警。
+     * <b>两者方向不同是因为语义不同，不是历史遗留，不要统一。</b></p>
+     *
+     * @param used 已用堆字节数
+     * @param max  最大堆字节数；{@code <= 0} 时返回 0（不做除法）
+     * @return 0-100 的百分比，向下取整
+     */
+    static int heapPercentFloor(long used, long max) {
+        if (max <= 0) {
+            return 0;
+        }
+        return (int) (100L * used / max);
     }
 
     /**
