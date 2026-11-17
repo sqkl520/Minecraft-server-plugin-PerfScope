@@ -128,6 +128,78 @@ Data sampled at: 2026-11-17 19:50:00     ← 数字是何时测的
 改成恒 `false`，三种格式的标记一起消失，expect `ReportStaleMarkerTest`，**KILLED**。
 （报告层在本表里此前的变异只有 M64–M67 那四条卡片着色的，新鲜度方向为 0。）
 
+### Fixed — 报告概览卡片的级别着色从未生效
+
+**症状**：概览区的八张卡片里，有五张（players / entities / chunks / cpu / worlds）的 class
+被硬编码成 `"normal"`。而 `ReportGenerator.loadHtmlCss()` 只定义了四条修饰规则：
+`.card.good` / `.card.warn` / `.card.critical` / `.card.unknown`——**`.card.normal` 不存在**
+（`grep "\.normal"` 在 `src/main/java` 与 `src/main/resources` 全仓零命中）。
+
+于是这五张卡落回 `.card` 基础规则：边条恒为 `#00BCD4` 青色、`.card-value` 也恒为 `#4DD0E1` 青色。
+后果不是"颜色不好看"，而是**报告永久宣称健康**：玩家 20/20 满载 100%、全服实体 45000
+（越过 critical 30000）的服务器，导出的 HTML 报告与一台空载服长得一模一样。
+
+实测输出（修复前）：
+
+```
+htmlCard("Players","20 / 20","normal","")  ==>
+<div class="card normal">
+```
+
+对照：`ThresholdColors.cssClass(Level)` 的返回值全集是 `good` / `warn` / `critical` / `unknown`，
+**它从不返回 `normal`**。也就是说 `"normal"` 这个字面量是报告层自己发明的，
+既不在样式表里、也不在阈值判定体系的词表里。
+
+**修法（三张卡接阈值，两张刻意不接）**：
+
+| 卡片 | 处理 | 输入 |
+|---|---|---|
+| players | 接 `Metric.PLAYERS` | `snap.playerPercent()`（百分比，不是原始人数） |
+| entities | 接 `Metric.ENTITIES`（两参重载） | `snap.totalEntities` |
+| cpu | 接 `Metric.CPU_PROCESS` | `snap.processCpuLoad` |
+| chunks | **不接**，卡片保持中性 | 见下 |
+| worlds | **不接**，卡片保持中性 | 见下 |
+
+**为什么 chunks 卡片绝对不能接阈值**：卡片渲染的是 `snap.totalLoadedChunks`（全服合计），
+而 `chunks.loaded_warning_threshold` / `chunks.loaded_critical_threshold` 的口径是**每个世界**
+（`config.yml` 原文标注"口径是「每个世界」，不是全服合计"；`ThresholdColors.Metric.CHUNKS`
+的判定只服务单世界读数）。命令层因此刻意不给合计行上色（`PerfScopeCommand` 里合计行是 `WHITE`，
+只有逐世界行取 `colorOf(levelOf(CHUNKS, ...))`）。
+
+反例：3 个世界各 4000 区块的正常服 → 全服合计 12000 → 越过全服黄线 10000 → 卡片变黄，
+而此刻每个世界都远低于黄线、一条告警都不会发。报告在报告一个不存在的问题。
+
+**所以区块级别改挂在「实体分布」表的逐世界 chunks 单元格上**——那一格的值恰好就是阈值
+所描述的那个量。新增 `getChunksClass(world, chunks)` 与 `htmlLevelCell(...)`：
+仅 WARN / CRITICAL 上色（`#FFB300` / `#FF5252`），GOOD 保持默认样式。
+刻意不把整列刷绿——数据表要的是"哪一行有问题"能一眼跳出来，满屏绿字会把它淹掉。
+
+**为什么 worlds 卡片保持 `normal`**：世界数量在 `config.yml` 里没有对应阈值键，
+`ThresholdColors.Metric` 里也没有这个指标（不存在"世界太多"这条告警）。
+给它编一个颜色等于凭空发明一条健康判据。
+
+**`normal` 补上显式 CSS 规则**：两张刻意中性的卡仍带 `normal` class，若样式表里没有它，
+就又回到"HTML 用了一个不存在的 class"这个原始缺陷，只是这次发生在中性卡上。
+新增 `.card.normal { border-left-color: #00BCD4; }`——与 `.card` 基础边条同色，
+让"中性"成为一个可被断言的显式声明，而不是"规则缺失导致的巧合"。
+
+**cpu 卡的行为变化（有意）**：Windows 上 `processCpuLoad = -1`（未采集），
+接上阈值后卡片从"青色 + 无级别"变成"灰色 + unknown"。这是更诚实的呈现——
+灰色 = 未采集，而不是与"一切正常"共用同一个颜色。另注：`cpu.process_warning_threshold`
+只有 warn 档（无 critical 键），故该卡最高只到 `warn`。
+
+**变异覆盖从 0 条变成 4 条**：`tools/mutate.mjs` 里原本的 62 条变异，`ReportGenerator.java`
+**一条都没有**——这就是 `"normal"` 能活到 v1.4.4 的直接原因。现有的
+`ReportGeneratorTest`（24 用例）只断言文案与数字，从不看 class 名。
+新增 M64–M67：玩家卡退回 `"normal"`、实体卡退回 `"normal"`、
+`.card.good` 的数值色被改回基础青色、逐世界区块单元格退回不上色，
+四条全部由本轮的 `ReportCardLevelTest` 杀死。
+
+**新增测试**：`ReportCardLevelTest`（10 用例）——样式表必须声明卡片实际使用的每一个 class；
+八张卡不得出现无规则的 class；三张接阈值的卡在超阈值时分别给出 `critical` / `warn`；
+玩家卡按百分比而非原始人数判级（9/10 = 90% 必须 warn）；cpu 的 -1 哨兵必须是 `unknown`；
+区块合计越线时卡片仍中性、而逐世界单元格该上色的才上色；世界数卡保持中性。
+
 ### Fixed — heapUsagePercent 的浮点截断误差
 
 **现象**：`MetricsCollector.collectMemory` 算堆使用率用的是 `(int) ((double) used / max * 100)`。

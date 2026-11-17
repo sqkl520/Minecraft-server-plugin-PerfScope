@@ -516,18 +516,26 @@ public class ReportGenerator {
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_PLAYERS)) {
             html.append(htmlCard(Messages.get("report.html.card.players"), unavailable, "unknown", ""));
         } else {
+            // 级别判定输入是百分比（snap.playerPercent()），不是原始玩家数——
+            // players 的阈值键（players.warning/critical_threshold）口径就是占容量百分比。
             html.append(htmlCard(Messages.get("report.html.card.players"),
-                snap.playerCount + " / " + snap.maxPlayers, "normal", ""));
+                snap.playerCount + " / " + snap.maxPlayers, getPlayersClass(snap.playerPercent()), ""));
         }
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_ENTITIES)) {
             html.append(htmlCard(Messages.get("report.html.card.entities"), unavailable, "unknown", ""));
         } else {
             html.append(htmlCard(Messages.get("report.html.card.entities"),
-                String.valueOf(snap.totalEntities), "normal", ""));
+                String.valueOf(snap.totalEntities), getEntitiesClass(snap.totalEntities), ""));
         }
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_CHUNKS)) {
             html.append(htmlCard(Messages.get("report.html.card.chunks"), unavailable, "unknown", ""));
         } else {
+            // 刻意<b>不</b>接阈值：本卡渲染的是 snap.totalLoadedChunks —— 全服合计，
+            // 而 chunks.loaded_warning/critical_threshold 的口径是「每个世界」
+            // （config.yml 原文标注，Metric.CHUNKS 的判定也只服务逐世界）。
+            // 反例：3 个世界各 4000 区块的正常服，合计 12000 会越过全服黄线 10000，
+            // 卡片随即变黄，而此刻每个世界都远低于阈值、一条告警都不会发。
+            // 级别改挂到下方「实体分布」表的逐世界 chunks 单元格（列口径一致）。
             html.append(htmlCard(Messages.get("report.html.card.chunks"),
                 String.valueOf(snap.totalLoadedChunks), "normal",
                 Messages.get("report.html.card.chunks.subtitle", snap.totalForceLoadedChunks)));
@@ -544,12 +552,16 @@ public class ReportGenerator {
             html.append(htmlCard(Messages.get("report.html.card.cpu"), unavailable, "unknown", ""));
         } else {
             html.append(htmlCard(Messages.get("report.html.card.cpu"),
-                formatCpuPct(snap.processCpuLoad), "normal",
+                formatCpuPct(snap.processCpuLoad), getCpuClass(snap.processCpuLoad),
                 Messages.get("report.html.card.cpu.subtitle", formatCpuPct(snap.systemCpuLoad))));
         }
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_SERVER)) {
             html.append(htmlCard(Messages.get("report.html.card.worlds"), unavailable, "unknown", ""));
         } else {
+            // worldCount 刻意保持中性 "normal"：世界数量没有对应的阈值键，
+            // ThresholdColors.Metric 里也没有这个指标（配置里不存在「世界太多」的告警）。
+            // 给它编一个颜色等于凭空发明一条健康判据。注意 "normal" 不是 CSS class
+            // （见 .card 基础规则），它落到基础样式即青色中性边条——这正是想要的。
             html.append(htmlCard(Messages.get("report.html.card.worlds"),
                 String.valueOf(snap.worldCount), "normal",
                 Messages.get("report.html.card.worlds.subtitle", snap.loadedPluginCount)));
@@ -629,7 +641,7 @@ public class ReportGenerator {
                 int tileEntities = snap.tileEntitiesByWorld.getOrDefault(world, 0);
                 html.append("<tr><td>").append(escapeHtml(world)).append("</td>")
                     .append(htmlCell(entitiesUnavailable, entities))
-                    .append(htmlCell(chunksUnavailable, chunks))
+                    .append(htmlLevelCell(chunksUnavailable, chunks, getChunksClass(world, chunks)))
                     .append(htmlCell(teUnavailable, tileEntities))
                     .append("</tr>\n");
             }
@@ -1279,6 +1291,37 @@ public class ReportGenerator {
     }
 
     /**
+     * 按级别着色的世界分布表单元格（当前仅「区块」列使用）。
+     *
+     * <p><b>为什么只有偏离才上色</b>：这是数据表，不是结论面板。整列刷成绿色会让
+     * 「哪一行有问题」淹没在满屏绿字里；把颜色留给 WARN / CRITICAL 才能一眼定位到
+     * 那个真正超线的世界。GOOD 与「未判级」共用默认样式，因此健康服的报告外观不变。</p>
+     *
+     * <p>色值与 {@code .card.good/.warn/.critical} 及 htmlCell 的灰色保持同一套：
+     * {@code #69F0AE / #FFB300 / #FF5252 / #90a4ae}（GOOD 不上色，见上）。</p>
+     */
+    private static String htmlLevelCell(boolean unavailable, int value, String cssClass) {
+        if (unavailable) {
+            return htmlCell(true, value);
+        }
+        String color;
+        switch (cssClass) {
+            case "warn":
+                color = "#FFB300";
+                break;
+            case "critical":
+                color = "#FF5252";
+                break;
+            case "unknown":
+                color = "#90a4ae";
+                break;
+            default:
+                return htmlCell(false, value); // good：保持中性，见方法注释
+        }
+        return "<td style=\"color:" + color + "\">" + value + "</td>";
+    }
+
+    /**
      * HTML 文档语言标签：由当前生效语言决定（{@code en} / {@code zh-CN}）。
      *
      * <p>不能写死：{@code <html lang>} 决定浏览器选中哪套断行/朗读规则、也决定屏幕阅读器
@@ -1326,6 +1369,44 @@ public class ReportGenerator {
     private String getMemClass(int pct) {
         // v1.2 A8：改为读 config 阈值
         return thresholdColors.cssClass(thresholdColors.levelOf(ThresholdColors.Metric.MEMORY, pct));
+    }
+
+    /**
+     * 玩家卡片级别——输入是<b>占容量百分比</b>（{@link MetricsSnapshot#playerPercent()}），
+     * 不是原始玩家数：{@code players.warning_threshold: 90} 的含义是「90% 满员」。
+     */
+    private String getPlayersClass(int pct) {
+        return thresholdColors.cssClass(thresholdColors.levelOf(ThresholdColors.Metric.PLAYERS, pct));
+    }
+
+    /**
+     * 实体卡片级别——卡片显示的是<b>全服合计</b>，故用两参重载（不传世界名）。
+     * 三参重载是为「实体分布」表的逐世界行准备的（会去 worlds 段取覆盖阈值）；
+     * 卡片是全服合计，拿某个世界的覆盖阈值判它会得出错误结论。
+     */
+    private String getEntitiesClass(int total) {
+        return thresholdColors.cssClass(thresholdColors.levelOf(ThresholdColors.Metric.ENTITIES, total));
+    }
+
+    /**
+     * 进程 CPU 卡片级别。{@code processCpuLoad < 0}（Windows 上恒为 -1，未采集）判 UNKNOWN →
+     * 卡片转灰，比原先恒青色更诚实（灰色 = 未采集，而非"一切正常"）。
+     * config 只有 warning 键没有 critical 键，故本卡最高只到 {@code warn}。
+     */
+    private String getCpuClass(double load) {
+        return thresholdColors.cssClass(thresholdColors.levelOf(ThresholdColors.Metric.CPU_PROCESS, load));
+    }
+
+    /**
+     * 逐世界区块单元格级别——口径必须是「每个世界」（{@code Metric.CHUNKS} 的全局阈值
+     * 在采集与命令层都只喂给单世界读数；{@code ThresholdColors.levelOf} 的 CHUNKS 分支
+     * 不读 worlds 段覆盖，因为区块阈值本来就没有按世界配置）。
+     *
+     * <p>这与上方的区块总览卡片形成互补：卡片是<b>全服合计</b>且刻意保持中性，
+     * 因为合计口径与阈值口径不一致；本表每行的值恰好就是阈值定义的那个量。</p>
+     */
+    private String getChunksClass(String world, int chunks) {
+        return thresholdColors.cssClass(thresholdColors.levelOf(ThresholdColors.Metric.CHUNKS, chunks, world));
     }
 
     private String getMemBarColor(int pct) {
@@ -1416,6 +1497,7 @@ public class ReportGenerator {
             .card.warn { border-left-color: #FFB300; }
             .card.critical { border-left-color: #FF5252; }
             .card.unknown { border-left-color: #607d8b; }
+            .card.normal { border-left-color: #00BCD4; }
             .card.unknown .card-value { color: #90a4ae; }
             .card-value { font-size: 1.8em; font-weight: bold; color: #4DD0E1; }
             .card.good .card-value { color: #69F0AE; }

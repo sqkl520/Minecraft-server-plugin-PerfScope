@@ -695,6 +695,50 @@ const MUTATIONS = [
         expect: 'WorldViewTotalTest',
     },
     // ---------------------------------------------------------------------------------
+    // 报告卡片的级别着色（ReportCardLevelTest）：ReportGenerator.java 在本表里此前的
+    // 变异数是 0 —— 那 62 条一条都碰不到报告层，正是 `class="card normal"` 这个
+    // 不存在的 CSS class 活到 v1.4.4 的直接原因。
+    // ---------------------------------------------------------------------------------
+    {
+        id: 'M64',
+        file: 'src/main/java/cn/perfscope/report/ReportGenerator.java',
+        from: '                snap.playerCount + " / " + snap.maxPlayers, getPlayersClass(snap.playerPercent()), ""));',
+        to: '                snap.playerCount + " / " + snap.maxPlayers, "normal", ""));',
+        desc: '玩家卡片退回硬编码 "normal" —— 回到修复前的形状：满员 100% 的服与空服的卡片'
+            + '长得一模一样，报告永久宣称健康。`normal` 当时在样式表里没有任何规则，'
+            + '于是卡片落回 .card 基础样式（边条与数值恒青色）',
+        expect: 'ReportCardLevelTest',
+    },
+    {
+        id: 'M65',
+        file: 'src/main/java/cn/perfscope/report/ReportGenerator.java',
+        from: '                String.valueOf(snap.totalEntities), getEntitiesClass(snap.totalEntities), ""));',
+        to: '                String.valueOf(snap.totalEntities), "normal", ""));',
+        desc: '实体卡片退回硬编码 "normal" —— 30000 实体的服与 500 实体的服卡片同色，'
+            + 'entities.total_critical_threshold 在报告层完全失效',
+        expect: 'ReportCardLevelTest',
+    },
+    {
+        id: 'M66',
+        file: 'src/main/java/cn/perfscope/report/ReportGenerator.java',
+        from: '            .card.good { border-left-color: #69F0AE; }\n',
+        to: '',
+        desc: '删掉 .card.good 那条 CSS 规则 —— good 档卡片退回 .card 基础青色边条。'
+            + '这是"卡片 class 名与样式表对不上"的同一类缺陷换了个方向：'
+            + '上一版是 class 不存在，这一版是规则不存在，视觉后果完全一样（健康档看不出健康）',
+        expect: 'ReportCardLevelTest',
+    },
+    {
+        id: 'M67',
+        file: 'src/main/java/cn/perfscope/report/ReportGenerator.java',
+        from: '                    .append(htmlLevelCell(chunksUnavailable, chunks, getChunksClass(world, chunks)))',
+        to: '                    .append(htmlCell(chunksUnavailable, chunks))',
+        desc: '逐世界区块单元格退回不上色 —— 区块级别在报告里彻底消失：总览卡按口径刻意中性，'
+            + '表格又不上色，于是「某个世界已经加载 12000 区块」这条本该报警的事实'
+            + '在报告里连一个视觉线索都没有（命令层仍有颜色，两侧口径分叉）',
+        expect: 'ReportCardLevelTest',
+    },
+    // ---------------------------------------------------------------------------------
     // 报告层的数据新鲜度标记（ReportStaleMarkerTest）：`MetricsCollector#isStale()` 的
     // 注释里写着"报告层 health 段应增加 stale 标记"，是本项目唯一自己承认的欠账。
     // 下面的变异把报告层对 isStale() 的调用掐断，三种格式的标记一起消失。
