@@ -35,7 +35,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.StandardOpenOption;
+import java.time.Instant;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ExecutionException;
@@ -98,6 +100,8 @@ public class ReportGenerator {
         "^perfscope-\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])"
             + "_([01]\\d|2[0-3])-[0-5]\\d-[0-5]\\d-\\d{3}(-\\d+)?\\.(html|txt|json)$");
     private static final DateTimeFormatter DISPLAY_TS = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    /** 「最后采集 HH:mm:ss」——与 {@code MetricsCollector#formatClock} / 命令层同口径（只要时刻，不要日期）。 */
+    private static final DateTimeFormatter CLOCK_TS = DateTimeFormatter.ofPattern("HH:mm:ss");
     // A5/T2b：单次清理最多删除的报告文件数硬上限——防止时钟异常/误配导致"一次删空"式批量误删
     private static final int MAX_CLEAN_PER_RUN = 50;
     // A5/T2c：lastModified "未来时间"容差（1 小时）——超过 now + 容差即视为时钟前跳/文件系统异常，跳过不删
@@ -441,12 +445,28 @@ public class ReportGenerator {
         html.append("</style>\n</head>\n<body>\n");
 
         // 头部
+        // 报告头必须同时给出「报告生成于」与「数据采集于」两个时刻。
+        // 旧实现只印 LocalDateTime.now()，于是一份由卡死 10 分钟后自动导出
+        // （report.auto_export_interval: 30）的 HTML，标题写着"生成于 当前时刻"、卡片全绿、
+        // 数字全冻结——正是本项目反复修过的"把冻住的数据当当期值"。
+        // 生成时刻回答不了"这些数字是哪一刻的"，必须与采样时刻并列给出。
+        Staleness stale = stalenessOf(snap);
         html.append("<div class=\"header\">\n");
         html.append("  <h1>").append(htmlMsg("report.html.heading")).append("</h1>\n");
         html.append("  <p>").append(htmlMsg("report.common.generated-at"))
             .append(LocalDateTime.now().format(DISPLAY_TS)).append("</p>\n");
+        html.append("  <p>").append(htmlMsg("report.common.sampled-at"))
+            .append(stale.sampleAtMs() <= 0L
+                ? htmlMsg("report.common.never-sampled")
+                : escapeHtml(formatDisplay(stale.sampleAtMs())))
+            .append("</p>\n");
         html.append("  <p>").append(htmlMsg("report.html.uptime"))
             .append(escapeHtml(formatUptime(snap.uptimeSeconds))).append("</p>\n");
+        if (stale.isStale()) {
+            // 采集真的停了：红底横幅，而不是让读者拿两个时刻自己算差
+            html.append("  <p class=\"stale-banner\">").append(htmlMsg("report.html.stale-banner",
+                DurationFormat.duration(stale.staleForMs()), lastCollectClock(stale))).append("</p>\n");
+        }
         html.append("</div>\n");
 
         html.append("<div class=\"container\">\n");
@@ -701,7 +721,18 @@ public class ReportGenerator {
         sb.append("========================================\n");
         sb.append(Messages.get("report.txt.title")).append("\n");
         sb.append("========================================\n");
+        Staleness stale = stalenessOf(snap);
         sb.append(Messages.get("report.common.generated-at")).append(LocalDateTime.now().format(DISPLAY_TS)).append("\n");
+        sb.append(Messages.get("report.common.sampled-at"))
+            .append(stale.sampleAtMs() <= 0L
+                ? Messages.get("report.common.never-sampled")
+                : formatDisplay(stale.sampleAtMs()))
+            .append("\n");
+        if (stale.isStale()) {
+            // 纯文本没有颜色，只能靠 [WARNING] 前缀把这一行从正文里拔出来
+            sb.append(Messages.get("report.txt.stale-banner",
+                DurationFormat.duration(stale.staleForMs()), lastCollectClock(stale))).append("\n");
+        }
         sb.append(Messages.get("report.txt.uptime")).append(formatUptime(snap.uptimeSeconds)).append("\n\n");
 
         sb.append(Messages.get("report.txt.section.overview")).append("\n");
@@ -821,6 +852,17 @@ public class ReportGenerator {
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("generated_at", LocalDateTime.now().format(DISPLAY_TS));
         root.put("plugin_version", plugin.getDescription().getVersion());
+
+        // 采集新鲜度段（**增量新键**，既有键名一个都没动）。
+        //
+        // 为什么必须进 JSON：巡检脚本按 generated_at 判断"这份报告新不新"，而它回答的是
+        // "文件是何时写的"，不是"数字是何时采的"。采集任务被取消后 getLatest() 仍返回历史上
+        // 最后一张快照，报告照常落盘、卡片全绿、健康度 ok——下游拿到一份数值完美但全冻结的
+        // JSON，与"服务器很健康"逐字节不可区分。
+        //
+        // 判定直接取 collector.isStale()，不在此重算阈值：阈值是 MetricsCollector 的职责
+        // （3 × 采集间隔，下界 3000ms），报告层重算会造出第二份 staleness 判定。
+        root.put("stale", staleSection(stalenessOf(snap), snap));
 
         // TPS
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_TPS)) {
@@ -964,6 +1006,110 @@ public class ReportGenerator {
         root.put("tps_history", tpsHistory);
 
         return GSON.toJson(root) + "\n";
+    }
+
+    // ==================== 数据新鲜度（stale 标记） ====================
+
+    /**
+     * 报告渲染时用到的三个新鲜度事实，<b>全部派生自 {@link MetricsCollector}</b>。
+     *
+     * <p>为什么不把 {@code isStale()} 直接写在三个 {@code generate*Report} 里各调一次：
+     * 三处各调一次就是三次时钟读数，同一份报告的三段可能落在阈值两侧（采集恰好在渲染途中
+     * 恢复或停摆）——HTML 说健康、JSON 说 stale。收成一个 record 之后，三个格式共用同一次
+     * 判定快照，报告内部自洽。</p>
+     *
+     * <p>同样重要的是：这里<b>不重算</b> staleness 阈值。"多久算过期"是
+     * {@link MetricsCollector#isStale()} 的职责（{@code 3 × update_interval}，下界 3000ms，
+     * 从未采集过时以启动时刻为基准并叠加 10 秒宽限）。报告层若自己写一遍 {@code now - ts > x}，
+     * 就会出现第二份阈值、两处口径迟早分叉，而 {@code /perfscope status} 与报告会开始
+     * 对同一台服务器给出相反答案。</p>
+     *
+     * @param isStale       {@link MetricsCollector#isStale()} 的原样结果
+     * @param staleForMs    {@link MetricsCollector#staleForMs()}：距最后一次成功采集多久
+     * @param lastCollectMs {@link MetricsCollector#lastCollectAtMs()}：最后一次成功采集的时刻
+     *                      （{@code 0} = 启动后从未成功过）
+     * @param sampleAtMs    报告里那份快照自己的 {@code timestamp}（{@code 0} = 从未采集）
+     */
+    private record Staleness(boolean isStale, long staleForMs, long lastCollectMs, long sampleAtMs) {}
+
+    /**
+     * 取一次新鲜度判定快照。
+     *
+     * <p>{@code collector} 理论上恒非 null（构造器从 {@code plugin.getMetricsCollector()} 取），
+     * 但报告层是"落盘前最后一道"，此处仍按 null 安全处理：宁可少一条提示，不可让整份报告
+     * 因为新鲜度这一行而渲染失败。</p>
+     */
+    private Staleness stalenessOf(MetricsSnapshot snap) {
+        long sampleAt = snap == null ? 0L : snap.timestamp;
+        if (collector == null) {
+            return new Staleness(false, 0L, 0L, sampleAt);
+        }
+        return new Staleness(collector.isStale(), collector.staleForMs(),
+            collector.lastCollectAtMs(), sampleAt);
+    }
+
+    /**
+     * 生成时刻的展示格式（{@code yyyy-MM-dd HH:mm:ss}，本地时区）。
+     *
+     * <p>{@code epochMs <= 0} 时返回空串——调用点必须<b>先</b>判 0 再决定渲染"从未采集"
+     * （{@code report.common.never-sampled}）。这里再做一次 0 兜底是因为 {@code 0}
+     * 直接格式化出来是 {@code 1970-01-01 08:00:00}，那个年份会被当成真实读数读。
+     * 报告层此前在 {@code /status} 上已经踩过同一类坑（{@code clockOf(0)} 的"从未"分支）。</p>
+     */
+    private static String formatDisplay(long epochMs) {
+        if (epochMs <= 0L) {
+            return "";
+        }
+        return LocalDateTime.ofInstant(Instant.ofEpochMilli(epochMs), ZoneId.systemDefault())
+            .format(DISPLAY_TS);
+    }
+
+    /**
+     * 横幅里的"最后采集 HH:mm:ss"。
+     *
+     * <p>三种状态分开渲染，不能一律格式化：</p>
+     * <ul>
+     *   <li>正常采集过 → {@code HH:mm:ss}（与 {@code /perfscope status} 同口径，只要时刻）；</li>
+     *   <li>启动后从未成功过（{@code lastCollectMs == 0}）→ 走"从未采集"文案。
+     *       此处若直接格式化 0，横幅会写"最后采集 08:00:00"，读者会以为今天早上采到过；</li>
+     *   <li>快照 timestamp 为 0（采集器造壳/极端形态）→ 同样不伪造时刻。</li>
+     * </ul>
+     */
+    private static String lastCollectClock(Staleness stale) {
+        long ref = stale.lastCollectMs() > 0L ? stale.lastCollectMs() : stale.sampleAtMs();
+        if (ref <= 0L) {
+            return Messages.get("report.common.never-sampled");
+        }
+        return LocalDateTime.ofInstant(Instant.ofEpochMilli(ref), ZoneId.systemDefault())
+            .format(CLOCK_TS);
+    }
+
+    /**
+     * JSON 的 {@code stale} 段（<b>增量新键</b>，不改任何既有键名）。
+     *
+     * <p>字段契约（下游脚本可依赖，<b>不随语言变化</b>）：</p>
+     * <ul>
+     *   <li>{@code isStale} — {@code true} 时这份报告里的数字已经不能代表服务器当前状态；</li>
+     *   <li>{@code staleForMs} — 距最后一次成功采集的毫秒数（负数已被 collector 夹成 0）；</li>
+     *   <li>{@code lastCollectAt} — 最后一次成功采集的 {@code yyyy-MM-dd HH:mm:ss}；
+     *       {@code null} = 启动后从未成功采集过（Gson 的 serializeNulls 会写出显式 null）。
+     *       <b>刻意不用 {@code ""} 或 {@code 0}</b>：空串会被 {@code new Date(s)} 一类的
+     *       宽松解析读成 1970，与"从未"完全是两件事；</li>
+     *   <li>{@code sampleAt} — 报告正文那份快照的采样时刻，同上格式与同上 null 语义。</li>
+     * </ul>
+     *
+     * <p>为什么同时给 {@code staleForMs} 与 {@code lastCollectAt}（冗余）：前者适合直接
+     * 与阈值比较（"超过 5 分钟就翻红"），后者适合人读与跨系统关联。只给一个，另一个的
+     * 使用方就得自己从 {@code generated_at} 做减法，而 {@code generated_at} 是本地时区无
+     * 偏移量的字符串——减法结果依赖读者所在时区，那是个陷阱。</p>
+     */
+    private static Map<String, Object> staleSection(Staleness stale, MetricsSnapshot snap) {
+        Map<String, Object> section = new LinkedHashMap<>();
+        section.put("isStale", stale.isStale());
+        section.put("staleForMs", stale.staleForMs());
+        section.put("lastCollectAt", stale.lastCollectMs() <= 0L ? null : formatDisplay(stale.lastCollectMs()));
+        section.put("sampleAt", snap == null || snap.timestamp <= 0L ? null : formatDisplay(snap.timestamp));
+        return section;
     }
 
     // ==================== 工具方法 ====================
@@ -1326,6 +1472,18 @@ public class ReportGenerator {
             }
             .critical { color: #FF5252; margin: 5px 0; }
             .warning { color: #FFB300; margin: 5px 0; }
+            /* 数据过期横幅：红底白字 + 加粗，压在页头三行之下。刻意做成整条色带而不是一行红字——
+               旧报告那种"全绿卡片 + 一行小字"的组合里，小字会被当成脚注跳过。 */
+            .stale-banner {
+                display: inline-block;
+                margin-top: 12px;
+                padding: 10px 18px;
+                background: #B71C1C;
+                color: #FFFFFF;
+                font-weight: bold;
+                border-radius: 6px;
+                border-left: 6px solid #FF5252;
+            }
             .footer {
                 text-align: center;
                 padding: 20px;

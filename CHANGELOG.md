@@ -18,6 +18,66 @@
 
 > v1.4.4 之后尚无新改动。新增改动按 Added / Changed / Fixed / Notes 记在这里，发布时并入对应版本段。
 
+### Fixed — 报告不记录「数据是否新鲜」（`MetricsCollector#isStale` 的最后一处欠账）
+
+**症状**：报告头的"生成时间"用的是 `LocalDateTime.now()`，不是快照的 `timestamp`。
+一份在采集任务被取消/卡死 10 分钟后由自动导出（`report.auto_export_interval: 30`）产出的
+HTML，标题写着"生成于 当前时刻"、八张卡片全绿、所有数字冻结在最后一次采集——
+与"服务器很健康"在纸面上**逐字节不可区分**。而报告正是事后复盘时唯一还在的证据。
+
+**这不是新发现，是项目自己记着的欠账**：`MetricsCollector.java` 的 `isStale()` javadoc
+原文写着「**报告层 health 段应增加 stale 标记**。此项由编排者统一接入」。命令层
+（`/perfscope status`、ActionBar `cmd.actionbar.stale`）与 Prometheus
+（`perfscope_collector_degraded`）都接了，只有报告层漏了。实测
+`grep -rc "stale" src/main/java/cn/perfscope/report/` = **0**。
+
+**三种格式各自加了什么**：
+
+| 格式 | 新增内容 | 位置 |
+|---|---|---|
+| HTML | 页头新增 `.stale-banner`：红底白字整条色带（`#B71C1C` + 左侧 `#FF5252` 边条），文案 `[WARNING] Data is stale: collection stopped {时长} ago (last collection {HH:mm:ss}). The figures below are the last known values, not the current server state.` | 紧跟在页头三行之后、`.container` 之前 |
+| TXT | `[WARNING] Data is stale: ...` 一整行（纯文本没有颜色，只能靠前缀从正文里拔出来） | 页头"数据采集于"行之后 |
+| JSON | **增量新键** `stale`：`{isStale, staleForMs, lastCollectAt, sampleAt}` | 顶层，与 `generated_at` / `plugin_version` 同级 |
+
+**报告头时间改成两个时刻并列**（三种格式一致）：
+```
+Generated at: 2026-11-17 20:00:00        ← 文件是何时写的
+Data sampled at: 2026-11-17 19:50:00     ← 数字是何时测的
+```
+`snap.timestamp == 0`（从未采集）时渲染 `never collected` / `从未采集`，**不是** `1970-01-01 08:00:00`
+——1970 是个"看起来像真实读数"的值，比空串更危险（命令层的 `clockOf(0)` 早就做了同一件事）。
+新增文案键 `report.common.sampled-at`、`report.common.never-sampled`、`report.html.stale-banner`、
+`report.txt.stale-banner`，中英成对。
+
+**判定不重算**：直接调 `collector.isStale()` / `staleForMs()` / `lastCollectAtMs()`，
+在 `stalenessOf(snap)` 里取**一次**快照（record `Staleness`）后传给三个格式。
+两个理由：① "多久算过期"（`3 × update_interval`，下界 3000ms，从未采集过时以启动时刻为基准
+叠加 10 秒宽限）是 `MetricsCollector` 的职责，报告层自己写一遍就是第二份阈值，两处迟早分叉，
+届时 `/status` 与报告会对同一台服务器给出相反答案；② 三个格式各调一次 `isStale()` 是三次时钟
+读数，采集恰好在渲染途中恢复/停摆时会出现"HTML 说健康、JSON 说 stale"的自相矛盾报告。
+
+**JSON 契约零破坏**：只**新增** `stale` 一个顶层键，既有键名一个没动。
+`ReportStaleMarkerTest#existingJsonKeysSurviveTheStaleAddition` 把 14 个既有顶层键
+（`generated_at` / `plugin_version` / `tps` / `mspt` / `players` / `entities` / `tile_entities` /
+`chunks` / `memory` / `cpu` / `gc` / `server` / `alerts` / `tps_history`）以及 `alerts` 段下的
+`critical` / `warnings` / `health` 逐个点名断言仍在，并额外锁定 `stale` 段自身的字段集恰好是那四个。
+`alerts.health` 的三值语义（`ok` / `degraded` / `partial`）**刻意不掺入 stale**——
+"数据冻住了"与"模块不可用"是两个正交的事实，折进同一个字段会让既有的 CI 门禁读到含义已变的值。
+
+**`lastCollectAt` / `sampleAt` 的 null 语义**：从未采集时是显式 `null`（Gson `serializeNulls`），
+**不是** `""` 也**不是** `0`——宽松的日期解析会把空串读成 1970，那与"从未"完全是两件事。
+
+**新增测试** `ReportStaleMarkerTest`（10 个用例）：stale 时三种格式各自的标记与"最后采集时刻"、
+**不 stale 时三种格式一个标记都不许出现**（防误报，这个方向同等重要：恒 true 的红字会被学会无视）、
+报告头同时含两个时刻、`timestamp == 0` 渲染"从未采集"而非 1970、JSON 新增键结构与既有键名保护。
+构造方式是 `TestObjects.allocate` 造 `MetricsCollector` 壳 + 注入 `lastCollectAtMs` /
+`startedAtMs` / `configManager` / `history`（与 `StalenessQueryTest` 同一模式），
+`ReportGenerator` 走**真实构造器**。
+
+**变异验证**：`tools/mutate.mjs` 新增 **M68** —— 把 `stalenessOf()` 里的 `collector.isStale()`
+改成恒 `false`，三种格式的标记一起消失，expect `ReportStaleMarkerTest`，**KILLED**。
+（报告层在本表里此前的变异只有 M64–M67 那四条卡片着色的，新鲜度方向为 0。）
+
 ### Fixed — heapUsagePercent 的浮点截断误差
 
 **现象**：`MetricsCollector.collectMemory` 算堆使用率用的是 `(int) ((double) used / max * 100)`。

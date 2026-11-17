@@ -682,6 +682,24 @@ const MUTATIONS = [
             + '所以本地开发机与默认配置都复现不出来',
         expect: 'HeapPercentFloorTest',
     },
+    // ---------------------------------------------------------------------------------
+    // 报告层的数据新鲜度标记（ReportStaleMarkerTest）：`MetricsCollector#isStale()` 的
+    // 注释里写着"报告层 health 段应增加 stale 标记"，是本项目唯一自己承认的欠账。
+    // 下面的变异把报告层对 isStale() 的调用掐断，三种格式的标记一起消失。
+    // ---------------------------------------------------------------------------------
+    {
+        id: 'M68',
+        file: 'src/main/java/cn/perfscope/report/ReportGenerator.java',
+        from: '        return new Staleness(collector.isStale(), collector.staleForMs(),',
+        to: '        return new Staleness(false, collector.staleForMs(),',
+        desc: '报告层的 isStale() 调用改成恒 false —— 三个格式的 stale 标记（HTML 横幅 / '
+            + 'TXT [WARNING] 行 / JSON stale.isStale）一起消失，报告退回"生成于 当前时刻、卡片全绿"：'
+            + '采集被取消 10 分钟后自动导出（report.auto_export_interval: 30）得到一份标题写着'
+            + '现在、数字全冻结的 HTML，与"服务器很健康"逐字节不可区分。'
+            + 'JSON 一侧尤其致命——巡检脚本据 isStale 区分"指标冻住了"与"服务端正常"，'
+            + '掐断后两者又变成同一个形状',
+        expect: 'ReportStaleMarkerTest',
+    },
 ];
 
 // ---------------------------------------------------------------------------
