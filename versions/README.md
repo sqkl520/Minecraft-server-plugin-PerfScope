@@ -7,8 +7,19 @@
 
 > **版本号方案变更（2026-11-18）**：从本版起采用 `基础版本-SNAPSHOT-fixN` 形式，`N` 为该线的补丁序号。
 > 所有 GitHub Release 一律标为 Pre-release，因此 `/releases/latest` 不再指向任何东西——请从
-> Releases 列表页取最上面一条。**历史归档不改名**：下表中 1.4.4 及更早的文件名与 GitHub tag 保持原样，
-> 因为 `tools/verify-release-artifact.mjs` 断言「归档与同名 tag 逐字节一致」，改名会让这条断言失去意义。
+> Releases 列表页取最上面一条。
+>
+> **历史版本已按新方案重发**：原来的 `v1.1.0` … `v1.4.4` 九个 tag 与 release 已删除，改为
+> `v1.1.0-SNAPSHOT` … `v1.4.4-SNAPSHOT`（与参照仓库 `sqkl520/dsh-fcl-android-launcher` 一致：
+> 每个基础版本的首发是 `-SNAPSHOT`，补丁才加 `-fixN`）。对应的 jar 已在各自 tag 的源码基础上
+> 重新构建，**jar 内 `plugin.yml` 的版本与 tag 严格一致**。
+>
+> 重发的 jar 与原归档的唯一差异是版本字符串本身（`plugin.yml`、`pom.xml`、`pom.properties`
+> 三处），逐条目 SHA256 比对确认：其余所有类文件与资源**字节完全相同**。这一点对本仓库很关键——
+> `tools/verify-release-artifact.mjs` 断言的正是「归档与同名 tag 逐字节一致」。
+>
+> **下表仍是旧文件名**（`PerfScope-1.4.4.jar` 等）：那是当时发布的产物，作为历史记录保留，
+> 没有删改。新方案的产物见每个 release 的附件。
 
 | 版本 | 文件 | 说明 |
 |---|---|---|
@@ -28,7 +39,7 @@ Grafana 读作"服务器冻结"，任何 `perfscope_tps < 15` 的告警在这种
 顺带修了 CI（自 11-09 起 57 次全红，导致 1.4.0～1.4.3 的 GitHub Release 从未生成）与三个门禁的默认路径。
 <br>无配置变更、无行为变更（除上述修复）。<br>
 sha256 `06cd287a…`<br>
-GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.4.4> |
+GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.4.4-SNAPSHOT> |
 | 1.4.3 | `PerfScope-1.4.3.jar` | **补丁版**：日报的「最低 TPS」与 `/perfscope history` 的「最差时刻」永远报不出卡死。
 `HistoryStore.lowestTpsSince()` 用 `tps1m <= 0` 过滤样本，而 `tps1m` 没有 -1 哨兵（TPS 不可用时的采样整条不入历史），
 所以 `0` 只可能是服务器真的冻结了——那正是最差的时刻。昨晚卡死过，日报却温顺地写「最低 18.5 TPS」。
@@ -37,7 +48,7 @@ GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/
 <br>顺带新增开发期门禁 `tools/check-sentinels.mjs`（检查哨兵字段有没有被拿 0 当判据），它上线当天就抓到了上面这处。
 <br>无配置变更、无行为变更（除上述修复）。从 1.4.x 升级直接替换 jar。<br>
 sha256 `e15bf2f2…`<br>
-GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.4.3> |
+GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.4.3-SNAPSHOT> |
 | 1.4.2 | `PerfScope-1.4.2.jar` | **补丁版**，四个修复，全是"把健康说成毛病"或"把毛病说成健康"：
 
 ① **空载服务器的 CPU 被当"未采集"**。真实哨兵是 `-1`，`0` 是合法读数（空闲 CPU 就是 0）。
@@ -52,13 +63,13 @@ GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/
 
 无配置变更、无行为变更（除上述修复本身）。从 1.4.x 升级直接替换 jar。<br>
 sha256 `48c69edc…`<br>
-GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.4.2> |
-| 1.4.1 | `PerfScope-1.4.1.jar` | **补丁版**，只修一件事：Prometheus 端点的请求处理原先只捕获 `Exception`，渲染路径抛 `LinkageError`（类链接失败、jlink 裁过的 JDK 缺 `jdk.httpserver` 模块等）时整个请求线程崩掉，抓取方拿到的是**连接重置**（客户端报 `HTTP/1.1 header parser received no bytes`）——这个症状与"端点没起来""端口没开""防火墙挡了"完全一样，运维会顺着网络方向排查。现在返回干净的 500，日志里有一条限频 warning 带异常类名。字节码对比：1.4.0 的 `handle` 里 `LinkageError` 捕获条目 0 个，1.4.1 是 5 个。<br>**从 1.4.0 升级无需任何改动**，直接替换 jar；无配置变更、无行为变更。从 1.3.x 升级请先读仓库 README 的「升级注意」（`alerts.enabled` 默认值翻转等）。<br>其余改动全是测试覆盖：`PrometheusEndpoint` 补 55 个用例、`HistoryFileStore` 写入路径补 21 个用例。<br>sha256 `dec97a6a…`<br>GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.4.1> |
-| 1.4.0 | `PerfScope-1.4.0.jar` | 带 `LinkageError` 缺陷，建议换用 1.4.1。「可观测性」：Prometheus 指标端点（默认 `127.0.0.1:8940/metrics`，含逐告警 `perfscope_alert{key,module}` 指标——级别走值不走标签，序列恒定；健康也输出 0，`absent()` 才能区分"没告警"与"采集挂了"）；企业微信 / 飞书 / 钉钉群机器人（飞书/钉钉支持加签）；`/perfscope webhook status|test` 自检（三个国内平台业务失败也返回 HTTP 200，错误码在响应体里——HTTP 200 不等于成功）；日报新增 MSPT 尖峰 / 进程 CPU / 系统 CPU / GC 次数与时长；历史 CSV 7 列扩到 12 列（旧文件照常可读，缺列显示"未采集"而非 0）；`/perfscope trend` 报告数据缺口（把"这段时间没卡"与"这段时间根本没数"分开）。**行为变更**：`alerts.enabled` 默认值 `true` → `false`（告警改为选择加入），随包默认阈值同步重标定（`entities` 2000/3000 → 20000/30000、`chunks` 1500/2500 → 10000/15000）；你文件里已有的值不受影响。诊断规则修复 4 处口径：TPS 规则在 `tps15m == 0`（彻底冻结）与窗口全 0 时不再失声；内存泄漏规则在缺采窗口改为 SKIP 而非 CLEAN；热点区块严重线跟随配置的命中线。消息键：源码注册 778 个（`check-i18n.mjs` 实测，`--strict` 亦通过），编译进 jar 的 746 个（`verify-release-artifact.mjs` 按 class 常量池实测——两者口径不同，前者数 `put()` 调用，后者只认 `*Messages.java` 里的字面量键）。<br>sha256 `b34a77b5…`<br>GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.4.0> |
-| 1.3.0 | `PerfScope-1.3.0.jar` | 「可诊断性」：热点区块扫描改为分区增量（11,047 区块空闲服 A/B 实测：采集 `max` 78→41 ms、超 1 tick 周期 2/300→0/300；p95 33→30 ms，在噪声内）；采集耗时自监测（`/perfscope status` 给出 p50/p95/max）；控制台日志与消息层完整中英双语（**725** 键，`check-i18n.mjs --strict` 实测）；LICENSE/NOTICE 进 jar；非 Paper 系平台启动即拒绝；`update_interval` 钳制 5–1200；bStats 匿名统计正式生效（35061）。**Windows 上进程 CPU 因实测单次阻塞 171ms 而改为显示「未知」**。<br>GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.3.0> |
-| 1.2.1 | `PerfScope-1.2.1.jar` | 「说真话」：不新增功能，修正 v1.2.0 中说错/说假/静默失败之处（MSPT 极值捏造、Folia 假精确、诊断三态、告警生命周期、webhook 泄露、配置静默回退、历史异步写、性能自证纠错）。新增 `/status`、`/alerts`。<br>GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.2.1> |
-| 1.2.0 | `PerfScope-1.2.0.jar` | 智能诊断 + 热点定位 + 跨重启历史 + 消息层（Wave 8）。<br>GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.2.0> |
-| 1.1.0 | `PerfScope-1.1.0.jar` | v1.1 修复 + v1.2 核心重构（Wave 1–7）。<br>GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.1.0> |
+GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.4.2-SNAPSHOT> |
+| 1.4.1 | `PerfScope-1.4.1.jar` | **补丁版**，只修一件事：Prometheus 端点的请求处理原先只捕获 `Exception`，渲染路径抛 `LinkageError`（类链接失败、jlink 裁过的 JDK 缺 `jdk.httpserver` 模块等）时整个请求线程崩掉，抓取方拿到的是**连接重置**（客户端报 `HTTP/1.1 header parser received no bytes`）——这个症状与"端点没起来""端口没开""防火墙挡了"完全一样，运维会顺着网络方向排查。现在返回干净的 500，日志里有一条限频 warning 带异常类名。字节码对比：1.4.0 的 `handle` 里 `LinkageError` 捕获条目 0 个，1.4.1 是 5 个。<br>**从 1.4.0 升级无需任何改动**，直接替换 jar；无配置变更、无行为变更。从 1.3.x 升级请先读仓库 README 的「升级注意」（`alerts.enabled` 默认值翻转等）。<br>其余改动全是测试覆盖：`PrometheusEndpoint` 补 55 个用例、`HistoryFileStore` 写入路径补 21 个用例。<br>sha256 `dec97a6a…`<br>GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.4.1-SNAPSHOT> |
+| 1.4.0 | `PerfScope-1.4.0.jar` | 带 `LinkageError` 缺陷，建议换用 1.4.1。「可观测性」：Prometheus 指标端点（默认 `127.0.0.1:8940/metrics`，含逐告警 `perfscope_alert{key,module}` 指标——级别走值不走标签，序列恒定；健康也输出 0，`absent()` 才能区分"没告警"与"采集挂了"）；企业微信 / 飞书 / 钉钉群机器人（飞书/钉钉支持加签）；`/perfscope webhook status|test` 自检（三个国内平台业务失败也返回 HTTP 200，错误码在响应体里——HTTP 200 不等于成功）；日报新增 MSPT 尖峰 / 进程 CPU / 系统 CPU / GC 次数与时长；历史 CSV 7 列扩到 12 列（旧文件照常可读，缺列显示"未采集"而非 0）；`/perfscope trend` 报告数据缺口（把"这段时间没卡"与"这段时间根本没数"分开）。**行为变更**：`alerts.enabled` 默认值 `true` → `false`（告警改为选择加入），随包默认阈值同步重标定（`entities` 2000/3000 → 20000/30000、`chunks` 1500/2500 → 10000/15000）；你文件里已有的值不受影响。诊断规则修复 4 处口径：TPS 规则在 `tps15m == 0`（彻底冻结）与窗口全 0 时不再失声；内存泄漏规则在缺采窗口改为 SKIP 而非 CLEAN；热点区块严重线跟随配置的命中线。消息键：源码注册 778 个（`check-i18n.mjs` 实测，`--strict` 亦通过），编译进 jar 的 746 个（`verify-release-artifact.mjs` 按 class 常量池实测——两者口径不同，前者数 `put()` 调用，后者只认 `*Messages.java` 里的字面量键）。<br>sha256 `b34a77b5…`<br>GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.4.0-SNAPSHOT> |
+| 1.3.0 | `PerfScope-1.3.0.jar` | 「可诊断性」：热点区块扫描改为分区增量（11,047 区块空闲服 A/B 实测：采集 `max` 78→41 ms、超 1 tick 周期 2/300→0/300；p95 33→30 ms，在噪声内）；采集耗时自监测（`/perfscope status` 给出 p50/p95/max）；控制台日志与消息层完整中英双语（**725** 键，`check-i18n.mjs --strict` 实测）；LICENSE/NOTICE 进 jar；非 Paper 系平台启动即拒绝；`update_interval` 钳制 5–1200；bStats 匿名统计正式生效（35061）。**Windows 上进程 CPU 因实测单次阻塞 171ms 而改为显示「未知」**。<br>GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.3.0-SNAPSHOT> |
+| 1.2.1 | `PerfScope-1.2.1.jar` | 「说真话」：不新增功能，修正 v1.2.0 中说错/说假/静默失败之处（MSPT 极值捏造、Folia 假精确、诊断三态、告警生命周期、webhook 泄露、配置静默回退、历史异步写、性能自证纠错）。新增 `/status`、`/alerts`。<br>GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.2.1-SNAPSHOT> |
+| 1.2.0 | `PerfScope-1.2.0.jar` | 智能诊断 + 热点定位 + 跨重启历史 + 消息层（Wave 8）。<br>GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.2.0-SNAPSHOT> |
+| 1.1.0 | `PerfScope-1.1.0.jar` | v1.1 修复 + v1.2 核心重构（Wave 1–7）。<br>GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/tag/v1.1.0-SNAPSHOT> |
 | 1.0.0 | `PerfScope-1.0.0.jar` | ⚠️ **不可用**构建（见下），仅存档。 |
 
 ## 各归档与 tag 的对应关系
@@ -120,9 +131,15 @@ downloads.
 From this version on, version numbers use the form `base-SNAPSHOT-fixN`, where `N` is the patch
 number along that line. Behaviour is identical to 1.4.4; only the version string and the release
 format changed. All GitHub Releases are flagged Pre-release, so `/releases/latest` no longer
-resolves — take the topmost entry on the Releases page. Historical archives keep their original
-names, because `tools/verify-release-artifact.mjs` asserts that an archive is byte-identical to
-its same-named tag.
+resolves — take the topmost entry on the Releases page.
+
+**Historical releases were republished under the new scheme.** The nine tags `v1.1.0` … `v1.4.4`
+were deleted and replaced by `v1.1.0-SNAPSHOT` … `v1.4.4-SNAPSHOT` (matching the reference repo:
+a base version's first release is `-SNAPSHOT`, patches add `-fixN`). Each jar was rebuilt from its
+tag's own source, so the `plugin.yml` version inside always equals the tag name. Entry-by-entry
+SHA256 comparison confirms the only differences from the original archives are the version string
+itself (in `plugin.yml`, `pom.xml` and `pom.properties`) — every other class file and resource is
+byte-identical. The file names in the table below are the originals, kept as history.
 
 ## How each archive maps to a tag
 

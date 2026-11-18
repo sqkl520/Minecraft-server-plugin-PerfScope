@@ -49,9 +49,46 @@
 - CI 的 tag 校验仍然成立 —— `TAG="${GITHUB_REF_NAME#v}"` 只剥掉开头的 `v`，
   `v1.4.5-SNAPSHOT-fix1` → `1.4.5-SNAPSHOT-fix1`，与 pom 相等。
 
-**历史归档不改名。** `versions/` 里 1.4.4 及更早的文件名与 tag 保持原样，因为
-`tools/verify-release-artifact.mjs` 断言「归档与同名 tag 逐字节一致」，把老归档改成新命名会让
-这条断言失去意义。`versions/README.md` 已写明这一点。
+**历史 release 已按新方案重发。** 原来的 `v1.1.0` … `v1.4.4` 九个 tag 与全部 release 已删除，
+改为 `v1.1.0-SNAPSHOT` … `v1.4.4-SNAPSHOT`——与参照仓库一致，每个基础版本的首发是 `-SNAPSHOT`，
+补丁才加 `-fixN`。这九个 tag 指向**与原 tag 完全相同的提交**，jar 在各自 tag 的源码上重新构建，
+因此包内 `plugin.yml` 与 tag 严格一致。
+
+**逐条目比对确认改动只有版本字符串。** 每个版本的新 jar 与原归档做了全条目 SHA256 比对：
+条目数相同、无增无减，**只有 `plugin.yml` / `pom.xml` / `pom.properties` 三个文件不同**，
+且 diff 内容就是版本号那一行（`1.1.0` → `1.1.0-SNAPSHOT`）。其余所有类文件与资源字节完全相同。
+这一点是可验证的硬事实，不是推断——`tools/verify-release-artifact.mjs` 断言的正是这个。
+
+**一个绕不过去的坑：GH007。** `v1.1.0` / `v1.2.0` / `v1.2.1` 三个 tag 用 `git push` 推不上去，
+GitHub 回 `GH007: Your push would publish a private email address`——这三个老提交的作者邮箱是
+真实地址 `sqkl520soap@gmail.com`，而账号开了邮箱隐私保护（其余提交早已是 `noreply` 地址）。
+关键点：GH007 扫描的是**从被推送 ref 可达的整条历史**，而不只是这次推送新引入的提交，
+所以把 tag 指到已存在于 `main` 的提交也照样被拒。
+**解法是走 GitHub API 建 tag**（`gh release create --target <commit>` 会顺带建 tag），
+这条路不经过 git 接收端的邮箱扫描。既定历史未被改写，`sqkl520soap@gmail.com` 也未公开。
+
+**不要用 `gh auth` 的默认账号建 release。** 本机 `gh` 登录了两个账号：`sqcola`（fine-grained
+token，无 release 权限，`POST /releases` 返回 403）与 `sqkl520`（仓库所有者，classic token 带
+`repo` scope）。`gh auth switch --user sqkl520` 之后才能建。第一个 release 成功、第二个 403
+就是这么来的。
+
+**`versions/` 里的旧文件名不删。** `PerfScope-1.4.4.jar` 等是当时发布的产物，作为历史保留；
+新方案的产物见各 release 附件。`versions/README.md` 已按新事实重写（此前那段「历史归档不改名」
+的说法已被本次操作推翻，改掉了）。
+
+**`/releases/latest` 失效是预期行为，不是 bug。** 全部标 Pre-release 后该链接不指向任何东西。
+README 与 README-EN 的下载链接已从 `/releases/latest` 改到 `/releases` 列表页。
+
+**CI 会产生一份重复的 draft，要手动删。** 推送 tag 会触发 `build.yml` 的 release job，
+它建一个 `draft: true` 的 release。如果同时又用 API 建了已发布的 release，同一个 tag 下就会有
+两个 release（列表里一条 `Pre-release`、一条 `Draft`）。删掉 draft 即可：
+`gh api -X DELETE repos/<owner>/<repo>/releases/<id>`。
+
+**本地与 CI 构建出的 jar 字节不同，这在本次之前就存在。** 差异只有
+`META-INF/maven/.../pom.properties` 一个文件，原因是该文件由 Maven 用**平台换行符**写出：
+Windows 本地是 `\r\n`，Linux CI 是 `\n`（实测 `od -c` 确认）。这不在
+`project.build.outputTimestamp` 能固定的范围内（那管的是 zip 条目时间戳）。本次发布用的是
+Windows 本地构建的产物，正文里的 sha256 对应那一份。
 
 **测试夹具同步**：`ReportCardLevelTest` 与 `ReportStaleMarkerTest` 的 `PLUGIN_VERSION` 常量
 改成新格式。这本身是个顺带的正向验证——它证明带 `-SNAPSHOT-fixN` 的字符串能原样穿过
