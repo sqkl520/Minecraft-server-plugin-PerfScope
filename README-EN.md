@@ -66,7 +66,7 @@ A comprehensive performance monitoring plugin for Minecraft servers, focused on 
 - **Prometheus metrics endpoint** (new in v1.4) —— a dependency-free `/metrics` text endpoint that plugs the plugin into an existing monitoring stack (Prometheus scrape → Grafana dashboards). Beyond TPS/MSPT/memory/entities/chunks it exports the plugin's own trustworthiness signals (snapshot age, collector degradation, per-module availability, per-alert state) that tell "the server died" apart from "the metrics froze". Listens on `127.0.0.1:8940` by default. See "Wiring up Prometheus / Grafana" below
 - **Color-Coded UI** —— Rendered via Paper Adventure API, key metrics colored by level (green/yellow/red) based on the `config.yml` alert thresholds; display and alerts **share the same config source and the same level-decision entry point**, and colors follow immediately after a config reload. Note: the display uses closed intervals (color changes when the threshold is *reached*) while some alert checks use strict greater-than, so **at exactly the threshold the color flips a moment before the alert fires** — an intentional early-warning semantic
 
-## Target Platform & Compatibility
+## 🎯 Target platform & compatibility
 
 Since v1.1, PerfScope focuses on the **Paper family** of servers and relies heavily on Paper-native features such as the Adventure API.
 
@@ -89,7 +89,7 @@ Additional notes:
 - **MSPT on Folia**: `getTickTimes()` exists on that platform but always returns all zeros. The plugin therefore marks MSPT unavailable right at enable (no sampling delay needed); `/perfscope mspt` reports "unavailable (Folia has no global tick timing)".
 - **Scheduling on Folia**: adapted via `GlobalRegionScheduler` / `AsyncScheduler`, with `folia-supported: true` declared in `plugin.yml`; JVM-level metrics (memory/CPU/GC/threads) are fully available.
 
-## Commands
+## ⌨️ Commands
 
 | Command | Description |
 |------|------|
@@ -129,7 +129,7 @@ WeCom / Feishu / DingTalk **return HTTP 200 even when the message is rejected**;
 - **Failure criterion**: delivered means "HTTP 2xx **and** the body carries no platform error code" → `Delivered: HTTP {0}, and the platform confirmed success`. A non-2xx status prints `Not delivered: HTTP {0}`; a 2xx with a non-success business code prints `the platform rejected it with code {0}`, followed by an actionable next step.
 - **Client-side rate limiting**: WeCom / DingTalk 4000 ms, Feishu 700 ms, Discord 2000 ms, OneBot unlimited. A message arriving inside that interval is **dropped outright** and counted in `dropped` (`status` reports that number — it is the only signal that your alerts are being throttled). DingTalk caps at "≤ 20 messages in any 60-second window" and bans for 10 minutes when exceeded, hence the built-in 25% margin.
 
-## Full Diagnostic Output Example
+## 🖥️ Full diagnostic output example
 
 When you run `/perfscope`, the output looks like:
 
@@ -154,7 +154,7 @@ GC: 42 次 / 5.23 秒
 
 This is the `zh` output. With the shipped default `general.language: en` the same command prints the English equivalent (`Server: Paper (Paper)`, `Sampled at:`, `Total entities:`, …). The `Server:` line combines `Bukkit.getServer().getName()` with the server type (e.g. `Paper (Paper)`, `Purpur (Paper)`); on Folia it also appends `[TPS=global region local value]`. Uptime shows at most three units (d / h / m).
 
-## Permissions
+## 🔑 Permissions
 
 | Permission Node | Default | Description |
 |------|------|------|
@@ -164,7 +164,7 @@ This is the `zh` output. With the shipped default `general.language: en` the sam
 | `perfscope.export` | OP | Export report permission |
 | `perfscope.alert` | OP | Receive in-game alert pushes |
 
-## Installation
+## 🚀 Quick start
 
 > **Download**: [GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases) (take the topmost entry)
 
@@ -199,7 +199,7 @@ Going from 1.3.0 to 1.4.0, **these are the only changes that alter existing beha
 - **The history CSV grows from 7 to 12 columns** (MSPT peak / process CPU / system CPU / GC count / GC time appended). Readers map by column name; columns missing from old files read as "not collected" rather than 0, so the day-of-upgrade data stays readable.
 - **Four diagnostic conclusions changed** (same data, different verdict): memory-leak verdicts on windows with missing samples go from CLEAN/HIT to SKIP; the hotspot severity line now follows the warning line you configured; MSPT severity takes the union of "peak" and "average"; servers with invalid thresholds go from "permanently critical" to "skip and state the reason".
 
-## Configuration
+## ⚙️ Configuration
 
 > **Note**: the `alerts.webhook.secret` key, the `type: wecom | feishu | dingtalk` channels and the `prometheus:` block below are all provided as of v1.4.0.
 
@@ -362,7 +362,7 @@ general:
 >
 > Known behavior (alert debounce delay): by default an alert must stay over-threshold for 3 consecutive collection cycles before the first push (`alerts.debounce-cycles`, configurable; 1 = push immediately), adding up to ~3× the collection interval of latency — a deliberate trade for a useful signal instead of a crying-wolf one; level upgrades (warning→critical) bypass both cooldown and debounce and arrive immediately as a single " (level escalated)" message.
 
-## All Monitorable Metrics
+## 📊 All monitorable metrics
 
 | Category | Metrics | Description |
 |------|------|------|
@@ -564,7 +564,7 @@ A few conventions worth knowing before reading the data:
 - The endpoint listens on loopback only by default. Binding it to `0.0.0.0` logs a WARNING: player
   counts, world names and plugin counts are all in there, so set `auth-token` before exposing it.
 
-## Performance & Overhead (Self-Tested, Not a Guarantee)
+## ⚡ Performance & overhead (self-tested, not a guarantee)
 
 A performance plugin that cannot explain its own overhead is self-contradictory. The design principle here is **keep heavy work off the main thread**:
 
@@ -673,7 +673,7 @@ The full executable minimal measurement set (three load tiers, A/B baseline, art
 
 > Caveat: the table above is a **magnitude reference** from one shared dev machine (empty server + 1 bot, `view-distance 5`, ~121 loaded chunks, 90-second window) — not a performance guarantee and not representative of your server. The test load is only **2%–5%** of the 2000–5000-chunk target (121 chunks vs 2000–5000, a 16–41× gap). If you observe abnormal overhead, report it with a `/spark profiler` link.
 
-## Boundaries & What This Plugin Does Not Do
+## 🚫 Boundaries & what this plugin does not do
 
 An honest scope statement — the following are things this plugin does **not** do; pair it with other tools as needed:
 
@@ -683,12 +683,12 @@ An honest scope statement — the following are things this plugin does **not** 
 4. **No automatic remediation** —— The plugin only observes, alerts and exports reports; it never performs any intervention on its own (no restarts, no entity cleanup, no config changes).
 5. **Alerts are debounced** —— By default an alert needs 3 consecutive over-threshold collection cycles before it is pushed (`alerts.debounce-cycles`, configurable), adding up to ~3× the collection interval (about 3 seconds by default) of latency; a deliberate trade to suppress threshold-flicker noise — set `debounce-cycles` to 1 if you need instant delivery.
 
-## Dependencies
+## 📦 Dependencies
 
 - Paper 1.20.4+
 - Java 17+
 
-## Build
+## 🔨 Build
 
 ```bash
 mvn clean package
@@ -706,7 +706,7 @@ mvn clean package -DskipTests   # build without tests
 
 Test dependencies are `test`-scoped and never enter the final JAR.
 
-## License
+## ⚖️ License
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
