@@ -20,6 +20,52 @@
 > 「第一个提到版本号的 `## ` 标题」向下截取，若同时保留空的 `[Unreleased]` 和本段，
 > Release 正文就只剩一句「尚无新改动」。合并后正文即本节全文。
 
+### Changed — README 风格对齐参照仓库；CONTRIBUTING / SECURITY 拆成独立中英文文件
+
+**README 头部重写成参照仓库 `sqkl520/dsh-fcl-android-launcher` 的骨架**：`<div align="center">`
+居中标题 + 一行定位语 + 徽章行（Version / Platform / Java / Tests / License）+ 一句三词卖点 +
+下载与 Issue 链接，然后是作者自述声明块（`> ⚠️` 引用），再是 `---` 分隔线进入正文。
+
+**语言跳转统一成参考仓库的写法**：中文版第一行是 `[English](README-EN.md) | 简体中文`，
+英文版是 `[简体中文](README.md) | English`——都是「指向对方」+「本页语言名在后」，六个文件一致。
+
+**版本号不再在 README 里重复维护三遍。** 此前顶部声明、`## 安装` 的下载行、版本注意段各写一次
+`1.4.5-SNAPSHOT-fix1`，改一个忘两个就是必然。现在只在顶部声明里写一次，并明确
+「与 Releases 页对不上时一律以 Releases 页为准」——这是参照仓库的做法，也是唯一不会漂移的做法。
+`## 安装` 那段改成讲**怎么读版本号**（`-SNAPSHOT` 不是"未完成"，`fixN` 越大越新），不再重复具体版本值。
+
+**CONTRIBUTING / SECURITY 拆成两个文件。** 此前是单文件内「中文在前、English follows」，
+GitHub 的社区健康文件与贡献者入口只认 `CONTRIBUTING.md` / `SECURITY.md`，英文读者点进去先看到整篇中文。
+现在按参照仓库拆成 `CONTRIBUTING.md` + `CONTRIBUTING-EN.md`、`SECURITY.md` + `SECURITY-EN.md`，
+**默认文件即英文版**（与参照仓库一致：`CONTRIBUTING.md` 是中文，但你要求默认英文，所以本仓库反过来）。
+
+> 说明：参照仓库的 `CONTRIBUTING.md` 实际是中文、`CONTRIBUTING-EN.md` 是英文。本仓库按你的要求
+> 「Contributing、Security 默认英文」处理，因此主文件放英文、`-EN` 后缀文件放中文——
+> 命名沿用参照仓库的后缀约定，但主/副语言对调了。跳转链接已全部指向真实存在的文件（脚本实测 0 失效）。
+
+**门禁 `check-docs.mjs` 增加一条精确白名单。** README 顶部的作者自述声明结尾是
+「如果喜欢这个项目就 Star 一下喵」，而这道门禁原本禁止 README 出现任何「喵」。白名单按**整句文案**
+比对（`ALLOWED_SENTENCES`），不是放宽整个文件、也不是按行号——门禁存在的理由就是防止口癖漏进产品
+文案（README 与 config.yml 都真的带着它发出去过），文件级放行等于把这道门禁废掉。
+新拆出的 `SECURITY-EN.md` / `CONTRIBUTING-EN.md` 也一并纳入严格检查清单。
+
+实测验证：往 README 追加一句故意违规的句末语气词 → FAIL 并指到行号；追加白名单那句 → PASS
+且报告 `(1 in the pinned sentence, allowed)`。两种情形都验过。
+
+**新增门禁 `check-readme-version.mjs`。** README 的徽章写死了版本号，而版本号的唯一真源是
+`pom.xml`。bump 了 pom、忘了改徽章，仓库首页就会长期挂着一个过期的版本号——它是访客看到的
+**第一个数字**，错了比正文写错更显眼，却没有任何东西会报警。新门禁从 pom 取 `<version>`
+（锚在 `<artifactId>PerfScope</artifactId>` 之后，避免误取依赖版本），与 README 徽章里
+shields.io 转义后的版本（`--` → `-`）逐字比对。
+
+负向验证：把徽章改成 `fix2` → FAIL 并指出 `badge says "1.4.5-SNAPSHOT-fix2" but pom.xml says
+"1.4.5-SNAPSHOT-fix1"`；还原 → PASS。已接进 CI 的 `static-gate` job 与 `tools/local-gate.ps1`。
+
+顺带把 `check-docs.mjs` 也接进 CI——它此前只在本地 gate 里跑，CI 从未执行过。
+
+**顺带修掉两处陈旧引用**：`SECURITY-EN` 的「支持版本」表还停在 1.3.x（现在安全修复落在 1.4.x）；
+`FAQ.md` 英文段与 PR 模板英文行指向中文文件，已改指 `-EN` 版本。
+
 ### Changed — 版本号改用 `基础版本-SNAPSHOT-fixN`（对齐 sqkl520/dsh-fcl-android-launcher）
 
 从本版起版本号写作 `1.4.5-SNAPSHOT-fix1`：`-SNAPSHOT` 是这条补丁线的标识，`fixN` 是该线上的

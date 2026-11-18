@@ -1,17 +1,44 @@
-# 贡献指南 / Contributing Guide
+[English](CONTRIBUTING-EN.md) | 简体中文
 
-感谢你想为 PerfScope 出一份力。中文版在前，English follows；两版含义相同，如有歧义以中文版为准。
+# 贡献指南
 
-## 中文版
+## 1. 先说清楚这是什么项目
 
-### 提交 Pull Request
+这是一个**个人项目**：高一牲用 AI 辅助（vibe coding）写出来、在真机上一点点磨的
+Minecraft 服务器性能监测插件（Paper 系，Java 17，AGPL-3.0）。
+
+先说三件实话，免得你白等：
+
+- **不承诺响应时效**。上课、考试、被 bug 卡住都可能导致几周不看 Issue。
+- **不承诺"这个功能我要做"**。这里的方向由作者自己定，Issue 里说得很好的点子也可能不做。
+- **但 PR 会被认真读**。带测试、说清动机的 PR，通过率比"只改一行"高得多。
+
+如果你能接受这三点，往下看。
+
+## 2. 报告问题
+
+**先搜一遍 [Issues](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/issues)（含已关闭的）**——
+"TPS 一直显示 20"这类问题很可能已经有人问过。
+
+报 bug 请带上这五项，缺一项都可能让排查多绕几轮：
+
+1. **服务端版本与构建号**（如 `Paper 1.20.4 build 343`、`Purpur 1.21.1 build 2200`）
+2. **PerfScope 版本**（`/perfscope status` 第一行，或 jar 文件名；形如 `1.4.5-SNAPSHOT-fix1`）
+3. **复现步骤**——哪条命令、按什么顺序、多久出现
+4. **相关日志**（`logs/latest.log` 里含 `PerfScope` 的行；有异常请贴完整堆栈）
+5. **配置文件**（`plugins/PerfScope/config.yml`；**贴之前删掉 webhook URL 里的 token**）
+
+如果是指标数值不对，请一并说明「你以为是多少、实际显示多少」——这个插件的大部分 bug
+都是「把健康说成毛病 / 把毛病说成健康」这一类的判定错误，对照值比日志更有用。
+
+## 3. 提交 Pull Request
 
 1. Fork 本仓库，从 `main` 新建分支（如 `fix/tps-threshold`），改动聚焦——一个 PR 只做一件事。
 2. 提交前确保本地构建通过（见下）。
 3. 向 `main` 提交 PR，按 PR 模板填写描述与测试说明。
 4. CI（`.github/workflows/build.yml`）会在 PR 上自动构建并检查产物门禁；CI 不通过不会被合并。
 
-### 构建要求
+## 4. 构建要求
 
 需要 **JDK 17** 与 **Maven**（本项目无 Maven Wrapper，请使用已安装的 `mvn`）。在仓库根目录（`pom.xml` 所在处）执行：
 
@@ -22,10 +49,25 @@ mvn test                       # 仅运行测试
 ```
 
 - 目标平台为 **Paper 1.20.4+**（Java 17），不支持纯 Spigot / CraftBukkit；改动须与此事实一致。
-- 新增/修改命令、功能或权限时，请同步更新 `README.md` 与 `README-EN.md`，并在 `CHANGELOG.md` 的 `[Unreleased]` 段落下追加一行变更记录。
 - 修改代码后必须保证 `mvn clean package` 编译通过。
+- 新增/修改命令、功能或权限时，请同步更新 `README.md` 与 `README-EN.md`，并在 `CHANGELOG.md` 的当前版本段落下追加一行变更记录。
 
-### CLA（贡献者许可协议）
+### 提交前的自检（重要）
+
+仓库里有几道门禁脚本，CI 与本地都可跑，**改完请至少跑一遍**：
+
+```bash
+node tools/check-i18n.mjs --repo . --strict     # 消息键与占位符一致性
+node tools/check-docs.mjs                       # 产品文案不得出现作者口癖
+node tools/check-sentinels.mjs                  # 哨兵字段不得被拿 0 当判据
+node tools/check-bstats-buckets.mjs             # 新增 bStats 图表必须登记
+node tools/check-reload-rebuild.mjs             # reload() 在配置加载失败时仍须重建任务
+```
+
+**加测试比改代码更重要。** 这个项目的每一条修复都要求「有一条断言能在修复前变红」，
+否则修了等于没修。只要你能证明测试真的能抓住那个 bug，PR 基本就过了。
+
+## 5. CLA（贡献者许可协议）
 
 **首次提交 PR 之前，请先阅读 [CLA.md](CLA.md)。** 你保留自己贡献的版权；同时授予维护者一项永久、全球、非独占、免版税、不可撤销的许可，其中包括**再许可权**（可将你的贡献以任何许可证再许可，含闭源/商业许可证）。
 
@@ -39,55 +81,8 @@ mvn test                       # 仅运行测试
 - 维护者会在合并你的首个 PR 时记录你的 **GitHub 用户名与同意日期**；此后的后续贡献自动沿用，无需重复声明。
 - 若你不代表自己（例如代表雇主）贡献，请确保已获得相应授权。
 
-### 行为期望
+## 6. 行为期望
 
 - 友善、就事论事；中文或英文交流均可。
-- 报告 Bug 请附：服务端版本（含 Paper 构建号）、PerfScope 版本、复现步骤、相关日志或截图。
 - 提功能建议前，可先看看 README 的「边界与不做什么」——有些事本插件有意不做（如根因定位请用 spark）。
 - 维护者不承诺响应时限，也不保证合并任何 PR。
-
----
-
-## English Version
-
-### Submitting a Pull Request
-
-1. Fork this repository, create a branch off `main` (e.g. `fix/tps-threshold`), and keep the change focused — one PR, one thing.
-2. Make sure the build passes locally (see below).
-3. Open a PR against `main` and fill in the description and testing notes per the PR template.
-4. CI (`.github/workflows/build.yml`) builds the PR and runs artifact gates automatically; PRs with failing CI will not be merged.
-
-### Build Requirements
-
-You need **JDK 17** and **Maven** (no Maven Wrapper in this repo — use your installed `mvn`). Run from the repository root (where `pom.xml` lives):
-
-```bash
-mvn clean package              # full build, output in target/
-mvn clean package -DskipTests  # quick build, skipping tests
-mvn test                       # run tests only
-```
-
-- The target platform is **Paper 1.20.4+** (Java 17); plain Spigot / CraftBukkit is not supported. Changes must be consistent with this fact.
-- When adding or changing commands, features, or permissions, update `README.md` and `README-EN.md` accordingly, and append a one-line entry under the `[Unreleased]` section of `CHANGELOG.md`.
-- After any code change, `mvn clean package` must compile successfully.
-
-### CLA (Contributor License Agreement)
-
-**Before your first PR, please read [CLA.md](CLA.md).** You retain copyright of your Contribution, while granting the Maintainer a perpetual, worldwide, non-exclusive, royalty-free, irrevocable license that includes the **right to sublicense** (including under proprietary/commercial licenses).
-
-- **First-time contributors**: state either of the following in your PR description (or via the PR template checkbox) to sign the CLA:
-
-  ```
-  我已阅读并同意 CLA（CLA.md）
-  I have read and agree to the CLA (CLA.md)
-  ```
-
-- The Maintainer will record your **GitHub username and the date of agreement** when merging your first PR; later Contributions are covered automatically with no repeated statement.
-- If you contribute on behalf of someone else (e.g. your employer), make sure you are authorized to do so.
-
-### Behavior Expectations
-
-- Be kind and stay on topic; Chinese or English are both fine.
-- For bug reports, include: server version (with Paper build number), PerfScope version, reproduction steps, and relevant logs or screenshots.
-- Before suggesting features, check the README's "Boundaries & What This Plugin Does Not Do" — some things are deliberately out of scope (e.g. use spark for root-cause profiling).
-- The Maintainer does not promise response times and does not guarantee that any PR will be merged.

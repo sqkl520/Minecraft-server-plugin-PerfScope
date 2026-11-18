@@ -163,6 +163,12 @@ if ($null -ne $node) {
     Invoke-Step 'L1 product docs (no sentence particle)' {
         & $node (Join-Path $PSScriptRoot 'check-docs.mjs') '--repo' $RepoRoot
     }
+    # README version badge. The badge hard-codes a version while pom.xml is the single source
+    # of truth. Bump the pom and forget the badge and the repo front page shows a stale number
+    # indefinitely -- it is the first number a visitor sees, and nothing else would notice.
+    Invoke-Step 'L1 README version badge matches pom' {
+        & $node (Join-Path $PSScriptRoot 'check-readme-version.mjs') '--repo' $RepoRoot
+    }
     # Sentinel convention. The same bug ("0 means missing" when the real sentinel is -1)
     # was found in FIVE independent places in v1.4.2's run-up, all by hand. This gate makes
     # the sixth one automatic. A field either has a -1 sentinel or it does not -- comparing

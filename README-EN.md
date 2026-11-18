@@ -1,14 +1,43 @@
-English | [简体中文](README.md)
+[简体中文](README.md) | English
 
-# PerfScope —— Server Performance Monitor
+<div align="center">
+
+# PerfScope
+
+**A performance monitoring plugin for Minecraft servers**
+One command to see the whole server; one report to say where it hurts
+
+![Version](https://img.shields.io/badge/version-1.4.5--SNAPSHOT--fix1-orange?style=flat-square)
+![Platform](https://img.shields.io/badge/platform-Paper%20family-blue?style=flat-square)
+![Java](https://img.shields.io/badge/java-17-success?style=flat-square)
+![Tests](https://img.shields.io/badge/unit%20tests-798%20passing-brightgreen?style=flat-square)
+![License](https://img.shields.io/badge/license-AGPL--3.0-green?style=flat-square)
 
 [![Build](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/actions/workflows/build.yml/badge.svg)](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/actions/workflows/build.yml)
-[![Release](https://img.shields.io/github/v/release/sqkl520/Minecraft-server-plugin-PerfScope)](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest)
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+
+**Zero dependencies** · **Read-only** · **Never writes a world** — drop the jar in `plugins/` and `/perfscope` works
+
+**[⬇️ Download the latest build](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases)** ·
+[Report an issue](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/issues)
+
+</div>
+
+> ⚠️ **This is an early-stage project built by a high-school student with AI assistance (vibe coding).**
+> Issues and suggestions are welcome — please [open an Issue](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/issues).
+> If you find it useful, a star means a lot ⭐
+>
+> **The [Releases page](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases) is the source of truth for versions.**
+> The most recently verified build is `1.4.5-SNAPSHOT-fix1` as of the last update of this document.
+> This README does not maintain a version number on its own — **whenever it disagrees with the
+> Releases page, the Releases page wins.** Every release is flagged Pre-release, so
+> `/releases/latest` will never point at them; take the topmost entry on the Releases page instead.
+> The higher the `fixN` suffix, the newer the build.
+
+---
+
+## ✨ Features
 
 A comprehensive performance monitoring plugin for Minecraft servers, focused on server-side real-time performance tracking and diagnostics. Supports in-game commands for live data viewing, per-world independent alerts, and automatic performance report generation.
-
-## Features
 
 - **Full Diagnostic** —— Type `/perfscope` to view all core performance metrics in one place, one-stop diagnostics
 - **TPS Monitoring** —— 1m/5m/15m real-time collection, with customizable warning/critical alert thresholds
@@ -137,11 +166,11 @@ This is the `zh` output. With the shipped default `general.language: en` the sam
 
 ## Installation
 
-> **Download**: [GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases) (current build **1.4.5-SNAPSHOT-fix1**, `PerfScope-1.4.5-SNAPSHOT-fix1.jar`)
+> **Download**: [GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases) (take the topmost entry)
 
-> **About the version number**: from 1.4.5 on, versions are written `base-SNAPSHOT-fixN`, where `N` is the patch number along that line. It reads like a snapshot, but it is **the only build being maintained** — every release is flagged Pre-release, so GitHub's `/releases/latest` no longer resolves to anything. Pick the topmost entry on the Releases page instead. A higher `fixN` is newer; within one line you can just swap the jar.
+> **How to read the version**: `base-SNAPSHOT-fixN`. `-SNAPSHOT` marks the patch line — it does *not* mean "unfinished"; it is **the only build being maintained**. `N` is the patch number along that line: a higher `fixN` is newer, and you can just swap the jar within a line. Every release is flagged Pre-release, so GitHub's `/releases/latest` will never point at them.
 
-> **Version note**: this document describes **1.4.5-SNAPSHOT-fix1** behaviour. The 1.4.x line is a series of patch releases fixing one class of bug: a healthy reading treated as missing data, or the reverse. No config changes — just swap the jar. The feature set (Prometheus metrics endpoint, `/perfscope webhook status|test`, WeCom / Feishu / DingTalk channels) has been available since 1.4.0. The `alerts.enabled` default and the `entities` / `chunks` default thresholds changed in 1.4.0, so **read "Upgrade notes" below before upgrading from 1.3.x**.
+> **This document describes 1.4.x behaviour**. The 1.4.x line is a series of patch releases fixing one class of bug: a healthy reading treated as missing data, or the reverse. No config changes — just swap the jar. The feature set (Prometheus metrics endpoint, `/perfscope webhook status|test`, WeCom / Feishu / DingTalk channels) has been available since 1.4.0. The `alerts.enabled` default and the `entities` / `chunks` default thresholds changed in 1.4.0, so **read "Upgrade notes" below before upgrading from 1.3.x**.
 
 1. Download the latest JAR file
 2. Place it in your server's `plugins/` directory

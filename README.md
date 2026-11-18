@@ -1,14 +1,41 @@
 [English](README-EN.md) | 简体中文
 
-# PerfScope —— 服务器性能监测插件
+<div align="center">
+
+# PerfScope
+
+**Minecraft 服务器性能监测插件**
+一条命令看全服，一份报告说清卡在哪
+
+![Version](https://img.shields.io/badge/version-1.4.5--SNAPSHOT--fix1-orange?style=flat-square)
+![Platform](https://img.shields.io/badge/platform-Paper%20family-blue?style=flat-square)
+![Java](https://img.shields.io/badge/java-17-success?style=flat-square)
+![Tests](https://img.shields.io/badge/unit%20tests-798%20passing-brightgreen?style=flat-square)
+![License](https://img.shields.io/badge/license-AGPL--3.0-green?style=flat-square)
 
 [![Build](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/actions/workflows/build.yml/badge.svg)](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/actions/workflows/build.yml)
-[![Release](https://img.shields.io/github/v/release/sqkl520/Minecraft-server-plugin-PerfScope)](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases/latest)
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+
+**零依赖** · **只读** · **不写世界** —— 放个 jar 进 `plugins/`，`/perfscope` 就能用
+
+**[⬇️ 下载最新版](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases)** ·
+[问题反馈](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/issues)
+
+</div>
+
+> ⚠️ **这是一个高一牲用 AI 辅助开发（vibe coding）做的 App，处于早期开发中**
+> 有任何问题、建议都欢迎提交 [Issues](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/issues)；
+> 如果喜欢这个项目就 Star 一下喵 ⭐
+>
+> **当前版本以 [Releases 页](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases) 为准**：
+> 最新验证包是 `1.4.5-SNAPSHOT-fix1`（截至本文最后更新）。本 README 不单独维护版本号 ——
+> 与 Releases 页对不上时**一律以 Releases 页为准**。所有发布都标为 Pre-release，因此
+> `/releases/latest` 不会指向它们，请从 Releases 列表页取最上面一条；文件名里 `fixN` 越大越新。
+
+---
+
+## ✨ 功能特性
 
 一个面向 Minecraft 服务器的全面性能监测插件，专注服务端层面的实时性能追踪与诊断。支持游戏内指令查看实时数据、按世界独立告警、以及自动生成性能报告。
-
-## 功能特性
 
 - **全量诊断** —— 输入 `/perfscope` 即可查看所有核心性能指标，一站式诊断
 - **TPS 监测** —— 1m/5m/15m 实时采集，支持 warning/critical 两级告警阈值自定义
@@ -146,11 +173,11 @@ GC: 42 次 / 5.23 秒
 
 ## 安装
 
-> **下载**：[GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases)（当前版本 **1.4.5-SNAPSHOT-fix1**，`PerfScope-1.4.5-SNAPSHOT-fix1.jar`）
+> **下载**：[GitHub Releases](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases)（从列表页取最上面一条）
 
-> **版本号说明**：从 1.4.5 起版本号采用 `基础版本-SNAPSHOT-fixN` 的形式，`N` 是这一条线上的补丁序号。它看起来像快照，但**是唯一在维护的构建**——所有发布都标为 Pre-release，因此 GitHub 的 `/releases/latest` 不再指向任何东西，请从 Releases 列表页挑最上面那一条。`fixN` 号越大越新，同一条线内可以直接替换 jar。
+> **版本号怎么读**：`基础版本-SNAPSHOT-fixN`。`-SNAPSHOT` 是这条补丁线的标识，不是"未完成"的意思——它是**唯一在维护的构建**；`N` 是该线的补丁序号，同线内越大越新，可以直接替换 jar。所有发布都标为 Pre-release，所以 GitHub 的 `/releases/latest` 不会指向它们。
 
-> **版本注意**：本文档描述的就是 **1.4.5-SNAPSHOT-fix1** 的行为。1.4.x 是连续的补丁版，修的都是同一类问题：「把健康说成毛病 / 把毛病说成健康」的判定错误。无配置变更，可直接替换 jar。功能面（Prometheus 指标端点、`/perfscope webhook status|test`、企业微信 / 飞书 / 钉钉通道）自 1.4.0 起提供。`alerts.enabled` 默认值与 `entities` / `chunks` 默认阈值在 1.4.0 有变更，**从 1.3.x 升级前请先读下方「升级注意」**。
+> **本文档描述的是 1.4.x 的行为**。1.4.x 是连续的补丁版，修的都是同一类问题：「把健康说成毛病 / 把毛病说成健康」的判定错误。无配置变更，可直接替换 jar。功能面（Prometheus 指标端点、`/perfscope webhook status|test`、企业微信 / 飞书 / 钉钉通道）自 1.4.0 起提供。`alerts.enabled` 默认值与 `entities` / `chunks` 默认阈值在 1.4.0 有变更，**从 1.3.x 升级前请先读下方「升级注意」**。
 
 1. 下载最新版本的 JAR 文件
 2. 放入服务器的 `plugins/` 目录

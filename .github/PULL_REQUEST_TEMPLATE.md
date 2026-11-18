@@ -12,6 +12,6 @@
 ## CLA 确认 / CLA Confirmation
 
 <!-- 首次贡献者必填，详见 CONTRIBUTING.md 与 CLA.md -->
-<!-- First-time contributors: required. See CONTRIBUTING.md and CLA.md. -->
+<!-- First-time contributors: required. See CONTRIBUTING-EN.md and CLA.md. -->
 
 - [ ] 我已阅读并同意 CLA（CLA.md）—— I have read and agree to the CLA (CLA.md)

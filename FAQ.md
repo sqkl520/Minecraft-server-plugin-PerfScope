@@ -123,7 +123,7 @@ enabled: false
 ```
 
 The field-by-field disclosure, including the exact bStats baseline payload, is in
-[SECURITY.md](SECURITY.md). If you want a second opinion, the outbound code is grep-able: every
+[SECURITY-EN.md](SECURITY-EN.md). If you want a second opinion, the outbound code is grep-able: every
 network call in `src/main/java/` lives in `alert/WebhookNotifier.java`; bStats does its own HTTP
 inside the shaded library.
 

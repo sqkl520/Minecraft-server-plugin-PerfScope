@@ -40,13 +40,41 @@ const AS_JSON = argv.includes('--json');
 /** 语气词本体。集中在这里，改名词时只改一处。 */
 const PARTICLE = '喵';
 
+/**
+ * 白名单：精确到**整句文案**，不是文件、也不是行号。
+ *
+ * 唯一允许出现语气词的产品文档语句是作者在 README 顶部的那段自述声明，结尾
+ * 「如果喜欢这个项目就 Star 一下喵」——这是项目对外的自我介绍口吻，不是技术文案。
+ * 白名单按整句比对而不是放宽整个文件：门禁存在的理由就是防止口癖漏进产品文案
+ * （README 与 config.yml 都真的带着它发出去过），放开文件级等于把这道门禁废掉。
+ *
+ * 比对方式：从语气词所在位置向前找到该行行首、向后找到该行行尾，整行 trim 后
+ * 必须**逐字包含**下面的片段之一。新增白名单必须同时说明为什么。
+ * 英文 README 不设白名单——对应的英文声明按参考仓库写法不带语气词。
+ */
+const ALLOWED_SENTENCES = [
+  '如果喜欢这个项目就 Star 一下喵',
+];
+
+/** 语气词所在的整行是否命中白名单。 */
+function lineAllowed(text, idx) {
+  let start = idx;
+  while (start > 0 && text[start - 1] !== '\n') start--;
+  let end = idx;
+  while (end < text.length && text[end] !== '\n') end++;
+  const line = text.slice(start, end);
+  return ALLOWED_SENTENCES.some((s) => line.includes(s));
+}
+
 /** 必须为 0 的纯产品文档。缺失的文件跳过（不是所有仓库都有 FAQ 等）。 */
 const STRICT_FILES = [
   'README.md',
   'README-EN.md',
   'FAQ.md',
   'SECURITY.md',
+  'SECURITY-EN.md',
   'CONTRIBUTING.md',
+  'CONTRIBUTING-EN.md',
   'CLA.md',
   'versions/README.md',
 ];
@@ -77,24 +105,29 @@ function lineOf(text, index) {
   return n;
 }
 
-// ---- 严格文件：任何一处都是违规 ----
+// ---- 严格文件：任何一处都是违规（白名单语句除外）----
 for (const rel of STRICT_FILES) {
   const text = readIfExists(rel);
   if (text == null) continue;
   let count = 0;
+  let allowed = 0;
   let idx = -1;
   while ((idx = text.indexOf(PARTICLE, idx + 1)) >= 0) {
     count++;
+    if (lineAllowed(text, idx)) {
+      allowed++;
+      continue;
+    }
     if (violations.length < 50) {
       violations.push({
         file: rel,
         line: lineOf(text, idx),
         rule: 'STRICT_FILE',
-        detail: 'product documentation must not contain the particle at all',
+        detail: 'product documentation must not contain the particle at all (only the pinned self-introduction sentence may)',
       });
     }
   }
-  stats.push({ file: rel, mode: 'strict', count });
+  stats.push({ file: rel, mode: 'strict', count, allowed });
 }
 
 // ---- 引述文件：只禁句末语气词 ----
@@ -131,7 +164,9 @@ if (AS_JSON) {
   console.log(`  repo : ${REPO}`);
   console.log('');
   for (const s of stats) {
-    const extra = s.mode === 'quoted-only' ? ` (${s.quoted} quoted, allowed)` : '';
+    const extra = s.mode === 'quoted-only'
+      ? ` (${s.quoted} quoted, allowed)`
+      : (s.allowed ? ` (${s.allowed} in the pinned sentence, allowed)` : '');
     console.log(`  ${s.mode.padEnd(12)} ${String(s.count).padStart(4)}  ${s.file}${extra}`);
   }
   console.log('');

@@ -157,6 +157,12 @@ jobs:
           done
           echo "dir=$(pwd)/tools" >> "$GITHUB_OUTPUT"
 
+      - name: Product docs particle check
+        run: node "${{ steps.tools.outputs.dir }}/check-docs.mjs" --repo "$GITHUB_WORKSPACE"
+
+      - name: README version badge matches pom
+        run: node "${{ steps.tools.outputs.dir }}/check-readme-version.mjs" --repo "$GITHUB_WORKSPACE"
+
       - name: i18n key + placeholder parity
         run: node "${{ steps.tools.outputs.dir }}/check-i18n.mjs" --repo "$GITHUB_WORKSPACE" --strict
 
