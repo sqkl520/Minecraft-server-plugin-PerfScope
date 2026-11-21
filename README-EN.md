@@ -64,6 +64,7 @@ A comprehensive performance monitoring plugin for Minecraft servers, focused on 
 - **History Summary** (new in v1.2) —— `/perfscope history` shows the last ~24 hours: coverage, lowest TPS with its timestamp, peak entities, peak heap — answering "when did it start getting worse"
 - **Hotspot Localization** (new in v1.2) —— `/perfscope hotspot` lists the top-3 entity-density chunks server-wide with coordinates (and dominant type share), drilling from "many entities" down to "go look at this spot"; coordinates are click-to-copy
 - **Prometheus metrics endpoint** (new in v1.4) —— a dependency-free `/metrics` text endpoint that plugs the plugin into an existing monitoring stack (Prometheus scrape → Grafana dashboards). Beyond TPS/MSPT/memory/entities/chunks it exports the plugin's own trustworthiness signals (snapshot age, collector degradation, per-module availability, per-alert state) that tell "the server died" apart from "the metrics froze". Listens on `127.0.0.1:8940` by default. See "Wiring up Prometheus / Grafana" below
+- **Whole network on one screen** (new in v1.4.5, needs a separate proxy-side plugin) —— each backend pushes a tiny summary to the Velocity proxy, where the separate [`PerfScope-Velocity`](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope-Velocity) plugin shows every backend's TPS / MSPT / player count via `/pscope network`, distinguishing "OK / stale / collector dead / no data". Off by default; see "Cross-server summary (proxy networks)" below
 - **Color-Coded UI** —— Rendered via Paper Adventure API, key metrics colored by level (green/yellow/red) based on the `config.yml` alert thresholds; display and alerts **share the same config source and the same level-decision entry point**, and colors follow immediately after a config reload. Note: the display uses closed intervals (color changes when the threshold is *reached*) while some alert checks use strict greater-than, so **at exactly the threshold the color flips a moment before the alert fires** — an intentional early-warning semantic
 
 ## 🎯 Target platform & compatibility
@@ -121,6 +122,11 @@ Additional notes:
 
 Aliases: `/pscope`, `/perf`; `alerts` also answers to `/perfscope alarm`
 
+> On a proxy network there is also a **proxy-side** command `/pscope network` (run on Velocity,
+> provided by the separate
+> [`PerfScope-Velocity`](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope-Velocity) plugin);
+> it does not exist without that plugin. This backend plugin has no `network` subcommand.
+
 ### Webhook self-check (v1.4)
 
 WeCom / Feishu / DingTalk **return HTTP 200 even when the message is rejected**; the error code lives in the response body (`errcode` / `code` / `retcode`). A wrong URL, a bad signature, or a robot removed from the group all look like "success" at the HTTP layer — and the owner's only observable channel is "the group has been silent", which is indistinguishable from "the server is healthy so there is nothing to report". That is exactly why `test` exists: it turns "can this reach the platform?" from *wait for a real incident* into *ask any time*.
@@ -163,6 +169,10 @@ This is the `zh` output. With the shipped default `general.language: en` the sam
 | `perfscope.reload` | OP | Reload config permission |
 | `perfscope.export` | OP | Export report permission |
 | `perfscope.alert` | OP | Receive in-game alert pushes |
+
+> Proxy networks additionally need the proxy-side node `perfscope.network` (checked by
+> `PerfScope-Velocity`). Velocity has no declarative permissions, so without a permission plugin
+> this node is available to **nobody** by default — grant it via LuckPerms or similar.
 
 ## 🚀 Quick start
 
@@ -299,6 +309,11 @@ prometheus:                     # v1.4, see "Wiring up Prometheus / Grafana"
   server-id: ""                 # Cross-server identity label; empty = derived (first world name, else the port)
   auth-token: ""                # Set this whenever you bind 0.0.0.0 and expose it publicly
 
+network:                        # Cross-server summary, see "Cross-server summary"; off by default
+  enabled: false
+  server-id: ""                 # Must differ per backend; empty = fall back to prometheus.server-id -> port-derived port-<port>
+  push-interval-seconds: 10     # Valid range 1-300; out of range falls back to 10. Sent with each packet; the proxy uses 3x this for staleness
+
 # Per-world entity threshold overrides. This block is an **example, not a recommendation**: the three
 # worlds sum exactly to the global thresholds above, split 60% overworld / 25% nether / 15% end.
 # Rewrite the world names and values for your own server, or delete the whole block.
@@ -353,11 +368,20 @@ network:
 - **`server-id` must be unique per backend.** It is the only field that tells them apart. When left
   empty it is derived as `port-<port>` with a console warning — in a multi-backend network **always**
   set it explicitly, or the proxy will merge several backends into one row.
+- **`server-id` should match the backend's name in `velocity.toml` verbatim.** The proxy panel shows
+  the union of "names registered in `[servers]`" and "server-ids that have sent a packet"; when the
+  two disagree you get **ghost rows** — `velocity.toml` says `survival-1` but `server-id` says
+  `survival`, so the panel shows two rows, one "no data" and one with numbers. That is the single
+  most common first-install situation mistaken for "the plugin is broken".
 - **It rides on player connections.** The summary goes over Minecraft's plugin messaging, so a
   backend with **nobody online cannot send**. During those windows the proxy shows "no data",
   not "all good".
 - **Reload after changing it** — `/perfscope reload` or a server restart (hot reload works).
 - Installing only the backend plugin does nothing: the channel has no consumer.
+- **Players cannot reach this plugin's subcommands through the proxy.** The proxy-side plugin
+  registers `/pscope` (aliases `/perfscope`, `/ps`), and Velocity commands take precedence over
+  backend ones, so a player typing `/perfscope tps` in game only gets the network panel's usage hint.
+  Use the console, or `/perfscope:tps` with the namespace, to reach the backend subcommands.
 
 ### Language (i18n)
 

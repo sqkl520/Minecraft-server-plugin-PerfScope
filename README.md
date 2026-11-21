@@ -63,6 +63,7 @@
 - **历史摘要**（v1.2 新增） —— `/perfscope history` 查看近 24 小时概况：覆盖时长、最低 TPS 与发生时刻、峰值实体、峰值内存，回答"什么时候开始变差的"
 - **热点区块定位**（v1.2 新增） —— `/perfscope hotspot` 列出全服实体密度 Top3 区块与坐标（含主导类型占比），把"实体多"下钻到"去哪个坐标看看"；坐标可点击复制
 - **Prometheus 指标端点**（v1.4 新增） —— 零第三方依赖的 `/metrics` 文本端点，把指标接进已有的监控栈（Prometheus 抓取 → Grafana 看板）。除 TPS/MSPT/内存/实体/区块外，还导出本插件独有的可信度信号（快照年龄、采集降级、模块可用性、逐告警状态），用于区分"服务端死了"与"指标冻住了"。默认只听 `127.0.0.1:8940`。见下方「接入 Prometheus / Grafana」
+- **群组服一屏看全网**（v1.4.5 新增，需另装代理侧插件） —— 各后端把一份极小摘要推给 Velocity 代理，由独立的 [`PerfScope-Velocity`](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope-Velocity) 用 `/pscope network` 显示全部后端的 TPS / MSPT / 在线数，并区分「正常 / 数据过期 / 采集已停 / 无数据」四种状态。默认关闭，见下方「跨服摘要（群组服）」
 - **彩色 UI 面板** —— 使用 Paper Adventure API 渲染，关键指标按 `config.yml` 告警阈值分级着色（绿/黄/红）；阈值来源与告警**同配置、同判定入口**，改配置 reload 后颜色立即跟随。注意：显示用闭区间（达到阈值即变色），部分指标告警用严格大于，因此**恰好等于阈值的那一瞬颜色会先变、告警随后到达**（有意的早预警语义）
 
 ## 🎯 目标平台与兼容性
@@ -128,6 +129,10 @@ PerfScope 自 v1.1 起专注 **Paper 系**服务端，深度依赖 Paper 原生 
 
 别名: `/pscope`, `/perf`；`alerts` 另有别名 `/perfscope alarm`
 
+> 群组服还有一个**代理侧**命令 `/pscope network`（在 Velocity 上执行，由独立的
+> [`PerfScope-Velocity`](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope-Velocity) 提供），
+> 不装代理侧插件则不存在。后端本插件没有 `network` 子命令。
+
 ### Webhook 自检（v1.4）
 
 企业微信 / 飞书 / 钉钉**在业务失败时同样返回 HTTP 200**，错误码放在响应体里（`errcode` / `code` / `retcode`）。配置写错、签名错、机器人被移出群，从 HTTP 层看全是"成功"——服主唯一的观测渠道是"群里一直没消息"，而"没有告警因为服务器很健康"和"告警根本没送到"看起来完全一样。这就是 `test` 子命令存在的理由：它把"能不能通"从"等一次真实故障"变成随时可查。
@@ -170,6 +175,9 @@ GC: 42 次 / 5.23 秒
 | `perfscope.reload` | OP | 重载配置权限 |
 | `perfscope.export` | OP | 导出性能报告权限 |
 | `perfscope.alert` | OP | 接收游戏内告警推送权限 |
+
+> 群组服还需要代理侧的权限节点 `perfscope.network`（由 `PerfScope-Velocity` 校验）。
+> Velocity 没有声明式权限，未装权限插件时这个节点默认**谁都不可用**，需要 LuckPerms 之类的插件授权。
 
 ## 🚀 快速开始
 
@@ -306,6 +314,11 @@ prometheus:                     # v1.4，见「接入 Prometheus / Grafana」
   server-id: ""                 # 跨服身份标签；留空 = 自动派生（首个世界名，回退为端口）
   auth-token: ""                # 绑 0.0.0.0 且对公网开放时务必设置
 
+network:                        # 跨服摘要，见「跨服摘要（群组服）」；默认关闭
+  enabled: false
+  server-id: ""                 # 每个后端必须不同；留空 = 回退 prometheus.server-id → 端口派生的 port-<端口>
+  push-interval-seconds: 10     # 有效范围 1–300；越界回退 10。随包发给代理，代理按 3× 本值判过期
+
 # 按世界覆盖实体阈值。这一段是**示例**不是推荐值：三个世界之和恰好等于上面的全服阈值，
 # 按「主世界 60% / 下界 25% / 末地 15%」摊算。请按自己服的世界名与真实占比改写，或整段删掉。
 worlds:
@@ -358,10 +371,17 @@ network:
 - **`server-id` 每台必须不同。** 这是唯一能把它们区分开的字段。留空时会自动派生为
   `port-<端口>` 并在控制台告警——多后端场景下**一定**要显式配置，否则代理侧会把几台后端的数据
   混成一条。
+- **`server-id` 应当与 `velocity.toml` 里该后端的名字逐字一致。** 代理面板的行集合是
+  「`[servers]` 里注册的名字」∪「收到过包的 `server-id`」，两者对不上时会出现**幽灵行**：
+  `velocity.toml` 叫 `survival-1`、`server-id` 填 `survival`，面板上就是两行——一行「无数据」、
+  一行有数。这是首装时最容易被误判成"插件坏了"的一种情形。
 - **它看起来像"上报"，但其实是靠玩家连接转发。** 摘要走 Minecraft 自带的 plugin messaging，
   **空服的后端发不出去**。这期间代理上面板显示的是"无数据"，不是"一切正常"。
 - **改完要 `/perfscope reload` 或重启服务器**（热重载支持，不必重启）。
 - 只装后端不装代理侧插件的话，通道没人接收，不会有任何效果。
+- **代理上会看不到本插件的子命令。** 代理侧插件注册了 `/pscope`（别名 `/perfscope`、`/ps`），
+  而 Velocity 的命令优先于后端，所以玩家在游戏里敲 `/perfscope tps` 只会得到网表面板的用法提示。
+  要用后端子命令请走控制台，或用 `/perfscope:tps` 这种带命名空间的写法。
 
 ### 界面语言（i18n）
 

@@ -52,6 +52,11 @@ public final class NetworkSummary {
      * 协议版本。不兼容变更（删字段、改语义、改单位）时递增。
      *
      * <p>1 = 初版：TPS(1m/5m/15m) + MSPT(avg) + 玩家数 + 快照年龄 + 采集存活标志。</p>
+     *
+     * <p><b>新增"可选字段"不升这个号</b>：接收方本来就要容忍缺字段（旧后端就是这种形状），
+     * 发送方多发一个接收方不认识的键也不会让它出错（解析按 key 取值）。升号会让接收方
+     * 拒收"比自己高"的整包，把一次平滑升级变成一段全丢窗口。只有**删字段、改语义、改单位**
+     * 才需要升。</p>
      */
     public static final int PROTOCOL_VERSION = 1;
 
@@ -93,6 +98,7 @@ public final class NetworkSummary {
         private final Double tps15m;
         private final Double msptAvg;
         private final int playerCount;
+        private final int pushIntervalSec;
 
         private Report(Builder b) {
             this.serverId = b.serverId;
@@ -104,6 +110,7 @@ public final class NetworkSummary {
             this.tps15m = b.tps15m;
             this.msptAvg = b.msptAvg;
             this.playerCount = b.playerCount;
+            this.pushIntervalSec = b.pushIntervalSec;
         }
 
         public String serverId() { return serverId; }
@@ -115,6 +122,18 @@ public final class NetworkSummary {
         public Double tps15m() { return tps15m; }
         public Double msptAvg() { return msptAvg; }
         public int playerCount() { return playerCount; }
+
+        /**
+         * 本后端实际的上报间隔（秒），随包带给代理侧。
+         *
+         * <p><b>为什么必须随包走</b>：代理侧要判"多久没收到才算过期"，而它读不到后端的
+         * {@code config.yml}。此前代理硬编码 {@code 3 × 10s = 30s}，于是服主把间隔调大
+         * （比如 60 秒省流量）后，每两轮上报之间面板都会闪一段"数据过期"。把间隔放进包里，
+         * 接收方就能按**这台后端自己的节奏**算过期，配置与判定不再耦合。</p>
+         *
+         * <p>0 = 发送方没有提供（旧版本后端）。接收方此时回退到自己的默认假设。</p>
+         */
+        public int pushIntervalSec() { return pushIntervalSec; }
 
         /** 快照年龄（毫秒）。负值说明后端时钟比代理快，按 0 处理——时钟不同步不该读成"未来的数据"。 */
         public long ageMs(long nowMs) {
@@ -138,6 +157,8 @@ public final class NetworkSummary {
             m.put("collectedAt", collectedAtMs);
             m.put("alive", collectorAlive);
             m.put("players", playerCount);
+            // 只在有意义时带上：0 表示"发送端没提供"，省掉这个键，旧代理读不到也不会误判。
+            if (pushIntervalSec > 0) m.put("pushIntervalSec", pushIntervalSec);
             if (tps1m != null) m.put("tps1m", tps1m);
             if (tps5m != null) m.put("tps5m", tps5m);
             if (tps15m != null) m.put("tps15m", tps15m);
@@ -159,6 +180,7 @@ public final class NetworkSummary {
             private Double tps15m;
             private Double msptAvg;
             private int playerCount = COUNT_UNAVAILABLE;
+            private int pushIntervalSec;
 
             private Builder(String serverId, long collectedAtMs, long sentAtMs) {
                 this.serverId = serverId;
@@ -172,6 +194,8 @@ public final class NetworkSummary {
             }
             public Builder msptAvg(double v) { this.msptAvg = v; return this; }
             public Builder playerCount(int v) { this.playerCount = v; return this; }
+            /** 上报间隔（秒）。接收方靠它算过期阈值，写 0 等于"没提供"。 */
+            public Builder pushIntervalSec(int v) { this.pushIntervalSec = v; return this; }
 
             public Report build() {
                 return new Report(this);

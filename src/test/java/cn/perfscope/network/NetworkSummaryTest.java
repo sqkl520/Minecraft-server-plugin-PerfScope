@@ -177,6 +177,25 @@ class NetworkSummaryTest {
         }
     }
 
+    @Test
+    @DisplayName("上报间隔随包外发：接收方靠它判过期，不能靠猜")
+    void carriesPushIntervalForStaleDetection() {
+        // 接收方读不到后端的 config.yml。不发这个字段，它只能写死一个假设，
+        // 于是服主把间隔调大到 60 秒后，面板会在两轮上报之间闪「数据过期」。
+        NetworkSummary.Report r = NetworkSummary.Report
+            .builder("survival", 1_000L, 2_000L)
+            .pushIntervalSec(60)
+            .build();
+        assertEquals(60, roundTrip(r).get("pushIntervalSec").getAsInt());
+
+        // 0 表示"没提供"：整条省掉，让旧接收方走它自己的默认值而不是把 0 当间隔。
+        NetworkSummary.Report unset = NetworkSummary.Report
+            .builder("survival", 1_000L, 2_000L)
+            .build();
+        assertFalse(unset.toMap().containsKey("pushIntervalSec"),
+            "没设置时不能写 0——0 秒间隔会被接收方算成「永远过期」");
+    }
+
     // ==================== 验收修复后新增：防回归 ====================
 
     @Test

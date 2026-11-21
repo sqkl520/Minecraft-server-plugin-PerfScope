@@ -74,8 +74,8 @@ public final class SummaryPublisher {
      * <p>取 3：与后端告警的默认防抖（{@code alerts.debounce-cycles}）同口径——单次失败
      * 可能只是偶发抖动，连续 3 次才算"坏了"。跨服面板不需要比本地告警更敏感，
      * 但也不能像 {@code DEAD_AFTER_CONSECUTIVE_FAILURES}（10）那样迟钝：默认 1 秒周期下
-     * 那是 10 秒，而代理侧的 STALE 阈值只有 30 秒，两者挤在一起就无法区分
-     * "采集中断"与"只是没变化"。</p>
+     * 那是 10 秒，而代理侧按「3 × 上报间隔」判过期（默认间隔 10 秒即 30 秒），两者挤在一起
+     * 就无法区分"采集中断"与"只是没变化"。</p>
      */
     private static final int DEAD_AFTER_FAILURES = 3;
 
@@ -146,15 +146,18 @@ public final class SummaryPublisher {
         NetworkSummary.Report report = buildReport(snap, cfg, collectedAt, nowMs, alive);
 
         // ---- 语义比较：collectedAt 每次都变，所以只比"有意义的字段" ----
+        // pushIntervalSec 也算在内：reload 改了间隔后必须让代理侧收到新值，
+        // 否则它会一直按旧间隔判过期。
         String semantic = report.tps1m() + "|" + report.tps5m() + "|" + report.tps15m()
-            + "|" + report.msptAvg() + "|" + report.playerCount() + "|" + report.collectorAlive();
+            + "|" + report.msptAvg() + "|" + report.playerCount() + "|" + report.collectorAlive()
+            + "|" + report.pushIntervalSec();
 
         long intervalMs = Math.max(1, cfg.network_pushIntervalSeconds) * 1000L;
 
         // 保底重发：即使摘要一字未变，也要按间隔重发一次。
         //
         // 没有这一步会出一个很隐蔽的错：接收方靠包里 collectedAt 算"数据年龄"，
-        // 而"没变化就不发"意味着 collectedAt 一起冻住 → 30 秒后一个**完全健康、
+        // 而"没变化就不发"意味着 collectedAt 一起冻住 → 过几个间隔后一个**完全健康、
         // 一直在采集**的后端被判成"数据过期（可能空服）"。
         // 空闲服最容易触发：TPS 恒 20.00、玩家数不变、MSPT 模块关掉时语义串永远不变。
         //
@@ -225,7 +228,10 @@ public final class SummaryPublisher {
         String serverId = resolveServerId(cfg);
         NetworkSummary.Report.Builder b =
             NetworkSummary.Report.builder(serverId, collectedAt == 0L ? nowMs : collectedAt, nowMs)
-                .collectorAlive(alive);
+                .collectorAlive(alive)
+                // 把本机实际间隔告诉代理侧：它读不到这里的 config.yml，硬编码的过期阈值
+                // 会让调大间隔的服每两轮上报之间都闪一次"数据过期"。
+                .pushIntervalSec(cfg.network_pushIntervalSeconds);
 
         // TPS：模块被关掉 / Folia 上取不到时不填。
         if (fieldsAvailable(MetricsSnapshot.MODULE_TPS, snap.unavailable.contains(
