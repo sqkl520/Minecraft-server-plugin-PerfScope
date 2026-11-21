@@ -25,7 +25,7 @@
         - 生产代码不解析它：全部用途是字符串拼接（User-Agent / 横幅 / 报告页脚 /
           JSON 的 plugin_version），没有 split/parse/compare。
     -->
-    <version>1.4.5-SNAPSHOT-fix3</version>
+    <version>1.4.5-SNAPSHOT-fix4</version>
     <packaging>jar</packaging>
 
     <name>PerfScope</name>
