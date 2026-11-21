@@ -67,6 +67,8 @@ public final class PerfScope extends JavaPlugin {
     private WebhookNotifier webhookNotifier;
     /** v1.4：Prometheus 抓取端点（默认不启用；null 表示尚未装配）。 */
     private cn.perfscope.export.PrometheusEndpoint prometheusEndpoint;
+    /** v1.5：跨服摘要上报（默认不启用；null 表示尚未装配）。 */
+    private cn.perfscope.network.SummaryPublisher summaryPublisher;
     private DailySummaryService dailySummaryService;
 
     // ==================== 9A-20 #4：采集任务 supervisor ====================
@@ -234,6 +236,9 @@ public final class PerfScope extends JavaPlugin {
         // v1.4：Prometheus 抓取端点（默认关）。失败只记 warning，绝不让可选出口挡住启动。
         startPrometheus();
 
+        // v1.5：跨服摘要上报（默认关）。同为可选出口，失败只记 warning。
+        startNetworkPush();
+
         getLogger().info("========================================");
         getLogger().info(Messages.get("startup-done"));
         getLogger().info("========================================");
@@ -283,6 +288,7 @@ public final class PerfScope extends JavaPlugin {
         stopCollectionTasks();     // ① 产生者：采集
         // v1.4：先停生产者再关输出——端点关掉后抓取方立刻连接失败，而不是读到一份冻住的旧快照
         stopPrometheus();          // ① 输出：Prometheus 端点
+        stopNetworkPush();         // ① 输出：跨服摘要上报（先摘通道，避免关服期间再发）
         stopAutoReport();          // ① 产生者：自动报告（不再向报告执行器提交新任务）
         // Wave 7D：先停日报（消费告警与历史），再停告警（消费快照）
         stopDailySummary();        // ② 消费者
@@ -567,6 +573,47 @@ public final class PerfScope extends JavaPlugin {
         }
     }
 
+    /**
+     * v1.5：登记跨服摘要出站通道。
+     *
+     * <p>与 {@link #startPrometheus()} 同款容错口径——可选出口失败绝不影响插件本体。
+     * 失败情形真实存在：别的插件占了同名通道、代理端没装对应插件时通道仍能登记但消息无人消费、
+     * 极端情况下 {@code Messenger} 不可用。</p>
+     *
+     * <p>注意这里**只登记通道**，不启动任何定时器：发送由采集周期末尾顺带触发
+     * （见 {@code MetricsCollector} 的 {@code publishNetworkSummary}）。理由是不新增调度、
+     * 不引入第二个时钟，也就不会出现"采集停了但上报还在发陈数据"。</p>
+     */
+    private void startNetworkPush() {
+        ConfigManager.ConfigData cfg = configManager == null ? null : configManager.get();
+        if (cfg == null || !cfg.network_enabled) {
+            return;
+        }
+        if (summaryPublisher == null) {
+            summaryPublisher = new cn.perfscope.network.SummaryPublisher(this);
+        }
+        try {
+            summaryPublisher.register();
+            getLogger().info("[PerfScope] 跨服摘要已启用：通道 " + cn.perfscope.network.NetworkSummary.CHANNEL
+                + "，间隔 " + cfg.network_pushIntervalSeconds + " 秒。"
+                + "（plugin messaging 需有玩家在线才能转发，空服期间代理侧收不到）");
+        } catch (Exception | LinkageError e) {
+            getLogger().warning("[PerfScope] 跨服摘要启动失败：" + e.getClass().getSimpleName());
+        }
+    }
+
+    /** v1.5：摘掉跨服通道。 */
+    private void stopNetworkPush() {
+        if (summaryPublisher != null) {
+            summaryPublisher.unregister();
+        }
+    }
+
+    /** v1.5：跨服摘要发布器；未启用时为 {@code null}。 */
+    public cn.perfscope.network.SummaryPublisher getSummaryPublisher() {
+        return summaryPublisher;
+    }
+
     private void startBstats() {
         if (!configManager.get().general_bstatsEnabled) {
             getLogger().info(Messages.get("core.bstats.disabled-by-config"));
@@ -648,6 +695,13 @@ public final class PerfScope extends JavaPlugin {
         // v1.4：Prometheus 端点配置随 reload 刷新。start() 内部先 stop()，
         // 所以改端口/路径/鉴权都能生效；未启用时 start() 直接返回 false 并不监听。
         startPrometheus();
+        // v1.5：跨服上报随 reload 刷新。必须先摘旧通道再登记，且重置限频状态——
+        // 否则改了 server-id / 间隔后，旧的"上一次摘要"缓存会让新配置直到摘要变化才生效。
+        stopNetworkPush();
+        if (summaryPublisher != null) {
+            summaryPublisher.resetState();
+        }
+        startNetworkPush();
         startDailySummary();
         if (configManager.get().report_autoExport) {
             startAutoReport();

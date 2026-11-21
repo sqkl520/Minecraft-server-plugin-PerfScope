@@ -20,6 +20,63 @@
 > 「第一个提到版本号的 `## ` 标题」向下截取，若同时保留空的 `[Unreleased]` 和本段，
 > Release 正文就只剩一句「尚无新改动」。合并后正文即本节全文。
 
+### Added — 跨服摘要上报（后端 → 代理，为群组服一屏看全网打底）
+
+**动机**：五六个后端各自跑一份 PerfScope，服主要逐个登录才能知道"哪台出问题了"。
+代理侧没法直接读后端指标（Velocity 没有 Bukkit API、也没有 tick 循环），所以需要一条
+从后端往代理送数据的通道。
+
+**方案选择**：只用 Paper 的 plugin messaging（`registerOutgoingPluginChannel`），
+**不开端口、不加依赖、不引入新的出网连接**。
+
+**它的硬性限制写在最前面**：plugin messaging 必须搭某个玩家的连接转发，**空服时通道就断了**。
+这期间代理侧看到的是"这个后端没有数据"，而不是"这个后端一切正常"。这是方案的固有代价，
+不是实现缺陷——所以接收方必须能把"没数据"与"数据是 0"分开（见下面的哨兵约定）。
+
+**协议层** `cn/perfscope/network/NetworkSummary`（纯逻辑，不 import `org.bukkit.*`）：
+字段名与语义就是两侧唯一能共享的东西，因为后端是 Paper 插件、代理是 Velocity 插件，
+代码不在同一个 JVM。抽成纯逻辑类的直接好处是它能进单测 JVM——协议自己的编解码错误
+变成可测的纯函数，而不是"联调时才发现"。
+
+**哨兵约定（本次最重要的一条）**，两类字段不能混：
+
+| 类型 | 缺值写法 | 为什么不写 0 |
+|---|---|---|
+| 可为空的数值（TPS / MSPT） | 字段**不出现** | 0 是合法读数：TPS 0 就是真的冻结了 |
+| 计数型（玩家数） | `-1` | 0 是合法读数：空服就是 0 人 |
+
+这条不是洁癖：v1.4.2 与 v1.4.3 两个版本的修复全在这一个错误上。跨服聚合会把它放大——
+代理侧把 5 个后端求和时，一个被误记为 0 的 TPS 会让全网平均值凭空变好。
+
+**发送端** `cn/perfscope/network/SummaryPublisher`：
+- 只在摘要**语义有变化**时发（比较 tps*/mspt/players/alive，不比 `collectedAt`——它每次都变）
+- 叠加 `network.push-interval-seconds` 限频（默认 10 秒，钳制 1–300）
+- **挂在采集周期末尾**而不是自己开定时器：不引入第二个时钟，也就不会出现"采集停了但上报
+  还在发陈数据"的窗口——那正是本项目反复修的那类静默失真
+- 失败只吞掉并限频记日志（5 分钟一条），绝不影响采集
+
+**跨服身份**复用已有的 `prometheus.server-id` 派生链（`network.server-id` → `prometheus.server-id`
+→ 首个世界名 → 端口）。**刻意不用告警里的 `serverTag`**——那个取 MOTD 首行，而五六个后端
+常是同一套模板、或会被随手改，用它做标识会让代理侧把不同后端的数据混成一条。
+
+**配置**：新增 `network` 段，默认 `enabled: false`（与 prometheus 同口径：没有代理的服开了
+只会多登记一条用不上的通道）。旧配置能直接加载，`check-config-compat` 实测 9/9 PASS。
+
+**测试**：新增 `NetworkSummaryTest` 8 个用例，钉的是**线上格式与哨兵语义**而不是实现细节。
+其中 `fieldNamesAreTheContract` 逐个点名 11 个字段——它们同时被 Velocity 侧读取，
+改名即破坏性变更，必须伴随 `PROTOCOL_VERSION` 递增。
+
+**变异验证**（两次，都是真的改生产代码再跑）：
+- 把「缺失就省掉」改成「缺失写 0」→ `unavailableNumericFieldsAreOmittedNotZeroed` **KILLED**
+- 把 `COUNT_UNAVAILABLE` 从 `-1` 改成 `0` → **第一次 SURVIVED**，因为测试里写的是常量名
+  而不是字面量，断言跟着常量一起变了。改成断言字面值 `-1` 之后重跑 → **KILLED**。
+  这条记在这里是因为它是"测试看起来在测、其实没测到"的典型形态。
+
+**尚未完成的部分（明确记录，不是遗漏）**：Velocity 代理侧插件**还没写**。本次只做了
+后端（发送端）与协议层。代理侧需要独立建仓（`velocity-plugin.json` + `@Plugin` 注解 +
+`com.velocitypowered:velocity-api`），消费这条通道并渲染 `/pscope network`。
+在没有代理侧插件时，后端开了 `network.enabled` 只是登记一条没人消费的通道，不发任何消息。
+
 ### Changed — README 风格对齐参照仓库；CONTRIBUTING / SECURITY 拆成独立中英文文件
 
 **README 头部重写成参照仓库 `sqkl520/dsh-fcl-android-launcher` 的骨架**：`<div align="center">`

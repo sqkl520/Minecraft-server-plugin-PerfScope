@@ -306,6 +306,13 @@ public class ConfigManager {
         fresh.prometheus_serverId = readString("prometheus.server-id", "");
         fresh.prometheus_authToken = readString("prometheus.auth-token", "");
 
+        // === 跨服摘要（后端 → 代理，走 plugin messaging）===
+        // 默认关：没有代理的服开了只会多登记一条用不上的出站通道。
+        fresh.network_enabled = readBool("network.enabled", false);
+        fresh.network_serverId = readString("network.server-id", "");
+        fresh.network_pushIntervalSeconds =
+            readInt("network.push-interval-seconds", NETWORK_PUSH_INTERVAL_DEFAULT);
+
         // === 各世界设置 ===
         fresh.worldSettings = new HashMap<>();
         ConfigurationSection worldsSection = readWorldsSection();
@@ -1183,6 +1190,18 @@ public class ConfigManager {
                 "prometheus.path", raw, cfg.prometheus_path));
         }
 
+        // === network.push-interval-seconds：钳制 1–300 ===
+        // 下限 1：低于采集周期没有意义。上限 300：再长代理侧会把"没上报"误判成"后端失联"，
+        // 而这两件事必须能分开——一个是配置选择，一个是服务端出问题了。
+        if (cfg.network_pushIntervalSeconds < NETWORK_PUSH_INTERVAL_MIN
+            || cfg.network_pushIntervalSeconds > NETWORK_PUSH_INTERVAL_MAX) {
+            int raw = cfg.network_pushIntervalSeconds;
+            cfg.network_pushIntervalSeconds = NETWORK_PUSH_INTERVAL_DEFAULT;
+            plugin.getLogger().warning("[PerfScope] network.push-interval-seconds=" + raw
+                + " 超出 " + NETWORK_PUSH_INTERVAL_MIN + "–" + NETWORK_PUSH_INTERVAL_MAX
+                + " 秒，已回退 " + cfg.network_pushIntervalSeconds + " 秒");
+        }
+
         // === general.language：界面语言归一化（i18n） ===
         // 语言项没有"越界"概念——写错就是一个不存在的语言，因此只做"识别 / 不认识"二分支。
         // 能识别就把归一化后的规范值写回（en_US -> en、zh_TW -> zh），下游 Messages 不必再归一；
@@ -1343,6 +1362,19 @@ public class ConfigManager {
     private static final String PROMETHEUS_PATH_DEFAULT = "/metrics";
     private static final int PROMETHEUS_PORT_MIN = 1;
     private static final int PROMETHEUS_PORT_MAX = 65535;
+
+    /**
+     * 跨服上报间隔默认值（秒）。
+     *
+     * <p>10 秒的取值理由：采集周期默认 1 秒，逐周期发会让 5 个后端变成每秒 5 条跨服消息；
+     * 而代理侧的"一屏看全网"不需要秒级更新——服主看的是"哪个后端变红了"。
+     * 再配合"摘要没变化就跳过"，空闲服的流量接近 0。</p>
+     */
+    private static final int NETWORK_PUSH_INTERVAL_DEFAULT = 10;
+    /** 跨服上报间隔下限：1 秒。低于采集周期没有意义。 */
+    private static final int NETWORK_PUSH_INTERVAL_MIN = 1;
+    /** 跨服上报间隔上限：300 秒。再长代理侧就会把后端判成"失联"而不是"没变化"。 */
+    private static final int NETWORK_PUSH_INTERVAL_MAX = 300;
     /** v1.4：分片数上限——再大每片只剩个位数区块，固定开销反超收益。 */
     private static final int HOTSPOTS_SCAN_SHARDS_MAX = 100;
 
@@ -1772,6 +1804,30 @@ public class ConfigManager {
          * <p>属凭据：日志纪律沿用 {@code WebhookNotifier}——只记端点地址，绝不回显 token。</p>
          */
         public String prometheus_authToken;
+
+        /**
+         * 跨服摘要总开关（{@code network.enabled}，默认 false）。
+         *
+         * <p>关闭时 {@code SummaryPublisher} 不登记通道、不发送，行为与没有这个功能完全一致。
+         * 默认关的理由与 prometheus 相同：没有代理的服开了只会多一条注册的通道。</p>
+         */
+        public boolean network_enabled;
+
+        /**
+         * 跨服身份（{@code network.server-id}，空 = 回退 prometheus.server-id → 自动派生）。
+         *
+         * <p><b>五六个后端必须各不相同</b>，否则代理侧会把它们的数据混成一条。刻意不复用
+         * 告警里的 serverTag：那个取的是 MOTD 首行，多服常是同一套模板、或会被随手改。</p>
+         */
+        public String network_serverId;
+
+        /**
+         * 上报间隔秒数（{@code network.push-interval-seconds}，默认 10，钳制 1–300）。
+         *
+         * <p>采集周期默认 1 秒，逐周期上报会把 5 个后端变成每秒 5 条跨服消息。
+         * 配合"摘要没变化就跳过"，空闲服的流量接近 0。</p>
+         */
+        public int network_pushIntervalSeconds;
 
         // 各世界设置
         public Map<String, WorldSettings> worldSettings;

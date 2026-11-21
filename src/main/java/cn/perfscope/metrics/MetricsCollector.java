@@ -206,6 +206,9 @@ public class MetricsCollector {
     /** 最近一次成功采集的完成时刻（epoch ms；0 = 启动后尚未成功过一次）。仅主线程写，volatile 供命令线程读。 */
     private volatile long lastCollectAtMs = 0L;
 
+    /** v1.5：跨服上报失败日志的限频时间戳与窗口（登录抖动时可能每周期都失败，不能刷屏）。 */
+    private volatile long lastNetworkFailureLogAtMs = 0L;
+    private static final long NETWORK_FAILURE_LOG_INTERVAL_MS = 300_000L;
     /**
      * 最近一次成功完成 JVM 异步采集的时刻（epoch ms；0 = 尚未成功过）。仅异步线程写。
      *
@@ -751,6 +754,39 @@ public class MetricsCollector {
                     failedBefore, formatClock(lastCollectAtMs)));
         } else {
             collectorDead = false;
+        }
+        publishNetworkSummary();
+    }
+
+    /**
+     * v1.5：把本轮快照摘要推给代理（若启用）。
+     *
+     * <p><b>为什么挂在采集周期末尾而不是自己开一个定时器</b>：两个理由。一是不引入第二个时钟——
+     * 一旦上报有自己的调度，就会出现"采集已经停了但上报还在按旧快照发"的窗口，
+     * 代理侧看到的是活的后端和死的数字，正是本项目反复修的那类静默失真。二是失败隔离天然成立：
+     * 这里在任何异常上都只吞掉，不影响采集（采集是这个插件的主功能，跨服只是附加视图）。</p>
+     *
+     * <p>必须在主线程调用——{@code sendPluginMessage} 要求如此，而 {@code onCycleSuccess}
+     * 由全局区域定时器触发，满足条件。</p>
+     */
+    private void publishNetworkSummary() {
+        cn.perfscope.network.SummaryPublisher publisher = plugin.getSummaryPublisher();
+        if (publisher == null) {
+            return;
+        }
+        try {
+            MetricsSnapshot snap = getLatest();
+            if (snap != null) {
+                publisher.publish(snap, System.currentTimeMillis());
+            }
+        } catch (Exception | LinkageError e) {
+            // 跨服链路坏掉绝不能影响本地采集。限频：登录/断连抖动时可能每周期都失败。
+            long now = System.currentTimeMillis();
+            if (now - lastNetworkFailureLogAtMs > NETWORK_FAILURE_LOG_INTERVAL_MS) {
+                lastNetworkFailureLogAtMs = now;
+                plugin.getLogger().warning("[PerfScope] 跨服摘要上报异常（已忽略，不影响采集）："
+                    + e.getClass().getSimpleName() + ": " + e.getMessage());
+            }
         }
     }
 
