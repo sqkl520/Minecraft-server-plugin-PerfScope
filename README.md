@@ -7,7 +7,7 @@
 **Minecraft 服务器性能监测插件**
 一条命令看全服，一份报告说清卡在哪
 
-![Version](https://img.shields.io/badge/version-1.4.5--SNAPSHOT--fix1-orange?style=flat-square)
+![Version](https://img.shields.io/badge/version-1.4.5--SNAPSHOT--fix2-orange?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Paper%20family-blue?style=flat-square)
 ![Java](https://img.shields.io/badge/java-17-success?style=flat-square)
 ![Tests](https://img.shields.io/badge/unit%20tests-798%20passing-brightgreen?style=flat-square)
@@ -27,7 +27,7 @@
 > 如果喜欢这个项目就 Star 一下喵 ⭐
 >
 > **当前版本以 [Releases 页](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases) 为准**：
-> 最新验证包是 `1.4.5-SNAPSHOT-fix1`（截至本文最后更新）。本 README 不单独维护版本号 ——
+> 最新验证包是 `1.4.5-SNAPSHOT-fix2`（截至本文最后更新）。本 README 不单独维护版本号 ——
 > 与 Releases 页对不上时**一律以 Releases 页为准**。所有发布都标为 Pre-release，因此
 > `/releases/latest` 不会指向它们，请从 Releases 列表页取最上面一条；文件名里 `fixN` 越大越新。
 

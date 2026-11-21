@@ -7,7 +7,7 @@
 **A performance monitoring plugin for Minecraft servers**
 One command to see the whole server; one report to say where it hurts
 
-![Version](https://img.shields.io/badge/version-1.4.5--SNAPSHOT--fix1-orange?style=flat-square)
+![Version](https://img.shields.io/badge/version-1.4.5--SNAPSHOT--fix2-orange?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Paper%20family-blue?style=flat-square)
 ![Java](https://img.shields.io/badge/java-17-success?style=flat-square)
 ![Tests](https://img.shields.io/badge/unit%20tests-798%20passing-brightgreen?style=flat-square)
@@ -27,7 +27,7 @@ One command to see the whole server; one report to say where it hurts
 > If you find it useful, a star means a lot ⭐
 >
 > **The [Releases page](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases) is the source of truth for versions.**
-> The most recently verified build is `1.4.5-SNAPSHOT-fix1` as of the last update of this document.
+> The most recently verified build is `1.4.5-SNAPSHOT-fix2` as of the last update of this document.
 > This README does not maintain a version number on its own — **whenever it disagrees with the
 > Releases page, the Releases page wins.** Every release is flagged Pre-release, so
 > `/releases/latest` will never point at them; take the topmost entry on the Releases page instead.

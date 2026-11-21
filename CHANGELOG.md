@@ -3,7 +3,7 @@
 本项目：**PerfScope** —— Minecraft 服务器性能监测插件（Paper 1.20.4+ / Purpur / Pufferfish / Folia / Leaves，Java 17）。
 后台定时采集性能快照 → 游戏内 17 个子命令一屏诊断 → HTML/TXT/JSON 报告导出 → ActionBar 实时监测 → 阈值告警。
 
-> **仓库**：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope> ｜ **版本**：`1.4.5-SNAPSHOT-fix1`（当前构建）｜ **上一个归档**：`1.4.4`（`versions/PerfScope-1.4.4.jar`）
+> **仓库**：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope> ｜ **版本**：`1.4.5-SNAPSHOT-fix2`（当前构建）｜ **上一个归档**：`1.4.5-SNAPSHOT-fix1`
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/)。v1.2「找得到」开发周期已收尾，各段以 **Wave（开发波次）** 划分并标注对应提交哈希。
 
@@ -13,6 +13,52 @@
 > **本文件是开发流水账** —— 记"改了什么、为什么改、验证到哪一步、还欠什么"，不是给用户看的发布说明。
 
 ---
+
+## [1.4.5-SNAPSHOT-fix2] — 2026-11-21 — 跨服摘要上报
+
+> 同一版本线上新增 `network` 段：后端把一份极小摘要推给 Velocity 代理，
+> 由独立的代理侧插件（`Minecraft-server-plugin-PerfScope-Velocity`）一屏显示全网。
+> 默认关闭，不配置就完全无行为。
+
+### Added — 跨服摘要上报（后端 → 代理）
+
+**动机**：五六个后端各跑一份 PerfScope，服主要逐个登录才知道哪台出问题。
+代理端读不到后端指标（Velocity 没有 Bukkit API、也没有 tick 循环），
+所以需要后端主动把摘要推过去。
+
+**方案**：只用 Paper 的 plugin messaging（`registerOutgoingPluginChannel`），
+不开端口、不加依赖、不引入新的出网连接。
+
+**硬性限制**：plugin messaging 搭的是玩家连接，**空服时通道就断了**。
+这期间代理侧看到的是"这个后端没有数据"，而不是"这个后端一切正常"。
+这是方案的固有代价，不是实现缺陷——所以接收方必须能把"没数据"与"数据是 0"分开。
+
+**协议层** `cn/perfscope/network/NetworkSummary`（纯逻辑，不 import `org.bukkit.*`）。
+两侧代码不在同一个 JVM（后端 Paper、代理 Velocity），唯一能共享的就是字段名与语义。
+
+**哨兵约定**，两类字段不能混：
+
+| 类型 | 缺值写法 | 为什么不写 0 |
+|---|---|---|
+| 可为空数值（TPS / MSPT） | 字段**不出现** | 0 是合法读数：TPS 0 就是真的冻结了 |
+| 计数型（玩家数） | `-1` | 0 是合法读数：空服就是 0 人 |
+
+**发送端** `SummaryPublisher`：只在摘要语义有变化时发（不比 `collectedAt`，它每次都变），
+叠加 `push-interval-seconds` 限频（默认 10 秒，钳制 1–300），挂在采集周期末尾而不是自开定时器
+——不引入第二个时钟，也就不会出现"采集停了但上报还在发陈数据"的窗口。失败只吞掉并限频记日志。
+
+**跨服身份**复用 `prometheus.server-id` 的派生链。刻意不用告警里的 `serverTag`（取 MOTD 首行），
+因为多服常是同一套模板或会被随手改，用它做标识会把不同后端混成一条。
+
+**配置**：新增 `network` 段，默认 `enabled: false`。旧配置能直接加载，
+`check-config-compat` 实测 9/9 PASS。
+
+**测试**：`NetworkSummaryTest` 8 个用例，钉的是线上格式与哨兵语义。
+变异验证：缺失字段改成写 0 → KILLED；`COUNT_UNAVAILABLE` 从 -1 改成 0 → **第一次 SURVIVED**
+（测试里写的是常量名而不是字面量，断言跟着常量一起变），改成断言字面 -1 后 → KILLED。
+
+**代理侧已独立建仓**：[`sqkl520/Minecraft-server-plugin-PerfScope-Velocity`](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope-Velocity)，
+18 个用例，四条变异全部 KILLED。
 
 ## [1.4.5-SNAPSHOT-fix1] — 2026-11-18 — 版本号方案变更 + 未发布修复
 
