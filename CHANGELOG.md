@@ -72,10 +72,13 @@
   而不是字面量，断言跟着常量一起变了。改成断言字面值 `-1` 之后重跑 → **KILLED**。
   这条记在这里是因为它是"测试看起来在测、其实没测到"的典型形态。
 
-**尚未完成的部分（明确记录，不是遗漏）**：Velocity 代理侧插件**还没写**。本次只做了
-后端（发送端）与协议层。代理侧需要独立建仓（`velocity-plugin.json` + `@Plugin` 注解 +
-`com.velocitypowered:velocity-api`），消费这条通道并渲染 `/pscope network`。
-在没有代理侧插件时，后端开了 `network.enabled` 只是登记一条没人消费的通道，不发任何消息。
+**代理侧已实现**：Velocity 插件写在同级的 `PerfScope-Velocity/` 目录（暂时不是独立仓库，
+但有自己的 pom、测试与构建产物）。它有 18 个用例打在纯逻辑层，四条变异全部 KILLED。
+详见 `PerfScope-Velocity/README.md`。
+
+**部署仍然需要两边都装**：只在后端开 `network.enabled` 而代理上没装插件，通道没人消费，
+不产生任何可见效果；只在代理装插件而后端没开，面板上是清一色的"无数据"（且会明确说明
+该去查什么）。
 
 ### Changed — README 风格对齐参照仓库；CONTRIBUTING / SECURITY 拆成独立中英文文件
 
