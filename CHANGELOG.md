@@ -72,9 +72,9 @@
   而不是字面量，断言跟着常量一起变了。改成断言字面值 `-1` 之后重跑 → **KILLED**。
   这条记在这里是因为它是"测试看起来在测、其实没测到"的典型形态。
 
-**代理侧已实现**：Velocity 插件写在同级的 `PerfScope-Velocity/` 目录（暂时不是独立仓库，
-但有自己的 pom、测试与构建产物）。它有 18 个用例打在纯逻辑层，四条变异全部 KILLED。
-详见 `PerfScope-Velocity/README.md`。
+**代理侧已实现并有独立仓库**：[`sqkl520/Minecraft-server-plugin-PerfScope-Velocity`](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope-Velocity)。
+它有自己的 pom、测试（18 个用例）、CI 与产物，四条变异全部 KILLED。
+两个仓库的 artifact 版本保持同步（都从 `1.4.5-SNAPSHOT-fix1` 起）。
 
 **部署仍然需要两边都装**：只在后端开 `network.enabled` 而代理上没装插件，通道没人消费，
 不产生任何可见效果；只在代理装插件而后端没开，面板上是清一色的"无数据"（且会明确说明

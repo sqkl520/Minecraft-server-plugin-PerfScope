@@ -270,10 +270,11 @@ messaging, so a proxy-side plugin can show the whole network on one screen.
 1. **It cannot send while the server is empty.** Plugin messaging rides on a player's connection;
    with nobody connected there is no forwarding path. During those windows the proxy shows
    "this backend has no data" — not "this backend is healthy".
-2. **The proxy-side plugin is a separate artifact.** It lives in the sibling `PerfScope-Velocity/`
-   directory and must be installed on the proxy. Turning on `network.enabled` on the backends alone
-   registers a channel nobody consumes and has no visible effect; installing only the proxy plugin
-   shows every backend as "no data". Both sides are required.
+2. **The proxy-side plugin is a separate download.** It lives in its own repository,
+   [`sqkl520/Minecraft-server-plugin-PerfScope-Velocity`](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope-Velocity),
+   and must be installed on the proxy. Turning on `network.enabled` on the backends alone registers
+   a channel nobody consumes and has no visible effect; installing only the proxy plugin shows every
+   backend as "no data". Both sides are required.
 
 **Can I translate it?** `general.language` accepts `en` (default) and `zh`; both are fully covered
 and switching is all-or-nothing, never half-translated. Message overrides go in
@@ -517,9 +518,10 @@ v1.5 起新增可选的 `network` 段：开启后后端会把一份极小的摘�
 
 1. **空服时发不出去。** plugin messaging 搭的是玩家连接，没人连接就没有转发通道。
    这期间代理侧显示的是「这个后端没有数据」，而不是「这个后端一切正常」。
-2. **代理侧插件是独立产物。** 它在同级的 `PerfScope-Velocity/` 目录，需要单独装到代理上。
-   只在后端开 `network.enabled` 而代理上没装，通道没人消费、毫无效果；只装代理插件而后端没开，
-   面板上会是清一色的「无数据」。两边都要装。
+2. **代理侧插件是独立下载。** 它在自己的仓库
+   [`sqkl520/Minecraft-server-plugin-PerfScope-Velocity`](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope-Velocity)，
+   需要单独装到代理上。只在后端开 `network.enabled` 而代理上没装，通道没人消费、毫无效果；
+   只装代理插件而后端没开，面板上会是清一色的「无数据」。两边都要装。
 
 **能翻译吗？** `general.language` 接受 `en`（默认）与 `zh`，两种语言均完整覆盖，切换是整份生效、
 不会出现半译。文案覆盖写在 `plugins/PerfScope/messages.yml`。
