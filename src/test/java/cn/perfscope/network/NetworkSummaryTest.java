@@ -176,4 +176,48 @@ class NetworkSummaryTest {
             assertTrue(o.has(key), "protocol field missing: " + key);
         }
     }
+
+    // ==================== 验收修复后新增：防回归 ====================
+
+    @Test
+    @DisplayName("发送节流：超过一个间隔即使没变化也必须发（否则远端判成数据过期）")
+    void mustResendAfterIntervalEvenWhenUnchanged() {
+        String same = "20.0|20.0|20.0|null|3|true";
+        long interval = 10_000L;
+
+        assertTrue(SummaryPublisher.shouldSend(same, null, 1_000L, 0L, interval),
+            "第一次必须发");
+
+        assertFalse(SummaryPublisher.shouldSend(same, same, 5_000L, 1_000L, interval),
+            "间隔内且无变化，不发");
+
+        // 关键一条：不发会让远端 collectedAt 冻住，30 秒后健康后端被显示成"数据过期"。
+        assertTrue(SummaryPublisher.shouldSend(same, same, 20_000L, 1_000L, interval),
+            "超过一个间隔必须保底重发，让数据年龄前进");
+
+        assertTrue(SummaryPublisher.shouldSend("19.0|x", same, 20_000L, 1_000L, interval),
+            "有变化且过间隔，发");
+
+        assertFalse(SummaryPublisher.shouldSend("19.0|x", same, 5_000L, 1_000L, interval),
+            "有变化但间隔内，限频不发");
+    }
+
+    @Test
+    @DisplayName("字段闸门：哨兵值 -1 必须被挡掉，不能当成真实读数发出去")
+    void sentinelValuesAreNotPublished() {
+        // msptAvg = -1（TPS 反推路径满帧时的哨兵）：模块"可用"但值是哨兵。
+        // 不挡的话代理上会渲染成绿色的 "-1.0 毫秒"。
+        assertFalse(SummaryPublisher.fieldsAvailable("mspt", false, -1.0, 0),
+            "msptAvg=-1 是未采集哨兵，必须挡掉");
+
+        assertTrue(SummaryPublisher.fieldsAvailable("mspt", false, 12.5, 0));
+        assertTrue(SummaryPublisher.fieldsAvailable("tps", false, 20.0, -1));
+
+        // 模块不可用：无论值是多少都挡
+        assertFalse(SummaryPublisher.fieldsAvailable("tps", true, 20.0, -1));
+        assertFalse(SummaryPublisher.fieldsAvailable("mspt", true, 12.5, 0));
+
+        // 0 对 MSPT 不合法（tick 耗时不可能是 0）
+        assertFalse(SummaryPublisher.fieldsAvailable("mspt", false, 0.0, 0));
+    }
 }

@@ -7,7 +7,7 @@
 **Minecraft 服务器性能监测插件**
 一条命令看全服，一份报告说清卡在哪
 
-![Version](https://img.shields.io/badge/version-1.4.5--SNAPSHOT--fix2-orange?style=flat-square)
+![Version](https://img.shields.io/badge/version-1.4.5--SNAPSHOT--fix3-orange?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Paper%20family-blue?style=flat-square)
 ![Java](https://img.shields.io/badge/java-17-success?style=flat-square)
 ![Tests](https://img.shields.io/badge/unit%20tests-798%20passing-brightgreen?style=flat-square)
@@ -27,7 +27,7 @@
 > 如果喜欢这个项目就 Star 一下喵 ⭐
 >
 > **当前版本以 [Releases 页](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases) 为准**：
-> 最新验证包是 `1.4.5-SNAPSHOT-fix2`（截至本文最后更新）。本 README 不单独维护版本号 ——
+> 最新验证包是 `1.4.5-SNAPSHOT-fix3`（截至本文最后更新）。本 README 不单独维护版本号 ——
 > 与 Releases 页对不上时**一律以 Releases 页为准**。所有发布都标为 Pre-release，因此
 > `/releases/latest` 不会指向它们，请从 Releases 列表页取最上面一条；文件名里 `fixN` 越大越新。
 
@@ -342,6 +342,26 @@ worlds:
 > 旧版本配置里已经写了 `enabled: true` 的服主**不受影响**：配置从你的文件读，不与随包默认合并。
 
 完整配置说明请参考 `plugins/PerfScope/config.yml`。
+
+### 跨服摘要（群组服）
+
+跑群组服时，可以让每个后端把一份很小的摘要推给 Velocity 代理，用**独立的代理侧插件**
+一屏看全部后端：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope-Velocity>
+
+```yaml
+network:
+  enabled: true
+  server-id: "survival"       # 每个后端必须不同
+  push-interval-seconds: 10
+```
+
+- **`server-id` 每台必须不同。** 这是唯一能把它们区分开的字段。留空时会自动派生为
+  `port-<端口>` 并在控制台告警——多后端场景下**一定**要显式配置，否则代理侧会把几台后端的数据
+  混成一条。
+- **它看起来像"上报"，但其实是靠玩家连接转发。** 摘要走 Minecraft 自带的 plugin messaging，
+  **空服的后端发不出去**。这期间代理上面板显示的是"无数据"，不是"一切正常"。
+- **改完要 `/perfscope reload` 或重启服务器**（热重载支持，不必重启）。
+- 只装后端不装代理侧插件的话，通道没人接收，不会有任何效果。
 
 ### 界面语言（i18n）
 
@@ -662,7 +682,7 @@ Collection cost: p50 0ms / p95 54ms / max 127ms (66 samples, main thread)
 诚实划界——以下事情本插件**不**做，请按需搭配其他工具：
 
 1. **不做根因定位** —— 本插件给出"哪块指标异常"的嫌疑范围，不做方法级火焰图剖析；真正定位卡顿根因请用 `/spark profiler`。
-2. **不做长期时序分析平台** —— 历史**会落盘**（默认开启，见 `history.persist`）：内存环形缓冲保留约 24 小时（`/perfscope history`），同时按天写入 `plugins/PerfScope/history/history-<日期>.csv`，默认保留 7 天（`history.retention-days`），`/perfscope trend` 可跨重启回查。但本插件**不做**周级/月级趋势分析、不做多服务器聚合、不替代外部监控（Prometheus/Grafana）；需要长期留存或跨服对比请自行接入外部监控。
+2. **不做长期时序分析平台** —— 历史**会落盘**（默认开启，见 `history.persist`）：内存环形缓冲保留约 24 小时（`/perfscope history`），同时按天写入 `plugins/PerfScope/history/history-<日期>.csv`，默认保留 7 天（`history.retention-days`），`/perfscope trend` 可跨重启回查。但本插件**不做**周级/月级趋势分析、不替代外部监控（Prometheus/Grafana）；需要长期留存请接入外部监控。**全网聚合**也不在本插件里——它由独立的代理侧插件 [`PerfScope-Velocity`](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope-Velocity) 负责，本插件只负责把摘要推过去（见「跨服摘要」）。
 3. **MSPT 尖刺检测窗口有限** —— 底层取自 Paper `getTickTimes()` 的滚动窗口（约最近 100 tick）；若尖刺发生在窗口之外，"刚才卡了吗"不一定会如实反映。
 4. **不做任何自动处置** —— 本插件只观测、告警与出报告，不会自动执行任何干预动作（不重启、不清理实体、不改配置）。
 5. **告警有防抖延迟** —— 告警默认需连续 3 个采集周期超标才推送（`alerts.debounce-cycles` 可配），最长延迟约 3×采集间隔（默认约 3 秒）；这是为抑制阈值附近抖动噪音的有意取舍，要求秒级即时到达的场景可把 `debounce-cycles` 设为 1。

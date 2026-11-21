@@ -261,7 +261,7 @@ sharing it, since it lists world names and entity counts.
 aggregate across a network — install it on each backend and compare, or use a real monitoring stack
 (the Prometheus endpoint added in v1.4 exists for exactly that).
 
-From v1.5 there is an optional `network` section: when enabled, a backend pushes a tiny summary
+From `1.4.5-SNAPSHOT-fix2` there is an optional `network` section: when enabled, a backend pushes a tiny summary
 (TPS / MSPT / player count / whether collection is still alive) to the proxy over Paper's plugin
 messaging, so a proxy-side plugin can show the whole network on one screen.
 
@@ -269,7 +269,8 @@ messaging, so a proxy-side plugin can show the whole network on one screen.
 
 1. **It cannot send while the server is empty.** Plugin messaging rides on a player's connection;
    with nobody connected there is no forwarding path. During those windows the proxy shows
-   "this backend has no data" — not "this backend is healthy".
+   "no data" (if it never received anything from that backend) or "data is stale" (if it did
+   earlier) — never "this backend is healthy".
 2. **The proxy-side plugin is a separate download.** It lives in its own repository,
    [`sqkl520/Minecraft-server-plugin-PerfScope-Velocity`](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope-Velocity),
    and must be installed on the proxy. Turning on `network.enabled` on the backends alone registers
@@ -511,13 +512,14 @@ general:
 **支持群组服（代理网络）吗？** PerfScope 监测的是单个服务端进程，**不做跨服聚合**——请每个后端各装一份
 对比，或接入真正的监控栈（v1.4 起的 Prometheus 端点就是为此准备的）。
 
-v1.5 起新增可选的 `network` 段：开启后后端会把一份极小的摘要（TPS / MSPT / 玩家数 / 采集是否还活着）
+`1.4.5-SNAPSHOT-fix2` 起新增可选的 `network` 段：开启后后端会把一份极小的摘要（TPS / MSPT / 玩家数 / 采集是否还活着）
 通过 Paper 的 plugin messaging 上报给代理，供代理侧插件做「一屏看全网」。
 
 ⚠️ **这条通道有两个必须知道的前提**：
 
 1. **空服时发不出去。** plugin messaging 搭的是玩家连接，没人连接就没有转发通道。
-   这期间代理侧显示的是「这个后端没有数据」，而不是「这个后端一切正常」。
+   这期间代理侧显示「无数据」（从未收到过）或「数据过期」（收到过但断了），
+   而不是「这个后端一切正常」。
 2. **代理侧插件是独立下载。** 它在自己的仓库
    [`sqkl520/Minecraft-server-plugin-PerfScope-Velocity`](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope-Velocity)，
    需要单独装到代理上。只在后端开 `network.enabled` 而代理上没装，通道没人消费、毫无效果；

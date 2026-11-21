@@ -823,6 +823,13 @@ public class MetricsCollector {
         if (severe) {
             plugin.getLogger().severe(Messages.get("run.collector.dead", failures));
         }
+        // 失败周期也要上报跨服摘要。
+        //
+        // 只在成功路径上报会导致 alive 恒为 true（成功路径刚刷新过 lastCollectAtMs），
+        // 于是代理侧的 COLLECTOR_DEAD 分支永远走不到：采集真的坏了，面板上显示的是
+        // "数据过期（可能空服）"，把人指向空服/网络这个错误方向。
+        // 这里上报的是上一张快照 + alive=false，让代理能明确说"采集已停"。
+        publishNetworkSummary();
     }
 
     /**
@@ -2583,6 +2590,17 @@ public class MetricsCollector {
             return System.currentTimeMillis() - last > staleThresholdMs();
         }
         return System.currentTimeMillis() - startedAtMs > Math.max(WARMUP_WINDOW_MS, staleThresholdMs());
+    }
+
+    /**
+     * 连续失败了多少个采集周期（成功一次即清零）。
+     *
+     * <p>供跨服上报判断"采集现在是不是坏了"。**不要用 {@link #isStale()} 代替**：本类的
+     * 定时任务在成功路径上先刷新 {@code lastCollectAtMs} 再回调，所以那一刻 {@code isStale()}
+     * 必然为 false，拿它当"采集是否健康"会恒真（这正是一次真实缺陷的成因）。</p>
+     */
+    public int consecutiveFailures() {
+        return consecutiveCollectFailures;
     }
 
     /** stale 判定阈值（毫秒）：3 × 采集间隔，最小 3 秒（防 interval=1 tick 时 150ms 的过敏感判定）。 */

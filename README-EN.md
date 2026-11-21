@@ -7,7 +7,7 @@
 **A performance monitoring plugin for Minecraft servers**
 One command to see the whole server; one report to say where it hurts
 
-![Version](https://img.shields.io/badge/version-1.4.5--SNAPSHOT--fix2-orange?style=flat-square)
+![Version](https://img.shields.io/badge/version-1.4.5--SNAPSHOT--fix3-orange?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Paper%20family-blue?style=flat-square)
 ![Java](https://img.shields.io/badge/java-17-success?style=flat-square)
 ![Tests](https://img.shields.io/badge/unit%20tests-798%20passing-brightgreen?style=flat-square)
@@ -27,7 +27,7 @@ One command to see the whole server; one report to say where it hurts
 > If you find it useful, a star means a lot ⭐
 >
 > **The [Releases page](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases) is the source of truth for versions.**
-> The most recently verified build is `1.4.5-SNAPSHOT-fix2` as of the last update of this document.
+> The most recently verified build is `1.4.5-SNAPSHOT-fix3` as of the last update of this document.
 > This README does not maintain a version number on its own — **whenever it disagrees with the
 > Releases page, the Releases page wins.** Every release is flagged Pre-release, so
 > `/releases/latest` will never point at them; take the topmost entry on the Releases page instead.
@@ -336,6 +336,28 @@ Enabling takes three steps:
 > Server owners who already have `enabled: true` in an older config are **unaffected**: config is read from your file and never merged with the shipped defaults.
 
 See `plugins/PerfScope/config.yml` for complete configuration details.
+
+### Cross-server summary (proxy networks)
+
+On a proxy network, each backend can push a small summary to the Velocity proxy so a **separate
+proxy-side plugin** shows every backend on one screen:
+<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope-Velocity>
+
+```yaml
+network:
+  enabled: true
+  server-id: "survival"       # must be different on every backend
+  push-interval-seconds: 10
+```
+
+- **`server-id` must be unique per backend.** It is the only field that tells them apart. When left
+  empty it is derived as `port-<port>` with a console warning — in a multi-backend network **always**
+  set it explicitly, or the proxy will merge several backends into one row.
+- **It rides on player connections.** The summary goes over Minecraft's plugin messaging, so a
+  backend with **nobody online cannot send**. During those windows the proxy shows "no data",
+  not "all good".
+- **Reload after changing it** — `/perfscope reload` or a server restart (hot reload works).
+- Installing only the backend plugin does nothing: the channel has no consumer.
 
 ### Language (i18n)
 
@@ -678,7 +700,7 @@ The full executable minimal measurement set (three load tiers, A/B baseline, art
 An honest scope statement — the following are things this plugin does **not** do; pair it with other tools as needed:
 
 1. **No root-cause profiling** —— It narrows down *which* metric is abnormal (a suspect range), but does not produce method-level flame graphs; use `/spark profiler` to actually locate the cause of lag.
-2. **No long-term time-series platform** —— History **is persisted** (enabled by default, see `history.persist`): an in-memory ring buffer holds ~24 hours (queryable via `/perfscope history`), and daily CSV files are written to `plugins/PerfScope/history/history-<date>.csv`, kept for 7 days by default (`history.retention-days`); `/perfscope trend` can look back across restarts. What it does **not** do: weekly/monthly trend analysis, multi-server aggregation, or replacing an external monitoring stack (Prometheus/Grafana) — hook one up if you need long-term retention or cross-server comparison.
+2. **No long-term time-series platform** —— History **is persisted** (enabled by default, see `history.persist`): an in-memory ring buffer holds ~24 hours (queryable via `/perfscope history`), and daily CSV files are written to `plugins/PerfScope/history/history-<date>.csv`, kept for 7 days by default (`history.retention-days`); `/perfscope trend` can look back across restarts. What it does **not** do: weekly/monthly trend analysis, or replacing an external monitoring stack (Prometheus/Grafana) — hook one up if you need long-term retention. **Network-wide aggregation** is not in this plugin either; it is handled by the separate proxy-side plugin [`PerfScope-Velocity`](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope-Velocity). This plugin only ships the summary out (see "Cross-server summary").
 3. **Limited MSPT spike-detection window** —— Values come from Paper `getTickTimes()`, a rolling window (roughly the last 100 ticks); a spike that already scrolled out of the window may not be reflected, so "did it just lag?" is not always answerable.
 4. **No automatic remediation** —— The plugin only observes, alerts and exports reports; it never performs any intervention on its own (no restarts, no entity cleanup, no config changes).
 5. **Alerts are debounced** —— By default an alert needs 3 consecutive over-threshold collection cycles before it is pushed (`alerts.debounce-cycles`, configurable), adding up to ~3× the collection interval (about 3 seconds by default) of latency; a deliberate trade to suppress threshold-flicker noise — set `debounce-cycles` to 1 if you need instant delivery.
