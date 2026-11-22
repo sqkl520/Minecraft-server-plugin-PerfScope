@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -38,17 +39,19 @@ class AlertCatalogTest {
     /**
      * 初始化文案层，让 {@code alert.*} 键真的存在。
      *
-     * <p>三步缺一不可：{@code AlertMessages.init()} 触发其 static 块把表
-     * {@code registerModule} 进 {@code EXTRA_EN}/{@code EXTRA_ZH}；然后必须再走一次
-     * {@code Messages.load(null)}，合并才发生（{@code registerModule} 只把
-     * {@code modulesLoaded} 置 false，真正的合并发生在下一次 load）。</p>
+     * <p>走 {@link AlertFixtures#initMessages()}：它先 {@code init()} 三个模块表，
+     * 再用一个"只有 logger 的裸 plugin"调 {@code Messages.load}，从而走完整的
+     * {@code touchModules() → mergeModules() → 发布快照} 路径。</p>
+     *
+     * <p><b>此前这里是 {@code Messages.load(null)}</b>，那条路径在 {@code plugin == null} 时
+     * 直接发布 {@code EN_DEFAULTS}、<b>跳过模块合并</b>——于是本类实际只验证了
+     * {@code Messages.java} 里那份遗留副本，{@code AlertMessages} 里新增的键（如
+     * {@code alert.msg.estimated}）在这里永远"不存在"。P0-U 加估算标记时踩到了这一点：
+     * 标记静默不出现，而断言"正文里没有键名"照样通过。改用真实路径后，模块表的键才真的在。</p>
      */
     @org.junit.jupiter.api.BeforeAll
-    static void initMessages() throws Exception {
-        Class.forName("cn.perfscope.alert.AlertMessages").getMethod("init").invoke(null);
-        Class.forName("cn.perfscope.util.Messages")
-            .getMethod("load", Class.forName("cn.perfscope.PerfScope"))
-            .invoke(null, (Object) null);
+    static void initMessages() {
+        cn.perfscope.support.AlertFixtures.initMessages();
     }
 
     // ------------------------------------------------------------------------------------
@@ -246,7 +249,7 @@ class AlertCatalogTest {
     @Test
     void unknownMetricFallsBackToTheRawKey() {
         Alert legacy = new Alert("some.retired.key", Alert.LEVEL_WARNING, null, "x", 0L,
-            1.0, Double.NaN, "", Double.NaN, Double.NaN);
+            1.0, Double.NaN, "", Double.NaN, Double.NaN, false);
         assertEquals("some.retired.key", AlertCatalog.message(legacy),
             "已下线指标没有 Metric，退回 key 是唯一还能提供的信息——不要编造一个假文案");
     }
@@ -334,5 +337,95 @@ class AlertCatalogTest {
         Alert crit = Alert.measured("memory:heap", Alert.LEVEL_CRITICAL, 97.5, "memory", 0L);
         assertNotEquals(AlertCatalog.title(warn), AlertCatalog.title(crit),
             "warning 与 critical 必须是不同文案：级别决定服主要不要立刻处理");
+    }
+
+    // ------------------------------------------------------------------------------------
+    // 5. P0-U：估算标记（" (估算)"）—— 五条通道必须同口径
+    // ------------------------------------------------------------------------------------
+
+    /**
+     * <b>靶点（P0-U）</b>：估算值的告警正文必须带「(估算)」。
+     *
+     * <p>改前：{@code Alert} 没有任何"这是估算"的表达，于是 webhook / 控制台推送里
+     * {@code MSPT 偏高: 50.03ms} 与真实测量长得一模一样——而那个 50.03 是
+     * {@code 1000/19.99}（含服务器 sleep 的墙钟间隔），真实 tick 耗时可能只有 5ms。</p>
+     *
+     * <p>断言的落点是"标记存在且数值仍在"，不锁具体措辞——后者是 {@code AlertMessages}
+     * 的内容，会随措辞调整。</p>
+     */
+    @Test
+    void estimatedAlertCarriesTheEstimateMarkerInItsBody() {
+        Alert estimated = Alert.measured("mspt:global", Alert.LEVEL_CRITICAL, 50.03, "mspt", 0L)
+            .asEstimated(true);
+        String msg = AlertCatalog.message(estimated);
+
+        // 数值按 %.1f 渲染成 "50.0"（AlertCatalog.formatValue 的既有口径），断言只看"数值还在"
+        assertTrue(msg.contains("50.0"), "the value must still be there: " + msg);
+        assertTrue(msg.contains(AlertCatalog.estimateSuffix(estimated)),
+            "the body must carry the estimate marker: " + msg);
+        assertNotEquals(AlertCatalog.message(
+                Alert.measured("mspt:global", Alert.LEVEL_CRITICAL, 50.03, "mspt", 0L)),
+            msg,
+            "an estimated reading must not render identically to a measured one — that is the whole "
+                + "point: 1000/TPS is a wall-clock interval, not the tick's compute time");
+    }
+
+    /** 非估算告警不得凭空多出标记（否则每条告警都要被读成"这个数不准"）。 */
+    @Test
+    void measuredAlertHasNoEstimateMarker() {
+        Alert measured = Alert.measured("mspt:global", Alert.LEVEL_CRITICAL, 50.03, "mspt", 0L);
+        assertFalse(measured.estimated());
+        assertEquals("", AlertCatalog.estimateSuffix(measured),
+            "a real measurement must not be dressed up with an estimate marker");
+    }
+
+    /**
+     * 标记必须通过 i18n 键渲染，且中英各一份。
+     *
+     * <p>直接拿两条语言的表比对：{@code Messages.get} 在键缺失时返回键名本身，
+     * 而 {@link AlertCatalog#estimateSuffix} 在这种情况下返回空串——于是"键漏了一个语言"
+     * 的表现是<b>静默不标</b>，比打出错文案更难发现。这条把它变成一次断言失败。</p>
+     */
+    @Test
+    void estimateMarkerIsLocalizedInBothLanguages() {
+        Alert estimated = Alert.measured("mspt:global", Alert.LEVEL_WARNING, 50.03, "mspt", 0L)
+            .asEstimated(true);
+        String suffix = AlertCatalog.estimateSuffix(estimated);
+
+        assertFalse(suffix.isEmpty(),
+            "the estimate marker must exist in the message layer: an empty suffix silently means "
+                + "'this number is exact', which is the bug this marker exists to prevent");
+        assertFalse(suffix.contains("alert.msg.estimated"),
+            "a missing key would render the raw key name into the alert body: " + suffix);
+        assertFalse(suffix.startsWith("(") && !suffix.startsWith(" ("),
+            "the marker needs a leading space so it does not glue onto the value: '" + suffix + "'");
+    }
+
+    /**
+     * {@code asEstimated} 幂等，且不改变除标记外的任何结构字段。
+     *
+     * <p>它是"同一观测的标记副本"，不是新观测：key/level/value/threshold 一律不变。
+     * 若某个字段跟着变了，告警层会把同一次越界读成两条不同的告警（旧告警恢复 + 新告警开启）。</p>
+     */
+    @Test
+    void asEstimatedOnlyFlipsTheFlag() {
+        Alert base = Alert.measuredWithThresholds("mspt:global", Alert.LEVEL_CRITICAL, 50.03,
+            45.0, 50.0, "mspt", 123L);
+        Alert marked = base.asEstimated(true);
+        Alert again = marked.asEstimated(true);
+
+        assertTrue(marked.estimated());
+        assertSame(again, marked, "asEstimated(true) must be idempotent (return the same instance)");
+        assertSame(base, base.asEstimated(false), "asEstimated(false) on an exact alert is a no-op");
+
+        assertEquals(base.key(), marked.key());
+        assertEquals(base.level(), marked.level());
+        assertEquals(base.metric(), marked.metric());
+        assertEquals(base.module(), marked.module());
+        assertEquals(base.timestamp(), marked.timestamp());
+        assertEquals(base.value(), marked.value(), 1e-12);
+        assertEquals(base.threshold(), marked.threshold(), 1e-12);
+        assertEquals(base.exitThreshold(), marked.exitThreshold(), 1e-12);
+        assertEquals(base.scope(), marked.scope());
     }
 }

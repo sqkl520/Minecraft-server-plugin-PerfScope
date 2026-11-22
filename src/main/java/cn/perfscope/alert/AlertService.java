@@ -1268,7 +1268,10 @@ public class AlertService {
         return a.level().equals(b.level())
             && sameDouble(a.value(), b.value())
             && sameDouble(a.threshold(), b.threshold())
-            && sameDouble(a.exitThreshold(), b.exitThreshold());
+            && sameDouble(a.exitThreshold(), b.exitThreshold())
+            // P0-U：估算标记也参与"是否同一次观测"。正文渲染依赖它（末尾的「(估算)」），
+            // 两个只在估算标记上不同的 Alert 渲染结果不同，当成同一次会让状态文件停在旧口径上。
+            && a.estimated() == b.estimated();
     }
 
     /** NaN 视为相等（两者都未知 = 同一次观测），其余按 {@code Double.compare}。 */
@@ -2182,7 +2185,7 @@ public class AlertService {
                 // 这正是"切换语言后历史告警也跟着变语言"的实现方式。
                 Alert alert = new Alert(key, level, Metric.ofKey(key),
                     module.isEmpty() ? metricOf(key) : module, lastSeen,
-                    value, Double.NaN, scope, threshold, exitThreshold);
+                    value, Double.NaN, scope, threshold, exitThreshold, false);
                 ActiveAlert rec = new ActiveAlert(key, alert, firstSeen <= 0 ? lastSeen : firstSeen, lastSeen, true);
                 rec.value = valueOf(alert);
                 rec.module = module.isEmpty() ? metricOf(key) : module;
@@ -2496,7 +2499,7 @@ public class AlertService {
                 return null;
             }
             Alert probe = new Alert(key, level, metric, null, 0L,
-                Double.NaN, Double.NaN, Metric.scopeOf(key), Double.NaN, Double.NaN);
+                Double.NaN, Double.NaN, Metric.scopeOf(key), Double.NaN, Double.NaN, false);
             String title = AlertCatalog.title(probe);
             // title() 在键缺失时退回 "metric level" 这种内部 id —— 那不是给用户看的，
             // 此时宁可显示文件里冻结的原文

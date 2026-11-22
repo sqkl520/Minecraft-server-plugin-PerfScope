@@ -52,6 +52,12 @@ public final class AlertCatalog {
      *
      * <p>数值的单位后缀由 {@link Metric.Unit} 决定，<b>与语言无关</b>——
      * 这样同一份数据在两种语言下读出来的是同一个数，只有描述文字在变。</p>
+     *
+     * <p><b>估算标记（P0-U）</b>：{@link Alert#estimated()} 为真时在正文末尾追加
+     * {@code alert.msg.estimated}（" (估算)" / " (estimated)"）。这是唯一一个<b>不随阈值</b>、
+     * 只随"数据来源"变化的附加信息，因此必须由渲染层统一加，而不是让每个调用点自己拼——
+     * 拼接点在聊天层、HTML/TXT、JSON、Prometheus、告警正文这五条路径上各有一份，
+     * 此前只有前四条做了、告警正文漏了，于是服主收到的推送里 50.03ms 看起来像实测值。</p>
      */
     public static String message(Alert alert) {
         if (alert == null) {
@@ -68,11 +74,31 @@ public final class AlertCatalog {
         if (rendered.equals(key)) {
             // 键缺失（未翻译/拼错）：给一个结构化兜底，绝不把原始键名打给服主
             String scope = scopeOrEmpty(alert);
-            return scope.isEmpty()
+            return (scope.isEmpty()
                 ? metric.id() + " " + levelId(alert) + ": " + value
-                : metric.id() + " " + levelId(alert) + " (" + scope + "): " + value;
+                : metric.id() + " " + levelId(alert) + " (" + scope + "): " + value)
+                + estimateSuffix(alert);
         }
-        return rendered;
+        return rendered + estimateSuffix(alert);
+    }
+
+    /**
+     * 估算标记后缀（{@code " (估算)"} / {@code " (estimated)"}）；非估算返回空串。
+     *
+     * <p>前导空格写在词条里（与 {@code cmd.mspt.estimated-tag} / {@code report.common.estimated-tag}
+     * 逐字一致），这样两种语言可以各自决定要不要空格（日文/中文语序不需要空格，但这里是
+     * 半角括号，保留空格在一行文本里更好读），而调用点不必关心。</p>
+     *
+     * <p><b>键缺失时返回空串而不是键名</b>：这是一条锦上添花的标注，缺词条时让正文照常可读，
+     * 比打出 {@code " (alert.msg.estimated)"} 更可取——与 {@link #recoveredSuffix()} 同口径。</p>
+     */
+    public static String estimateSuffix(Alert alert) {
+        if (alert == null || !alert.estimated()) {
+            return "";
+        }
+        String key = "alert.msg.estimated";
+        String s = Messages.get(key);
+        return s.equals(key) ? "" : s;
     }
 
     /**

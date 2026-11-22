@@ -55,6 +55,14 @@ package cn.perfscope.alert;
  * @param scope     世界名（仅世界维度指标有意义）；否则空串
  * @param threshold 本次判定实际采用的<b>进入</b>阈值；不适用时 {@link Double#NaN}
  * @param exitThreshold 迟滞<b>退出</b>线；无迟滞时 {@link Double#NaN}
+ * @param estimated 该数值是否<b>估算</b>而非实测（当前只有 TPS 反推的 MSPT 会置 true）；
+ *                  渲染层据此追加「(估算)」标记，见 {@link AlertCatalog#message(Alert)}
+ *
+ * <p><b>{@code estimated} 不进 {@code alerts.state}</b>：它是"这一份观测怎么来的"，
+ * 不是"告警是什么"。重启后从状态文件恢复的告警一律按 {@code false} 读回，直到下一条真实观测
+ * 把它刷新（{@code AlertService.onSnapshot} 的 {@code rec.restored} 分支会把新 Alert 整个换上去）。
+ * 这段时间里它不会被推送——恢复态只静默接管，所以不会出现"估算标记消失后的推送"。
+ * 加一列进状态文件要跟着改 v3 格式与降级兼容，收益不足以抵消代价。</p>
  */
 public record Alert(
     String key,
@@ -66,7 +74,8 @@ public record Alert(
     double reference,
     String scope,
     double threshold,
-    double exitThreshold
+    double exitThreshold,
+    boolean estimated
 ) {
 
     /** 级别常量：警告（采集层 warning 档阈值触发）。 */
@@ -85,7 +94,7 @@ public record Alert(
     public static Alert measured(String key, String level, double value,
                                  String module, long timestamp) {
         return new Alert(key, level, Metric.ofKey(key), module, timestamp,
-            value, Double.NaN, Metric.scopeOf(key), Double.NaN, Double.NaN);
+            value, Double.NaN, Metric.scopeOf(key), Double.NaN, Double.NaN, false);
     }
 
     /**
@@ -94,7 +103,7 @@ public record Alert(
     public static Alert measuredWithReference(String key, String level, double value,
                                               double reference, String module, long timestamp) {
         return new Alert(key, level, Metric.ofKey(key), module, timestamp,
-            value, reference, Metric.scopeOf(key), Double.NaN, Double.NaN);
+            value, reference, Metric.scopeOf(key), Double.NaN, Double.NaN, false);
     }
 
     /**
@@ -104,7 +113,28 @@ public record Alert(
                                                double threshold, double exitThreshold,
                                                String module, long timestamp) {
         return new Alert(key, level, Metric.ofKey(key), module, timestamp,
-            value, Double.NaN, Metric.scopeOf(key), threshold, exitThreshold);
+            value, Double.NaN, Metric.scopeOf(key), threshold, exitThreshold, false);
+    }
+
+    /**
+     * 同一个观测的"估算"标记副本：数值不变，只把 {@link #estimated()} 置为给定值。
+     *
+     * <p><b>为什么做成副本而不是再加一个工厂</b>：调用点（{@code MetricsCollector.collectMSPT}）
+     * 已经用 {@link #measuredWithThresholds} 把阈值/迟滞/模块都算好了，"是否估算"是那条路径
+     * <b>之后</b>才知道的事实（三级降级链实际走到了哪一级）。再复制一份工厂参数，等于把同一组
+     * 参数写两遍，改一处漏一处时不会报错——而这里漏掉的唯一后果恰好是"估算标记消失"，
+     * 静默、且正是本方法要修的那类 bug。</p>
+     *
+     * <p>幂等：标记值相同时返回自身，不会堆积状态。</p>
+     *
+     * @param flag {@code true} 标记为估算；{@code false} 是实测/精确测量
+     */
+    public Alert asEstimated(boolean flag) {
+        if (estimated == flag) {
+            return this;
+        }
+        return new Alert(key, level, metric, module, timestamp, value, reference, scope,
+            threshold, exitThreshold, flag);
     }
 
     /**

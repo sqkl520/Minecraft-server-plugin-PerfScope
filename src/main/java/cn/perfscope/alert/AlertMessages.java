@@ -117,6 +117,11 @@ public final class AlertMessages {
         put(en, zh, "alert.msg.hysteresis",
             "(hysteresis: clears only below {0}%)",
             "（迟滞中：需跌破 {0}% 才解除）");
+        // P0-U：估算值标记。由 AlertCatalog.message() 统一追加（不是每个调用点自己拼），
+        // 因为拼接点有五处（聊天 / HTML+TXT / JSON / Prometheus / 告警正文），此前只有前四条做了。
+        // 词条自带前导空格：正文是 "MSPT 偏高: 50.03ms"，加标记后成 "MSPT 偏高: 50.03ms (估算)"。
+        // 与 cmd.mspt.estimated-tag / report.common.estimated-tag 逐字一致（同一句话，三个通道）。
+        put(en, zh, "alert.msg.estimated", " (estimated)", " (估算)");
 
         // ==================== digest（一周期合并推送） ====================
         put(en, zh, "alert.msg.digest-header", "{0} new alerts this cycle", "本周期新增 {0} 条告警");

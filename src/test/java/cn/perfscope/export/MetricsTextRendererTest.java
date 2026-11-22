@@ -188,8 +188,85 @@ class MetricsTextRendererTest {
             "an uncollected CPU metric must be absent, never -1 or -0.01");
         // 没有 min 时不应输出 stat="min"，但 avg/max 必须还在
         assertTrue(out.contains("stat=\"avg\""));
-        assertTrue(out.contains("perfscope_tick_duration_seconds{stat=\"max\"}"));
+        // P0-U：tick_duration 现在多带一个 source 标签（见 tickDuration 的 javadoc）。
+        // 断言按标签出现而非逐字整行：既有查询 {stat="avg"} 是子集选择器，仍然匹配。
+        assertTrue(out.contains("perfscope_tick_duration_seconds{stat=\"max\",source=\"measured\"}"),
+            "the max sample must still be emitted (with the new source label): " + out);
         assertFalse(out.contains("stat=\"min\""));
+    }
+
+    /**
+     * P0-U：TPS 反推路径的 tick 时长必须带 {@code source="tps_fallback"}。
+     *
+     * <p>这不是"多打一个标签"的装饰：{@code msptSource == TPS_FALLBACK} 时
+     * {@code tick_duration_seconds} 度量的是 {@code 1000/TPS}——含服务器 sleep 的墙钟间隔，
+     * 不是 tick 的计算耗时。没有这个标签，Grafana 上 50ms 与真实 5ms 长得一模一样。</p>
+     */
+    @Test
+    void estimatedTickDurationIsLabeledAsTpsFallback() {
+        MetricsSnapshot s = snap();
+        s.msptAvg = 50.03;          // 1000/19.99，正是那条反推公式的输出
+        s.msptMin = -1;
+        s.msptMax = -1;
+        s.msptSource = MetricsSnapshot.MSPT_SOURCE_TPS_FALLBACK;
+        String out = MetricsTextRenderer.render(s, ctx());
+
+        assertTrue(out.contains(
+                "perfscope_tick_duration_seconds{stat=\"avg\",source=\"tps_fallback\"}"),
+            "an estimated tick duration must carry source=tps_fallback: " + out);
+        assertFalse(out.contains("source=\"measured\""),
+            "no sample of this snapshot is a real measurement, so none may be labeled measured: " + out);
+        // HELP 必须说明这件事——只看标签不看文档，等于把发现成本转给下一个看板的人
+        assertTrue(out.contains("ESTIMATE"),
+            "the HELP text must state that source=tps_fallback is an estimate: " + out);
+    }
+
+    /**
+     * P2-S2：{@code mspt == 0} 不可信，必须整行不输出（而不是发一条 {@code 0}）。
+     *
+     * <p>旧判据是 {@code msptAvg < 0}，0 会漏过去，Prometheus 收到
+     * {@code tick_duration_seconds{stat="avg"} 0}——Grafana 上读作"这一 tick 零耗时"，
+     * 而真相是"没测到"。项目口径见 {@code check-sentinels.mjs} 的
+     * {@code SENTINEL_AND_ZERO_BOTH_BAD}。</p>
+     */
+    @Test
+    void zeroTickDurationIsOmittedNotEmittedAsZero() {
+        MetricsSnapshot s = snap();
+        s.msptAvg = 0.0;
+        s.msptMin = 0.0;
+        s.msptMax = 0.0;
+        String out = MetricsTextRenderer.render(s, ctx());
+
+        assertFalse(out.contains("perfscope_tick_duration_seconds{"),
+            "0 ms per tick is physically impossible; emitting it draws a false baseline: " + out);
+        assertFalse(out.contains("# HELP perfscope_tick_duration_seconds"),
+            "with no sample at all the HELP/TYPE pair must be absent too: " + out);
+    }
+
+    /**
+     * P2-S2 的第二半：avg 正常但 <b>某个</b>极值为 0 时，那一条必须单独被挡住。
+     *
+     * <p>上一例（三个都是 0）会被外层的"整组都不可信"守卫短路，于是<b>单条</b>的
+     * {@code !(raw > 0)} 判据没有被任何用例覆盖——把 inner guard 改回 {@code raw < 0}
+     * 时那一条仍然绿灯（变异实测：M5 存活）。这个用例的目标是 inner guard 本身：
+     * avg=7.2 是可信读数，而 min=0 是"未填充槽位被塞进了快照"的典型形态，
+     * 发出去会在 Grafana 上画出"总有一 tick 零耗时"的假地板线。</p>
+     */
+    @Test
+    void individualZeroStatIsSkippedWhileTheOthersAreEmitted() {
+        MetricsSnapshot s = snap();
+        s.msptAvg = 7.2;
+        s.msptMin = 0.0;
+        s.msptMax = 88.8;
+        String out = MetricsTextRenderer.render(s, ctx());
+
+        assertTrue(out.contains("perfscope_tick_duration_seconds{stat=\"avg\""),
+            "the credible avg must still be emitted: " + out);
+        assertTrue(out.contains("perfscope_tick_duration_seconds{stat=\"max\""),
+            "the credible max must still be emitted: " + out);
+        assertFalse(out.contains("stat=\"min\""),
+            "a 0 stat is not a reading and must be dropped individually — the group-level guard "
+                + "does not cover this case: " + out);
     }
 
     @Test

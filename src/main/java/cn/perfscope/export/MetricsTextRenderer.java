@@ -53,6 +53,22 @@ public final class MetricsTextRenderer {
     /** Prometheus 文本格式 0.0.4 要求的 Content-Type。 */
     public static final String CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8";
 
+    /**
+     * {@code perfscope_tick_duration_seconds} 的 {@code source} 标签取值：真实测量。
+     *
+     * <p>取值是 ASCII 字面量而不是本地化文案——标签值是给查询用的，会进 Grafana 变量与
+     * 告警表达式，翻译它等于每次切语言都打断所有面板（与 {@code alert.state} 的字段名同口径）。</p>
+     */
+    public static final String SOURCE_MEASURED = "measured";
+
+    /**
+     * {@code source} 标签取值：由 {@code 1000/TPS} 反推的<b>估算</b>。
+     *
+     * <p>这个值出现时，{@code tick_duration_seconds} 度量的是"含服务器 sleep 的墙钟 tick 间隔"，
+     * 不是 tick 的计算耗时。量级能差 5~10 倍。见 {@link #tickDuration} 的说明。</p>
+     */
+    public static final String SOURCE_TPS_FALLBACK = "tps_fallback";
+
     /** 固定输出顺序，便于人工 diff 与 harness 断言。 */
     private static final String[] MODULES = {
         MetricsSnapshot.MODULE_TPS,
@@ -234,16 +250,64 @@ public final class MetricsTextRenderer {
         emitIfPresent(sb, "perfscope_tps", "period", "15m", snap.tps15m);
     }
 
+    /**
+     * tick 时长（MSPT）：{@code perfscope_tick_duration_seconds{stat,source}}。
+     *
+     * <h2>P0-U：估算值打 {@code source="tps_fallback"} 标签（而不是改现有标签名）</h2>
+     *
+     * <p>{@code msptSource == MSPT_SOURCE_TPS_FALLBACK} 时 {@code avg} 是 {@code 1000/TPS}——
+     * 含服务器 sleep 的<b>墙钟间隔</b>，不是 tick 计算耗时。量级能差 5~10 倍（真实 3-8ms，
+     * 反推 50ms）。把它当 {@code tick_duration_seconds} 发出去，Grafana 上显示的是
+     * "服务器每 tick 耗时 50ms"，而真实原因是"这台服少 tick 了一点点"。</p>
+     *
+     * <p><b>为什么加新标签而不是改标签名/整行不输出</b>：</p>
+     * <ul>
+     *   <li>改标签名或改名指标（如 {@code perfscope_tick_duration_estimated_seconds}）会直接
+     *       打断所有既有面板与告警规则——那些查询写的就是 {@code perfscope_tick_duration_seconds}；
+     *       标签<b>加</b>一维则不影响任何以子集匹配的选择器（{@code {stat="avg"}} 仍然匹配），
+     *       这是 Prometheus 的语义，不是我们的约定；</li>
+     *   <li>整行不输出更糟：缺行与"采集挂了"不可区分，而 {@code absent()} 类规则会因此
+     *       永久 firing；而估算值本身在"到底是不是卡了"这个问题上仍有信息量，只是不能当真。</li>
+     * </ul>
+     *
+     * <p><b>为什么所有样本都带这个标签（而不是只给估算行加）</b>：同一个指标名下出现
+     * 两种标签维度，会让 {@code sum by(...)} / {@code label_replace} 这类聚合的行为依赖
+     * "有没有那条边界序列"，排查时最容易出意外。统一带上之后，标签集合恒定，
+     * 值只有 {@code measured} / {@code tps_fallback} 两种。</p>
+     *
+     * <p>HELP 里也写了这件事——Grafana 面板的图例说明直接引用 HELP，
+     * 只靠标签而文档不说，等于把发现成本转嫁给下一个看板的人。</p>
+     */
     private static void tickDuration(StringBuilder sb, MetricsSnapshot snap) {
         // 指标名刻意不叫 mspt_seconds（自相矛盾），也不叫 perfscope_mspt（单位不明）。
         // 规范写法是 <name>_seconds，Grafana 面板里乘 1000 显示。
-        if (snap.msptAvg < 0 && snap.msptMin < 0 && snap.msptMax < 0) {
+        //
+        // P1-S3 之后 MODULE_MSPT 会因"采集失败"进 unavailable（一级 n==0 / 二级返回 0）。
+        // 那种情况下字段已被置 -1，下面的 `> 0` 守卫本可挡住；但这里仍显式问一次
+        // available()：与 tps/players/… 各组的写法保持一致，且挡住"值恰好是旧快照残留"
+        // 这类将来可能出现的组合——模块不可信时不发数，是多处判定共用的唯一口径。
+        if (!available(snap, MetricsSnapshot.MODULE_MSPT)) {
             return;
         }
-        help(sb, "perfscope_tick_duration_seconds", "Per-tick duration in seconds (MSPT / 1000).", "gauge");
-        emitIfPresent(sb, "perfscope_tick_duration_seconds", "stat", "avg", snap.msptAvg / 1000.0, snap.msptAvg);
-        emitIfPresent(sb, "perfscope_tick_duration_seconds", "stat", "min", snap.msptMin / 1000.0, snap.msptMin);
-        emitIfPresent(sb, "perfscope_tick_duration_seconds", "stat", "max", snap.msptMax / 1000.0, snap.msptMax);
+        // P2-S2：判据从 `< 0` 收紧到 `<= 0`。MSPT 的 0 不可信（每 tick 至少花掉可测量的时间），
+        // 而旧写法会把 0 当成一条正常样本发出去——Grafana 上读作"tick 零耗时"。
+        if (!(snap.msptAvg > 0) && !(snap.msptMin > 0) && !(snap.msptMax > 0)) {
+            return;
+        }
+        help(sb, "perfscope_tick_duration_seconds",
+            "Per-tick duration in seconds (MSPT / 1000). source=measured is a real measurement; "
+                + "source=tps_fallback is an ESTIMATE derived from 1000/TPS (wall-clock tick interval, "
+                + "which includes the server's sleep, so it is NOT the tick's compute time) "
+                + "and is only emitted when no real MSPT API is available.",
+            "gauge");
+        String source = snap.msptSource == MetricsSnapshot.MSPT_SOURCE_TPS_FALLBACK
+            ? SOURCE_TPS_FALLBACK : SOURCE_MEASURED;
+        emitPositiveWithSource(sb, "perfscope_tick_duration_seconds", "stat", "avg", source,
+            snap.msptAvg / 1000.0, snap.msptAvg);
+        emitPositiveWithSource(sb, "perfscope_tick_duration_seconds", "stat", "min", source,
+            snap.msptMin / 1000.0, snap.msptMin);
+        emitPositiveWithSource(sb, "perfscope_tick_duration_seconds", "stat", "max", source,
+            snap.msptMax / 1000.0, snap.msptMax);
     }
 
     private static void players(StringBuilder sb, MetricsSnapshot snap) {
@@ -491,6 +555,29 @@ public final class MetricsTextRenderer {
     /** 无原始值可判的情形（如 TPS，哨兵就是 -1 本身）。 */
     private static void emitIfPresent(StringBuilder sb, String name, String label, String labelValue, double v) {
         emitIfPresent(sb, name, label, labelValue, v, v);
+    }
+
+    /**
+     * 输出带<b>两个</b>标签（{@code stat} + {@code source}）的样本，原始值不可信时跳过。
+     *
+     * <p>P0-U 专用：{@code perfscope_tick_duration_seconds} 需要把"实测"与"TPS 反推估算"
+     * 分开，而 {@code source} 是<b>新增</b>的一维，不是改名——既有查询
+     * {@code perfscope_tick_duration_seconds{stat="avg"}} 仍然匹配（子集选择器语义）。</p>
+     *
+     * <p>P2-S2：判据是 {@code !(raw > 0)} 而不是 {@code raw < 0}。MSPT 的 {@code 0} 同样不可信
+     * （每 tick 至少花掉可测量时间），而旧写法会把第三方写进快照的 0 当成真实样本发出去——
+     * Grafana 上读作"这一 tick 零耗时"，恰好掩盖了"根本没测到"。
+     * 用 {@code !(x > 0)} 而不是 {@code x <= 0} 是为了同时挡住 {@code NaN}。</p>
+     */
+    private static void emitPositiveWithSource(StringBuilder sb, String name, String label, String labelValue,
+                                               String source, double v, double raw) {
+        if (!(raw > 0)) {
+            return;
+        }
+        sb.append(name).append('{')
+            .append(label).append("=\"").append(escape(labelValue)).append("\",")
+            .append("source=\"").append(escape(source)).append("\"} ")
+            .append(num(v)).append('\n');
     }
 
     /**
