@@ -120,6 +120,23 @@ public final class RuntimeMessages {
             "[PerfScope] 采集模块失败: {0}: {1}（已连续失败 {2} 次，首次失败 {3}；同类日志 5 分钟内不重复记）");
         put(en, zh, "run.collector.unknown-error", "unknown", "未知");
 
+        // 子集契约违反（P2 从硬编码中文迁入）：拆成"详情"与"外壳"两个键。
+        // 详情里的集合名（platformSkipped / disabledModules / unavailable）是代码标识符，
+        // 由 {0}/{1}/{3} 传入而不翻译——它们是用户 grep 源码与快照字段的锚点。
+        put(en, zh, "run.collector.subset-violation-detail",
+            "MetricsSnapshot subset contract {0} is not a subset of {1}: extra {2} (added to {3})",
+            "MetricsSnapshot 子集契约 {0} ⊆ {1} 被违反：多出 {2}（已补进 {3}）");
+        put(en, zh, "run.collector.subset-violation",
+            "[PerfScope] {0}. This is a collector-side self-consistency bug; it has been repaired "
+                + "automatically so it cannot affect what is displayed. Please report it to the developer",
+            "[PerfScope] {0}。这是采集侧的自身一致性 bug，已自动修正以免影响展示；"
+                + "请报告给开发者");
+        // 跨服上报异常（P2 迁入）：publish() 自己吞了异常并返回 FAILED，所以这一条只在
+        // MetricsCollector 外层真正接住异常时才出现（如 getLatest 前的空指针、调度异常）。
+        put(en, zh, "run.collector.network-report-failed",
+            "[PerfScope] Cross-server summary reporting threw (ignored, collection is unaffected): {0}",
+            "[PerfScope] 跨服摘要上报异常（已忽略，不影响采集）: {0}");
+
         // ==================== 历史持久化 / HistoryFileStore + HistoryStore ====================
         put(en, zh, "run.history.dir-create-failed", "Failed to create the history directory", "历史目录创建失败");
         put(en, zh, "run.history.writer-crashed", "History writer thread failed", "历史写线程异常");

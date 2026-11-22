@@ -95,6 +95,49 @@ public final class DurationFormat {
     }
 
     /**
+     * 差值时长：从"天"起算，只写<b>前 N 个非零</b>单位。
+     *
+     * <p><b>为什么不是直接复用 {@link #uptime}</b>：{@code uptime} 的窗口按"级"数（天/时/分），
+     * 于是 {@code 1 天 0 时 0 分 3 秒} 会写成 {@code 1d}——秒被窗口截掉。而这里要的是
+     * "1 天 3s" 这种形态：读者关心差值的量级，越靠前的非零单位越有信息量，尾部的 0 级只是噪音。
+     * 反过来写成 {@code 1 天 0 时 0 分 3 秒} 又会让"精度很高"成为假象。两种窗口口径不同，
+     * 所以这里是独立入口，而不是给 {@code uptime} 加参数。</p>
+     *
+     * <p><b>为什么需要它（而不是让调用方自己拼）</b>：{@code SummaryPublisher} 的时钟回拨告警
+     * 此前自带一份 {@code {" 天"," 小时"," 分"," 秒"}} 的中文单位表，注释写着"不做 i18n"。
+     * 但那段片段是被拼进一条<b>已经本地化</b>的句子的，英文界面下必然混排
+     * （"系统时钟回拨 1 小时"整个出现在英文日志里）。单位表只允许有一份，就在这里。</p>
+     *
+     * <p>示例（{@code maxUnits = 2}）：{@code 1 天 2 时} / {@code 23 分} / {@code 3 秒} / {@code 0 秒}；
+     * 英文 {@code 1d 2h} / {@code 23m} / {@code 3s} / {@code 0s}。</p>
+     *
+     * @param millis   毫秒；负数按 0 处理
+     * @param maxUnits 最多写几个非零单位（至少按 1 处理）
+     */
+    public static String elapsed(long millis, int maxUnits) {
+        int limit = Math.max(1, maxUnits);
+        long totalSeconds = Math.max(0L, millis) / 1000L;
+        long[] parts = splitSeconds(totalSeconds, 0);   // 从天起算：差值也可能跨天
+        boolean zh = Messages.LOCALE_ZH.equals(Messages.activeLocale());
+
+        StringBuilder sb = new StringBuilder(24);
+        int taken = 0;
+        for (int i = 0; i < parts.length && taken < limit; i++) {
+            if (parts[i] == 0L) {
+                continue;   // 跳过 0 分量，而不是让它占掉一个名额
+            }
+            if (taken > 0) {
+                sb.append(SEPARATOR);
+            }
+            sb.append(number(parts[i])).append(unit(zh, i));
+            taken++;
+        }
+        // 全零（或不足 1 秒）：必须给一个数，不能返回空串——
+        // 调用点会拼出"检测到时钟回拨  后…"这种断句，比不写还难读。
+        return sb.length() == 0 ? number(0L) + unit(zh, 3) : sb.toString();
+    }
+
+    /**
      * 公共渲染：拆分量 → 定位最高非零单位 → 取精度窗口 → 逐项拼接。
      *
      * @param firstUnit 允许的最高单位下标（{@code duration} 传 1 = 时，{@code uptime} 传 0 = 天）

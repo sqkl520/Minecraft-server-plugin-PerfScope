@@ -46,6 +46,10 @@ public final class AlertFixtures {
             Class.forName("cn.perfscope.alert.AlertMessages").getMethod("init").invoke(null);
             Class.forName("cn.perfscope.config.ConfigMessages").getMethod("init").invoke(null);
             Class.forName("cn.perfscope.diagnose.DiagnoseMessages").getMethod("init").invoke(null);
+            // P2：跨服摘要日志迁进 i18n 后新增的模块表。不注册它的后果是
+            // SummaryPublisher 的 WARNING 变成纯键名（network.log.*），
+            // 而 PublisherFailureThrottleTest 正是按文案特征串数日志条数的。
+            Class.forName("cn.perfscope.network.NetworkMessages").getMethod("init").invoke(null);
             PerfScope bare = barePlugin(Logger.getLogger("pscope-message-init"));
             try {
                 Class.forName("cn.perfscope.util.Messages")

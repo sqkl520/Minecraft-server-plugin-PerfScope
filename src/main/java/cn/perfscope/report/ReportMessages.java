@@ -146,7 +146,7 @@ public final class ReportMessages {
         put(en, zh, "report.html.th.world", "World", "世界");
         put(en, zh, "report.html.th.entities", "Entities", "实体数");
         put(en, zh, "report.html.th.chunks", "Loaded chunks", "加载区块");
-        put(en, zh, "report.html.th.tile-entities", "Tile Entities", "Tile Entity");
+        put(en, zh, "report.html.th.tile-entities", "Tile Entities", "方块实体");
 
         // ---- HTML：实体类型 Top 15 ----
         put(en, zh, "report.html.section.entities-by-type",
@@ -208,7 +208,7 @@ public final class ReportMessages {
         put(en, zh, "report.txt.section.entities-by-world", "--- Entities by World ---", "--- 实体按世界分布 ---");
         put(en, zh, "report.txt.world-row",
             "  {0}: {1} entities | {2} chunks | {3} tile entities",
-            "  {0}: {1} 实体 | {2} 区块 | {3} TileEntity");
+            "  {0}: {1} 实体 | {2} 区块 | {3} 方块实体");
         put(en, zh, "report.txt.section.entities-by-type", "--- Top 10 Entity Types ---", "--- 实体类型 Top 10 ---");
         put(en, zh, "report.txt.entity-row", "  {0}: {1} ({2}%)", "  {0}: {1} ({2}%)");
 

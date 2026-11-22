@@ -247,17 +247,34 @@ class ThresholdTextMatchesOperatorTest {
             switchLocale(Messages.LOCALE_ZH);
             AlertServiceStateMachineFixture f = fixtureWithAllThresholds();
 
-            assertRenders(f, "players:global", "warning ≥ 90 / critical ≥ 98",
+            // P2：中文模板此前是英文（"warning ≥ 90 / critical ≥ 98" 直接夹在中文句子里），
+            // 现在改成「警告 / 严重」，与 alert.event.* / alert.msg.* 的既有措辞一致。
+            assertRenders(f, "players:global", "警告 ≥ 90 / 严重 ≥ 98",
                 ThresholdOperator.PLAYERS);
-            assertRenders(f, "memory:global", "warning ≥ 85% / critical ≥ 95%",
+            assertRenders(f, "memory:global", "警告 ≥ 85% / 严重 ≥ 95%",
                 ThresholdOperator.MEMORY);
-            assertRenders(f, "entities:global", "warning > 20000 / critical > 30000",
+            assertRenders(f, "entities:global", "警告 > 20000 / 严重 > 30000",
                 ThresholdOperator.ENTITIES_GLOBAL);
-            assertRenders(f, "tps:global", "warning < 18.0 / critical < 15.0",
+            assertRenders(f, "tps:global", "警告 < 18.0 / 严重 < 15.0",
                 ThresholdOperator.TPS);
+            assertRenders(f, "chunks:world:world", "警告 > 10000 / 严重 > 15000",
+                ThresholdOperator.CHUNKS_WORLD);
+            assertRenders(f, "mspt:global", "警告 > 45.0ms / 严重 > 50.0ms",
+                ThresholdOperator.MSPT);
 
             String cpu = thresholdText(f, "cpu:process");
             assertTrue(cpu.contains("进程 > 80.0% / 系统 > 90.0%"), "中文 CPU 文案：" + cpu);
+
+            // 判据：中文模板里不得残留英文的 warning / critical 词。
+            // 只断言具体值不够——把 warning 改成 WARNING 这类"半英半中"会被漏掉。
+            for (String key : new String[]{"tps:global", "mspt:global", "players:global",
+                "entities:global", "chunks:world:world", "memory:global"}) {
+                String text = thresholdText(f, key);
+                assertFalse(text.contains("warning"),
+                    key + " 的中文模板里残留了英文 warning；got: " + text);
+                assertFalse(text.contains("critical"),
+                    key + " 的中文模板里残留了英文 critical；got: " + text);
+            }
         } finally {
             switchLocale(Messages.LOCALE_EN);
         }
