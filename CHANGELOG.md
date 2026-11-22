@@ -3,7 +3,7 @@
 本项目：**PerfScope** —— Minecraft 服务器性能监测插件（Paper 1.20.4+ / Purpur / Pufferfish / Folia / Leaves，Java 17）。
 后台定时采集性能快照 → 游戏内 17 个子命令一屏诊断 → HTML/TXT/JSON 报告导出 → ActionBar 实时监测 → 阈值告警。
 
-> **仓库**：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope> ｜ **版本**：`1.4.5-SNAPSHOT-fix4`（当前构建）｜ **上一个归档**：`1.4.5-SNAPSHOT-fix1`
+> **仓库**：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope> ｜ **版本**：`1.4.5-SNAPSHOT-fix5`（当前构建）｜ **上一个归档**：`1.4.5-SNAPSHOT-fix1`
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/)。v1.2「找得到」开发周期已收尾，各段以 **Wave（开发波次）** 划分并标注对应提交哈希。
 
@@ -11,6 +11,359 @@
 > Added / Changed / Fixed / Removed / Optimized / Refactored / Notes 分类追加）；**编译前先更新**。
 > 版本号只在用户明确说"更新版本号"时 bump（Patch = Bug 修复，Minor = 新功能）。
 > **本文件是开发流水账** —— 记"改了什么、为什么改、验证到哪一步、还欠什么"，不是给用户看的发布说明。
+
+---
+
+## [1.4.5-SNAPSHOT-fix5] — 2026-11-22 — 后端 P0/P1：MSPT 的估算值被当成实测值推送，以及状态谎报
+
+> 三条 bug 同一个根：**MSPT 这个量有三个来源（真实 tick 耗时 / avg-only API / TPS 反推），
+> 但只有前两个是"每 tick 的计算耗时"**。第三条量的是含服务器 sleep 的**墙钟间隔**，
+> 量级能差 5~10 倍；而代码里没有一个字段能表达"这个数不是实测的"，
+> 于是它一路流进告警、webhook、Prometheus，看起来与真实测量一模一样。
+> 另外两条失败路径只置哨兵不标 `unavailable`，让 `/ps status` 把"采集坏了"渲染成绿色「正常」。
+
+### Fixed — P0-U：MSPT 估算值（`1000/TPS`）当实测值推送
+
+**根因**：`collectMSPT_TPSFallback` 里 `1000.0 / tps1m` 算的是**含 sleep 的墙钟 tick 间隔**，
+不是 tick 的计算耗时。默认阈值下 `tps = 19.99` 反推出 `50.03ms`，恰好越过 critical 线 50ms；
+而一台只是轻微抖动的健康服，真实 tick 耗时通常 3~8ms。这个估算值在"TPS 本身还健康"的区间里
+**结构性必然误报**，且推送文案里没有任何标记。
+
+**已核实的标注缺口**：聊天 `/ps`、HTML/TXT 报告、JSON 报告（`mspt.source`）三处已有估算标记，
+**Prometheus 与告警正文/webhook 两处没有**。
+
+**改动**：
+
+1. `Alert` 新增 `estimated` 字段（+ `asEstimated(boolean)` 幂等副本工厂）。破例改 record 而不是
+   让展示层各判各的：五条渲染路径里已有四条各自拼了一次标记，第五条的漏拼正是本 bug。
+   统一进结构体之后，"哪条路径忘了"在结构上不再可能。
+2. `AlertCatalog.message()` 统一追加 `alert.msg.estimated`（" (估算)" / " (estimated)"），
+   新增中英 i18n 键；`AlertService.sameAlert` 把 `estimated` 纳入"是否同一次观测"。
+3. `MetricsCollector.collectMSPT` 用**本周期实际路径** `msptSource` 判定估算（不用静态能力位
+   ——一级 invoke 失败降级时静态位仍为 true），并 `.asEstimated(...)` 到告警上。
+4. `MetricsTextRenderer.tickDuration` 的 `perfscope_tick_duration_seconds` 新增
+   `source` 标签：`measured` / `tps_fallback`。**加新标签而不是改标签名或整行不输出**——
+   既有 Grafana 查询是 `perfscope_tick_duration_seconds{stat="avg"}` 这类子集选择器，加一维不影响；
+   改标签名或改名指标会直接打断所有现存面板与告警规则；整行不输出则让缺行与"采集挂了"不可区分，
+   `absent()` 类规则会永久 firing。HELP 文本同步写明 `tps_fallback` 是估算及其成因。
+   所有样本都带该标签（标签集合恒定），避免"边界序列有无"影响 `sum by` 的聚合行为。
+5. README / README-EN 的指标表同步标注新标签。
+
+**关于「是否该干脆不反推」的判断**：不取消，但它的值不值得信这件事必须显式化。
+取消反推的收益是"少一个不准的数"，代价是纯 Spigot 服（没有 `getTickTimes`/`getAverageTickTime`，
+反推是唯一路径）在 TPS 真的掉下去时**连估算都没有**——而那种时刻 `1000/TPS` 与真实计算耗时
+恰好开始接近（TPS 掉说明 tick 真的超时了），信息量并不为零。真正的问题是它被当成实测值，
+而不是它存在。所以采取"保留 + 结构化标记 + 全通道展示"，而不是删除。
+（附带说明：告警侧本轮未改动判定逻辑——估算值仍会按阈值触发 MSPT 告警，只是文案现在写明「(估算)」。
+若后续观测到估算告警仍在刷屏，下一步是把估算值排除在 `msptAlertLevel` 之外，
+但那会让"TPS 掉到 10 而 TPS 告警被关掉"的服完全没有信号，不宜在没有实测数据前先做。）
+
+### Fixed — P1-S3：MSPT 两条降级路径「置哨兵不标 unavailable」
+
+`/ps status` 的模块表按 `platformSkipped → disabledModules → warmingUp → unavailable` 顺序判定，
+而一级 `n==0` 与二级"返回 0/负数"两条路径三个集合都不写，于是渲染成绿色「正常」；
+同一屏上 `/ps` 的 MSPT 行却显示「未知」——**采集说没数、状态说没事**。
+
+- 一级 `collectMSPT_Paper`：`stats.hasSamples() == false` 时调 `markMsptCollectFailed`；
+- 二级 `collectMSPT_BukkitAvg`：新增纯函数 `sanitizeAvgTick(double)` 做有效性规约，
+  返回 0/负数/NaN/Inf 一律写 `-1` 并标 unavailable（原实现把 0 原样写下，
+  `/ps` 渲染绿色 `0.00ms`、报告写 `MSPT (avg): 0.00 ms`）；
+- 三级 `collectMSPT_TPSFallback`：**刻意不标**，理由写进方法 javadoc。三条路径的失败语义不同：
+  前两条是"本该采到却采到坏数据"=故障；本条是"服务端没有这个 API / 满 TPS 时公式按定义无意义"
+  =能力缺失。纯 Spigot 服上本条是唯一路径，标 unavailable 会让一台满 TPS 的健康服
+  永远显示「MSPT 采集失败」，把"这个端本来就不提供"谎报成"插件坏了"。且满 TPS 时
+  `msptAvg = -1` 已让 `msptAlertLevel` 返回 `NO_VERDICT`（第三道闸门），无需靠 unavailable 保护。
+- 新增 `markMsptCollectFailed`：只写 `unavailable`（+ 启动/重载 10 秒宽限期内同时写
+  `warmingUp`，Paper 启动后头一两轮 `getTickTimes()` 确实是空数组）。**不写 `disabledModules`**
+  ——那是"服主显式关掉"，采集失败不是他的选择，写错会让 status 显示「已禁用（config …=false）」。
+
+**「采集坏了却报已恢复」的风险核查**：方向恰好相反。`AlertService` 第 3 步把
+`module ∈ unavailable` 读作 `moduleDown`：不算干净周期、**不宣布恢复**，只累计无结论时长，
+超时转 unknown（`alert.log.module-down`）。标 unavailable 是把"消息消失"从"故障恢复"
+改判成"不知道"。已读 `ALERT_LEVEL_NO_VERDICT` 与 `moduleDown` 两条分支确认无回退路径。
+
+### Fixed — P2-S2：`msptAvg == 0` 被当真实读数发出
+
+按 `check-sentinels.mjs` 的 `SENTINEL_AND_ZERO_BOTH_BAD`（MSPT 的 0 不可信）把判据收紧：
+
+- `MetricsTextRenderer`：`raw < 0` → `!(raw > 0)`（顺带挡住 NaN）；
+- `ReportGenerator`：HTML 卡片与 TXT 报告的 `snap.msptAvg < 0` → `<= 0`（0 原本走 else 分支
+  印成 `0.00 ms` 的绿色"极快"）。
+
+### Added — 回归测试
+
+- `MsptDegradationMarkingTest`（11 例）：三条路径的失败形态逐条靶点用例 +
+  "反方向"断言（TPS 反推**不得**进 unavailable）+ 预热窗口内外两支 + 子集契约自检。
+- `MetricsTextRendererTest` 增 2 例：`tps_fallback` 标签必须出现且 HELP 说明其为估算；
+  0 必须整行不输出（含 HELP/TYPE 一并消失）。
+- `AlertCatalogTest` 增 4 例：估算标记出现在正文、实测无标记、标记中英都存在、`asEstimated` 幂等且不改其它字段。
+  顺带修掉本类的一个**测试缺陷**：`@BeforeAll` 原本用 `Messages.load(null)`，
+  该路径跳过模块合并，`AlertMessages` 里新增的键在这里永远"不存在"——估算标记静默不出现
+  而断言照样通过。改用 `AlertFixtures.initMessages()` 走真实注册路径。
+
+### Fixed — 绕过算子表的两处硬编码（与 P0-A 同类：第五份副本）
+
+P0-A 把 `ThresholdColors` 改成从 `ThresholdOperator` 派生之后，仍有**两处自己写比较**。
+它们的数值与算子表当时恰好一致，所以没有任何"看行为"的测试能发现——只有改表的那天才会露馅。
+
+- **`/ps entities` 的告警比较**（`PerfScopeCommand` 原 `if (alertEntities > criticalThreshold)`）：
+  用的是手写 `>`，与 `ENTITIES_GLOBAL` / `ENTITIES_WORLD` 当时的 STRICT 数值相同。
+  现在判定改调 `ThresholdOperator.Rule#levelOf`，本段只保留"取哪个阈值"（世界覆盖 or 全局）
+  与"取哪条规则"（有覆盖走 `ENTITIES_WORLD`，否则 `ENTITIES_GLOBAL`）。
+  抽出包级静态方法 `entityAlertLevel(...)` 以便直接驱动**合成规则**——
+  一条 `INCLUSIVE` 规则下"恰好等于阈值"必须越界；若实现又写回 `>`，边界那一格会翻。
+  **行为变更**：默认配置下逐点相同（都是 STRICT）；仅当算子表被改成闭区间时才跟随，
+  而这正是本次要保证的性质。
+- **HTML 报告趋势图 Y 轴标签**（`ReportGenerator` 原硬编码 `20.0/15.0/10.0/5.0/0.0`）：
+  那串数字只是刻度，却从没跟着 `tps.*_threshold` 走过——服主把 critical 改成 17 之后，
+  图上没有任何一处提到 17，柱子的**颜色**跟着 config 变而**刻度**不跟，等于对着错误的尺子看线。
+  取法（三种候选，选了第三种）：
+  1. 五档均分到 critical → 15 时变成 `15.0/11.25/7.5/3.75/0.0`，四个小数、三条无意义刻度；
+  2. 最大值固定 20 但把刻度换成阈值 → 刻度间距不等（20/18/15/10/5/0），柱子对不齐就失去线性关系；
+  3. **刻度固定为 20 的五等分（与旧版逐位相同）+ 阈值另画虚线参考线 + 一行图例标注数值与比较符**。
+  参考线位置 = `阈值/20*100`，与柱高 `tps/20*100` 同一把尺，所以"柱顶越过线"就等于"读数越界"；
+  改 config 时**线动、刻度不动**。比较符取自 `ThresholdOperator.TPS`（低值差严格 = `<`），
+  不在模板里再写一遍。越界阈值（合法上限 20.5 的 `20.2`）不画线（画在图顶会被读成"阈值就是 20"），
+  但图例文字照常给出真实数值。
+  新增 i18n 键 `report.html.chart.tps-critical` / `report.html.chart.tps-warn`。
+
+### 发现但**本次未修**的第三处同类旁路（如实记录，不是"已收口"）
+
+`grep` 全仓库「读数 `<比较符>` 名字带 threshold」后，除去算子表本身与诊断/配置两包的正当用法，
+还剩**一处**与本次修的两处完全同形的副本：
+
+- `alert/DailySummaryService.overThresholdMinutes` 的 `tps >= 0 && tps < threshold`
+  （日报的"TPS 低于 `tps.warning_threshold` 累计时长"）。
+
+**为什么没顺手改**：它要的是"单档越界"，而算子表暴露的是"落在哪一档"（`levelOf` 返回 0/1/2）。
+写成 `levelOf(tps, warn, critical) >= 1` 当前**确实等价**——因为 config 校验保证
+tps 的 `warning ≥ critical`——但那是**借另一条不变式间接成立**的：将来若有人放开那条校验，
+这个等价关系就断了，而断掉的方式是"日报少算/多算时长"，不会有任何报错。
+真正的修法是给算子表补一个公开的单档判定入口（`Rule` 现在只有 private 的 `trips`），
+那属于改动刚定稿的表结构，按要求**本轮不碰**，需单独一轮评估。
+已写进 `tools/check-threshold-operator.mjs` 的文件头（连同它不在门禁范围内的原因），
+避免下一个人重新扫一遍才发现。
+
+
+
+展示层（`command/ report/ export/ network/ util/`）不得再出现「读数 `<比较符>` 名字带 threshold 的标识符」，
+比较符只能来自算子表。**刻意不含** `diagnose/`（诊断门槛是另一个语义，例如
+`heapUsagePercent < memory_heapWarningThreshold` 是"低于这条线不必查泄漏"的保密判据）、
+`metrics/`（算子表本身）、`config/`（阈值与阈值比）。
+说清它**抓不到**什么：写死的数值刻度（无标识符可比，只能靠测试锁）、
+名字不带 threshold 的变量（放宽会撞上 `report/` 里几十处百分比/像素运算，噪音一起就没人看）、
+以及倒置写法（当前代码库无此风格）。
+因为干净树上命中 **0 处**，"PASS"可能只是模式腐坏的假绿，所以另有 `--selftest`：
+4 条修前形状必须报、8 条邻近合法形状必须不报、5 条包范围断言。两个步骤都接进 `local-gate.ps1`。
+（写自检时它先抓到了自己的一个错误样本——把 `diagnose/` 的写法当成"必须不报"，
+而包过滤在形状匹配之外；于是把两者拆成独立断言。这恰好是自检存在的理由。）
+
+### Added — 回归测试
+
+- `EntityAlertLevelTest`（5 例）：默认规则四点表、**合成 `INCLUSIVE` 规则**必须命中边界（核心靶点）、
+  世界覆盖阈值必须用覆盖值、`null` 不告警、接线检查（源码里不许再出现 `alertEntities > …Threshold`）。
+  变异实测：把实现改回 `alertEntities > criticalThreshold ? 2 : …`，2 例变红。
+- `ReportTrendAxisTest`（8 例）：默认刻度逐位等于旧值、**改 config 后刻度不动**、
+  参考线必须随 config 移动（75%/90% → 85%/95%）、图例数值与比较符、越界阈值不画线但保留文字、
+  刻度算法边界与非法入参。变异实测：把刻度分母换成 15，3 例变红。
+
+全量 `mvn -B -ntp test`：863 例，0 失败（7 skip 为既有平台相关）。
+`check-sentinels.mjs` / `check-docs.mjs` / `check-velocity-thresholds.mjs` / `check-i18n.mjs` 均 PASS，
+新增 `check-threshold-operator.mjs`（含 `--selftest`）PASS。
+
+---
+
+## [1.4.5-SNAPSHOT-fix4] — 2026-11-22 — 后端三个 P0：把合法的 0 当缺失、显示层与告警差一档
+
+> 前两处是同一类错的两种长相：**把合法的 0 当成缺失**——前者把事故藏起来，
+> 后者把故障伪装成健康（改动落在 `PerfScopeCommand.java`，见
+> `tools/check-sentinels.mjs` 的 `NO_SENTINEL_FIELDS` 与本轮新增的回归测试
+> `src/test/java/cn/perfscope/command/WorldMetricUnavailableTest.java`）。
+> 第三处是另一类：**同一条阈值在两个地方各写一遍比较符**，边界值上差一整档
+> （见本节最后两条）。
+
+### Fixed — P0-S1：`/ps` 趋势条把冻结的 TPS 0 画成灰色 "?"
+
+`showTPS` 的趋势循环判的是 `unavailable.contains(MODULE_TPS) || tps <= 0`。但 `tps1m`
+**没有 -1 哨兵**（采集层直接写 `Bukkit.getTPS()`），`0` 是服务器完全冻结时的真实读数。
+后果是同一屏自相矛盾：TPS 行（`formatTpsComponent(0)` → 红色 `0.0`）、告警层、导出报告
+全部判 critical，**唯独趋势条把那一个 0 画成灰色问号**——最该被看见的读数在趋势里变成了
+"没数据"，恰好把事故现场抹掉。
+
+修法：判据拆成两支，只有模块不可用才画 `?`；真实 0 走 `tpsTrendBucket` 正常分档
+（`levelOf(TPS, 0)` → CRITICAL → 桶 0 → `!`），与报告层 HTML 趋势柱
+（`ReportGenerator` 只在 `MODULE_TPS` 不可用时画灰矮柱）同口径。
+`tpsTrendBucket` 本身无需改动——它已把 `<= 0` 归 0 档并有测试钉住
+（`ThresholdColorsTest#tpsTrendBucketMapping`）。
+
+### Fixed — P0-T：`/ps` 逐世界段与 `/ps world` 的假 0
+
+三处：
+- `showAll` 的逐世界循环：四个字段无条件 `getOrDefault(name, 0)`，且实体 0 会被
+  `ThresholdColors` 判 GOOD **染成绿色**——"实体模块采集失败"在屏幕上表现为
+  "这个世界的实体数很健康"；
+- `showWorld` 整个方法**完全不查 `unavailable`**，四处 `getOrDefault(..., 0)`；
+- 同屏上方的实体总计行已经打「不可用」却不 return，于是"上一行不可用、下一行实体 0"。
+
+修法：抽出纯函数 `worldMetricOrUnavailable(unavailable, module, byWorld, worldName)`
+（模块不可用 → `null`，调用方渲染「不可用」/「预热中」），每列按**所属模块**独立判，
+与报告层 `ReportGenerator#htmlCell(unavailable, value)` 同构。实体总计行保留"不 return"
+并写明理由（下方还有区块/TE/内存等独立模块，不能一起吞掉）。
+`showWorld` 的世界内玩家数是实时查的、不是快照字段，未改动。
+
+### Added — 回归测试
+
+`WorldMetricUnavailableTest`（12 例）：两个 P0 各一条靶点用例（TPS 0 必须是 `!`；
+模块不可用必须返回 `null` 而非 0）、"各列独立判模块"用例、以及两条**接线检查**
+（防止纯函数写对了但调用点改回裸 `getOrDefault`）。变异验证：把判据改回
+`|| tps <= 0` 杀 3 例、把"不可用返回 null"改回返回 0 杀 2 例，均 BUILD FAILURE。
+
+### Fixed — P0：显示层颜色与告警层级别差一整档（`ThresholdColors` 改为从算子表派生）
+
+`ThresholdColors.levelOf` 自己写闭区间（TPS `<=`、其余 `>=`），而采集层走
+`ThresholdOperator` 的算子表（TPS/MSPT/实体/区块严格比较）。当时的说法是"有意的早预警"：
+读数恰好等于阈值时颜色先变、告警随后到达。**但它不是早一格，是差一整档**——
+`tps1m == 15.00`（默认 critical 阈值）时展示层判 `CRITICAL`（红），采集层因为
+`15.00 < 15.00` 不成立只判 `WARNING`（黄）。`ThresholdColors` 类注释自己承认
+"是唯一差两档的"，而 README 承诺的只是"随后到达"——README 把这件事说小了。
+
+修法：`ThresholdColors` 不再自己写比较符，每个指标都调 `ThresholdOperator` 的规则
+（`Rule#levelOf` / `SingleTier#trips`）。本类只剩三件自己的事：数值哨兵、按世界取哪组阈值、
+档位 → 颜色/CSS。
+
+**行为变更（会对可见输出造成变化，非纯重构）**：读数恰好等于阈值时颜色不再提前变。
+`entities = 20000` 从"已变黄"改为"仍绿"、`tps = 18.0` 从"已变黄"改为"仍绿"、
+`tps = 15.0` 从"已红"改为"变黄"（与告警的 WARNING 同级）；`mspt = 50`、`chunks = 15000`
+同理从红降为黄。MEMORY / PLAYERS 不受影响（两档本来就是闭区间）。趋势字符
+（`tpsTrendBucket`）随 `levelOf` 一起移动，18.0 不再提前变成 `":"`。
+README.md / README-EN.md 的"彩色 UI 面板"那一条已改成事实描述。
+
+### Changed — CPU 进入线收进算子表（第五族，不是例外）
+
+`ThresholdColors` 有 CPU 分支，`ThresholdOperator` 原本没有对应规则（CPU 走
+`MetricsCollector.latched` 的迟滞状态机，没有 critical 档）。硬塞进两档的 `Rule` 会留下
+一个永远走不到的 critical 档，所以新增 `SingleTier`（方向 + 闭合性，只有一档）：
+`CPU_PROCESS` / `CPU_SYSTEM` 都是高值差、严格 `>`。于是**三处同源**——
+告警文案的 `CPU_ENTRY_SYMBOL`、`latched` 的进入判据、展示层的颜色，全部从同一条规则派生
+（此前模板、`latched`、`ThresholdColors` 各写一个 `>`）。CPU 仍只到 WARN（config 无 critical 键）。
+
+`ThresholdColors` 类注释的"四族差异"改成五族表，逐族写明"恰好等于阈值时是什么"。
+
+### Changed — 测试：从"记录差异"改成"禁止差异"
+
+`ThresholdBoundaryAsymmetryTest` 原职责是**钉住差异**（早预警语义），现在反过来：
+`displayAndCollectorNeverDisagreeAtTheBoundary` 对六条规则各取九个边界读数
+（阈值±0.01/±1、阈值本身、远离值），要求两层的档位**逐点相同**，差异集合必须为空
+（失败时打印整个不一致清单而不是第一条）。另配三条互补断言，防止"两层一致地都错"：
+严格族恰好等于阈值不越界、闭区间族恰好等于阈值越界、世界覆盖只换阈值不换算子。
+
+**allow-list 是空的**，并且原因写进了测试：唯一看似该进 allow-list 的候选是 CPU
+（闩锁有记忆、颜色没有），但差异只在"是否存在记忆"，不在边界位置——`80.00%` 两边都不越界、
+`80.01%` 两边都越界，所以它不是差异，不需要豁免（`cpuColourUsesTheSameEntryLineAsTheLatch`
+把这条写成了可失败的断言）。
+
+`ThresholdColorsTest` / `ReportCardLevelTest` / `ThresholdOperatorBehaviorTest` 的边界期望
+按新口径更新；`ThresholdOperatorBehaviorTest` 增 `cpuEntryLinesAreRecordedAsSingleTierRules`。
+全量 `mvn -B -ntp test`：832 例，0 失败（7 skip 为既有平台相关）。
+
+### Fixed — 代理侧（PerfScope-Velocity）：闭合性反转成新的分裂源，已改回严格
+
+上一节把后端展示层从闭区间改成严格比较之后，代理侧那份**闭区间立刻变成新的分裂点**——
+它与 fix3 修的方向正好相反：`tps = 15.00` 后端口令为 WARN（黄）、代理仍是 CRITICAL（红），
+`tps = 18.00` 后端 GOOD（绿）、代理 WARN（黄）。也就是 fix3 想消灭的
+「同一份数据两个面板颜色不同」重新出现了，只是换了方向。
+
+**为什么改代理而不是改后端算子表**：算子表是告警行为源。把 `entities` 改成闭区间会让
+「恰好 30000 个实体」的一批服务器突然开始报 critical（`config.yml` 明写 20000/30000 是
+"上界留余量"取的整数），那是远超阈值口径修复范围的生产行为变更，还会推翻
+`ThresholdOperatorBehaviorTest` 的四点表与 M39/M48/M54–M57 五条变异。代理是只读聚合面板、
+阈值硬编码、改动面小。已在代理仓库 `1.4.5-SNAPSHOT-fix4` 段记录。
+
+### Added — 门禁：`tools/check-velocity-thresholds.mjs`
+
+这一族问题已经连续错了两轮（fix3 对齐到错误的参照物、fix4 把两侧改反），而**两侧各自的测试
+永远发现不了**——每个仓库只断言"我这里是多少"，没有任何东西同时看两边。所以加一条跨仓库门禁：
+
+- 真值是后端 `ThresholdOperator` 里的 `new Rule(...)`（读 `Direction` 与 `Comparison`）；
+- 被检方是代理 `NetworkRenderer.tpsCell` / `msptCell` 里**实际写的比较符**；
+- 两者不匹配即 FAIL，失败信息直接说出"恰好等于阈值的那个点会一边黄一边红"。
+
+刻意**不比阈值数值**：数值漂移是已知且 README 有写的（改后端配置需手动同步），
+闭合性漂移是无声的、破坏"颜色变了就等于告警已触发"这个承诺的。
+
+接入 `local-gate.ps1` 的 L1（代理仓库不在兄弟目录时降为 advisory，避免只 clone 后端时误红）。
+实测两个方向都能抓到：把代理的 `tps <` 改回 `<=` → FAIL；把后端的 `tps` 改成 `INCLUSIVE` → FAIL。
+
+### Fixed — P0-E：`network` 登记失败仍打「已启用」
+
+`SummaryPublisher.register()` 是 `void`，内部 `catch` 吞掉异常后<b>正常返回</b>；
+`PerfScope#startNetworkPush` 紧接着<b>无条件</b>打一条 info「跨服摘要已启用」。
+控制台的形态是：上一条 warning「登记跨服通道失败」，紧跟着 info「跨服摘要已启用：通道
+perfscope:summary，间隔 N 秒」——两条相邻，后一条更像结论，管理员会以为功能在跑，
+实际代理侧永远收不到任何数据。这与"空服所以代理侧没数据"在界面上完全无法区分。
+
+修法：`register()` 改为返回 `boolean`（`true` = 已登记；`false` = 抛过异常），
+失败原因留档到新增的 `registrationFailureReason()`；调用方按结果选日志——
+成功才打「已启用」，失败打「未启用：通道登记失败（原因见上一条 warning，
+/perfscope status 也会显示）」。`register()` 内部的 warning 保留（它是原因的第一现场）。
+不动 `shouldSend` / `buildReport` 的发送逻辑。
+
+### Fixed — P0-F：三个可选出口在 `/status` 里完全隐身
+
+修前 `PerfScopeCommand` 里 grep `prometheus|network` 命中 **0** 次；
+`PrometheusEndpoint.failureReason()` 与 `SummaryPublisher.channelRegistered()` 除定义处
+**零调用点**，而两者的 javadoc 都写着"给 /perfscope status 用"。
+`PrometheusEndpointHttpTest` 甚至有一条断言的注释写着 "failureReason() is what /status shows"
+——测试在为一个不存在的接线背书。三个出口失败后唯一的痕迹是启动那一瞬间的 warning，
+滚出控制台就再也查不到；而它们的失败形态全是"看起来没问题"（抓取方连不上 / 代理侧显示无数据 /
+本来没人看遥测）。
+
+修法：`/perfscope status` 末尾新增「--- 可选出口 ---」段，逐行给出
+
+| 出口 | 三态 |
+|---|---|
+| Prometheus | 未启用（`prometheus.enabled=false`）/ 已启动（地址 + 是否需鉴权）/ 启动失败（原因） |
+| network | 未启用（`network.enabled=false`）/ 已登记（通道名）/ 登记失败（原因） |
+| bStats | 已启用 / 已禁用（`general.bstats-enabled=false`）/ 已禁用（pluginId 未配置）/ 初始化失败（原因） |
+
+状态取自各模块的访问器；bStats 原本只有一个私有 `Metrics` 句柄（null 只能回答"没在发"，
+回答不了"为什么"），因此新增 `BstatsState` 状态位、`bstatsFailureReason` 与两个 getter，
+在 `startBstats()` 的四个出口各写一次状态。判定抽成纯函数
+`PerfScopeCommand#exportHealth(configured, running)`：**只要"配置说启用"而"实际没在工作"
+就是 FAILED**，不因"没记到原因"降级成 OFF——那正是 P0-E 的形状（配置 enabled、实际发不出数据，
+界面却说"未启用"，读者会以为是自己没开）。失败行下面补一条处理建议（端口 / 查控制台）。
+
+i18n：新增 21 个 `cmd.status.export.*` 键（中英对齐），`check-i18n --strict` PASS。
+
+### Fixed — 隐私开关失效：`general.bstats-enabled` 不在 `reload()` 的重建范围内
+
+`reload()` 重建了 Prometheus / network / webhook / 日报，**唯独漏了 bStats**——遥测句柄只在
+`onEnable` 里创建。于是服主把 `general.bstats-enabled` 改成 `false` 再 `/perfscope reload`，
+遥测会继续发到下次重启为止。开关的字面意思（也是 README「数据披露」写的）是"关掉就不发"，
+实际语义变成"下次重启才关"，且没有任何提示。
+
+修法：新增 `reloadBstats()`，在 `reload()` 里 `startNetworkPush()` 之后调用。
+四象限抽成纯函数 `bstatsReloadAction(wanted, running)`：开→无句柄 = START、开→有句柄 = KEEP
+（不无谓重建：每次重建都会重读一次 `plugins/bStats/config.yml` 并换一个提交线程）、
+关→有句柄 = STOP（并打一条 `core.bstats.reload-stopped` 回执，明确"已经停了"）、
+关→无句柄 = REFRESH_STATE（只同步状态位，不打假回执）。
+关闭方向<b>真的停</b>而不是只提示"需重启"：这是唯一一个一旦被违反就构成隐私问题的开关。
+
+### Added — 回归测试
+
+`StatusExportsTest`（6 例）：`exportHealth` 三态（含靶点"配置启用却不在工作必须报 FAILED"）、
+`showStatus` 真的调 `showExports`、三个出口的访问器真的被读、`register()` 是 boolean 且调用方
+分支判断、`reload()` 真的调 `reloadBstats()`。
+`PerfScopeBstatsReloadTest`（5 例）：四象限各有断言 + "四格互不相同"自检
+（防止将来合并枚举让四条用例全部假绿）。
+
+变异验证（真改生产代码再跑，逐个确认变红）：① `if (summaryPublisher.register())` 改回裸调用
+→ KILLED；② `exportHealth` 的 FAILED 改成 OFF → KILLED；③ `bstatsReloadAction` 无条件返回
+REFRESH_STATE → KILLED（2 例）。
+
+全量 `mvn -B -ntp test`：849 例（含本轮新增的 11 例），0 失败（7 skip 为既有平台相关）。
+`check-i18n --strict` PASS（811 键）、`check-docs` / `check-readme-version` /
+`check-reload-rebuild` / `check-sentinels` / `check-config-compat` / `check-bstats-buckets` PASS。
 
 ---
 

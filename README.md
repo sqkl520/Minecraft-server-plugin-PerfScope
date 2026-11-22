@@ -49,7 +49,7 @@
 - **服务器运行信息** —— uptime/线程数/已加载插件数/已加载世界数/JVM 版本
 - **高度自定义配置** —— 所有模块的告警阈值均可配置
 - **ActionBar 实时监测** —— `/perfscope monitor` 切换，每秒刷新核心指标到 ActionBar（动作栏，屏幕底部物品栏上方）。定位为**诊断探针**：排查卡顿或事故处置时开启几十秒观察实时波动，看完即关；并非设计为 7×24 常驻监测面板
-- **性能报告导出** —— 支持 HTML/TXT/JSON 三种格式，HTML 报告含 TPS 趋势图、实体分布表、内存进度条、告警高亮。报告头同时给出「生成时间」与「数据采集时间」；采集已停摆时（超过 3 倍采集周期没有新快照）页头会出现红色告警横幅，JSON 则给出 `stale` 段，便于区分「数字冻住了」与「服务器健康」
+- **性能报告导出** —— 支持 HTML/TXT/JSON 三种格式，HTML 报告含 TPS 趋势图、实体分布表、内存进度条、告警高亮。TPS 趋势图的纵轴固定为 0–20（TPS 物理上限，五等分刻度），两条阈值线按 `tps.warning_threshold` / `tps.critical_threshold` 画在对应高度并标注数值与比较符——柱子顶端越过哪条线就等于该读数已经进入那一档，改配置后线随阈值移动、刻度不动。报告头同时给出「生成时间」与「数据采集时间」；采集已停摆时（超过 3 倍采集周期没有新快照）页头会出现红色告警横幅，JSON 则给出 `stale` 段，便于区分「数字冻住了」与「服务器健康」
 - **自动报告生成** —— 可配置间隔，异步生成不阻塞主线程，旧报告自动按保留天数清理
 - **按世界独立告警** —— 各世界可覆盖实体告警阈值
 - **阈值告警主动推送**（v1.1 新增，v1.2 收敛） —— 告警触发时推送控制台 + 在线持有 `perfscope.alert` 权限的玩家；默认需连续 3 个采集周期超标才首次推送（防抖，可配）；同一告警默认 300 秒冷却防刷屏；级别升级（警告→严重）只推一条"（级别升级）"消息、不受冷却限制；故障恢复时发送恢复通知；可在 `config.yml` 的 `alerts` 段配置
@@ -64,7 +64,7 @@
 - **热点区块定位**（v1.2 新增） —— `/perfscope hotspot` 列出全服实体密度 Top3 区块与坐标（含主导类型占比），把"实体多"下钻到"去哪个坐标看看"；坐标可点击复制
 - **Prometheus 指标端点**（v1.4 新增） —— 零第三方依赖的 `/metrics` 文本端点，把指标接进已有的监控栈（Prometheus 抓取 → Grafana 看板）。除 TPS/MSPT/内存/实体/区块外，还导出本插件独有的可信度信号（快照年龄、采集降级、模块可用性、逐告警状态），用于区分"服务端死了"与"指标冻住了"。默认只听 `127.0.0.1:8940`。见下方「接入 Prometheus / Grafana」
 - **群组服一屏看全网**（v1.4.5 新增，需另装代理侧插件） —— 各后端把一份极小摘要推给 Velocity 代理，由独立的 [`PerfScope-Velocity`](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope-Velocity) 用 `/pscope network` 显示全部后端的 TPS / MSPT / 在线数，并区分「正常 / 数据过期 / 采集已停 / 无数据」四种状态。默认关闭，见下方「跨服摘要（群组服）」
-- **彩色 UI 面板** —— 使用 Paper Adventure API 渲染，关键指标按 `config.yml` 告警阈值分级着色（绿/黄/红）；阈值来源与告警**同配置、同判定入口**，改配置 reload 后颜色立即跟随。注意：显示用闭区间（达到阈值即变色），部分指标告警用严格大于，因此**恰好等于阈值的那一瞬颜色会先变、告警随后到达**（有意的早预警语义）
+- **彩色 UI 面板** —— 使用 Paper Adventure API 渲染，关键指标按 `config.yml` 告警阈值分级着色（绿/黄/红）；阈值来源与告警**同配置、同判定入口**，改配置 reload 后颜色立即跟随。比较符也**只有一处定义**：TPS / MSPT / 实体 / 区块 / CPU 用严格比较（读数恰好等于阈值时**不变色**，越过才变色），内存与玩家占比用闭区间（达到阈值即变色）。因此"颜色变了"永远等于"告警已经触发"，不存在两边相差一档的情况
 
 ## 🎯 目标平台与兼容性
 
@@ -121,7 +121,7 @@ PerfScope 自 v1.1 起专注 **Paper 系**服务端，深度依赖 Paper 原生 
 | `/perfscope gc` | GC 统计（各收集器详情） |
 | `/perfscope report [格式]` | 导出性能报告（html/txt/json） |
 | `/perfscope monitor` | 切换 ActionBar 实时监测（采集停摆时改为提示"已 N 无数据"而不是继续显示旧数值） |
-| `/perfscope status` | 插件自身状态（采集是否存活/模块三态/历史/告警/**采集耗时分布**）。最近的采集异常只显示脱敏摘要（异常类型 + 首句，绝对路径替换为 `<path>`），完整原文在控制台日志 |
+| `/perfscope status` | 插件自身状态（采集是否存活/模块三态/历史/告警/**采集耗时分布**/**可选出口**）。最近的采集异常只显示脱敏摘要（异常类型 + 首句，绝对路径替换为 `<path>`），完整原文在控制台日志。末尾的「可选出口」段给出 Prometheus / 跨服摘要 / bStats 三个出口各自的当前状态（未启用 / 已启动 / 启动失败 + 原因），失败时附处理建议 |
 | `/perfscope alerts [N]` | 告警历史（最近 N 条，默认 20，上限 500）。每条给出时刻、事件类型（`open` / `upgrade` / `downgrade` / `resolve` / `refire` / `restore` / `suspend` / `resolved_by_disable`）、告警键与描述，末行汇总条数 / 当前活跃 / 挂起 |
 | `/perfscope webhook [status\|test]` | Webhook 自检（v1.4，需 `perfscope.admin` 或 `perfscope.reload`）。`status` 展示通道类型、是否加签、最近一次投递结果、被限流丢弃的条数；`test` 真发一条探测消息并回报平台判定结果。见下方「Webhook 自检」 |
 | `/perfscope reload` | 重载配置文件 |
@@ -199,7 +199,7 @@ GC: 42 次 / 5.23 秒
 >
 > **B 层 — 本插件自定义图表（已分档）**：服务端软件类型、启用模块组合、界面语言、实体数/加载区块数/峰值玩家数/堆上限的**量级档位**、世界数量、已安装插件数量、webhook 通道类型。
 >
-> **两层都不会上传**：玩家名、世界名、坐标、聊天内容、插件列表、配置文件内容、告警文本、服务器地址。可在 `plugins/bStats/config.yml` 或本插件 config.yml 的 `general.bstats-enabled: false` 关闭。
+> **两层都不会上传**：玩家名、世界名、坐标、聊天内容、插件列表、配置文件内容、告警文本、服务器地址。可在 `plugins/bStats/config.yml` 或本插件 config.yml 的 `general.bstats-enabled: false` 关闭。改完 `general.bstats-enabled: false` 后执行 `/perfscope reload` **立即停止上报**，不必重启——`/perfscope status` 的「可选出口」段会显示 bStats 当前是已启用还是已禁用。
 
 ## 升级注意（1.3.0 → 1.4.0；1.4.x 之间升级无需任何改动）
 
@@ -450,7 +450,7 @@ scrape_configs:
 | `perfscope_module_available{module}` | 11 个采集模块各自是否可用——曲线断了先看这里 |
 | `perfscope_alerts_active` / `perfscope_alerts_suspended` | 告警状态机的当前状态 |
 | `perfscope_alert{key,module}` | 逐告警状态：`0` = 健康、`1` = warning、`2` = critical。详见下方 |
-| `perfscope_tps{period}` / `perfscope_tick_duration_seconds{stat}` | 注意单位：tick 时长是**秒**，Grafana 里乘 1000 显示为 MSPT |
+| `perfscope_tps{period}` / `perfscope_tick_duration_seconds{stat,source}` | 注意单位：tick 时长是**秒**，Grafana 里乘 1000 显示为 MSPT。`source="measured"` 是真实测量；`source="tps_fallback"` 是**估算**（由 `1000/TPS` 反推的墙钟 tick 间隔，含服务器 sleep，不是 tick 的计算耗时），只在服务端没有真实 MSPT API 时出现 |
 
 #### `perfscope_alert` 的三条反直觉设计
 
