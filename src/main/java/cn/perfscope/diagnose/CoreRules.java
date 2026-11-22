@@ -488,9 +488,10 @@ public final class CoreRules {
      * <ol>
      *   <li>{@code MetricsCollector.collectMSPT}：{@code snap.msptAvg > cfg.mspt_criticalThreshold}
      *       → 发 critical <b>告警</b>（默认 50ms）；</li>
-     *   <li>{@code ThresholdColors.levelOf(MSPT, …)}：{@code value >= cfg.mspt_criticalThreshold}
-     *       → 染红（命令层/报告层）。与 ① 只差等号归属（{@code >} vs {@code >=}），
-     *       同一个配置源，可视为同口径；</li>
+     *   <li>{@code ThresholdColors.levelOf(MSPT, …)}：调 {@code ThresholdOperator.MSPT}，
+     *       即 {@code value > cfg.mspt_criticalThreshold} → 染红（命令层/报告层）。
+     *       与 ① 同一个算子表出口，逐点相同（曾经这里是 {@code >=}，边界值上比告警早一档，
+     *       那正是 {@code ThresholdBoundaryAsymmetryTest} 现在禁止的差异）；</li>
      *   <li>本规则：{@code snap.msptMax > 1000.0}（硬编码），量的是<b>峰值</b>。</li>
      * </ol>
      * <p>①② 与 ③ 量的是<b>不同的东西</b>——均值负载 vs 单拍冻结。这个区分是真实的，不该抹平：

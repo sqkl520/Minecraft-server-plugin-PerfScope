@@ -1756,6 +1756,27 @@ public class MetricsCollector {
      * ② getAverageTickTime()（Paper/Bukkit 平均 tick API，**不是估算**，数据真实只是无 min/max）→
      * ③ TPS 反推（唯一"估算"级：满 TPS 时语义不可用，置 -1 哨兵）。
      * 展示层的"(估算)"标签口径应以 ①||② 为"精确"，仅 ③ 为估算。
+     *
+     * <h2>P0-U / P1-S3（本次修复）：三条路径分别"报什么"</h2>
+     *
+     * <p>此前三条路径的失败态全部<b>静默</b>：值置 {@code -1} 就完了，模块不进 {@code unavailable}，
+     * 于是 <code>/ps status</code> 的模块表按 {@code platformSkipped → disabledModules → warmingUp
+     * → unavailable} 一路落空，渲染成绿色「正常」，而 <code>/ps</code> 的 MSPT 行同时显示「未知」。
+     * 同一屏上<b>采集说没数、状态说没事</b>。现在逐条定口径：</p>
+     * <ul>
+     *   <li><b>① n==0</b>（数组空/全零：Paper 上有这个 API 却一个有效 tick 都没采到）→
+     *       <b>标 unavailable</b>。这是真的采集失败，服主需要知道；</li>
+     *   <li><b>② 返回 0/负数</b>（invoke 成功但 API 给出物理上不可能的值）→ 写 {@code -1} 并
+     *       <b>标 unavailable</b>。原实现把 0 原样写进快照，"没测到"被渲染成"tick 几乎不耗时"；</li>
+     *   <li><b>③ TPS 反推</b> → <b>刻意不标 unavailable</b>，理由见
+     *       {@link #collectMSPT_TPSFallback}。</li>
+     * </ul>
+     *
+     * <p><b>标 unavailable 会不会引入「采集坏了却报已恢复」？</b>不会，方向恰好相反。
+     * 告警层在 {@code AlertService} 第 3 步把 {@code module ∈ unavailable} 读作 {@code moduleDown}：
+     * 它<b>不算干净周期</b>、不宣布恢复，只累计"无结论时长"，超时后转入 unknown（见
+     * {@code alert.log.module-down}）。也就是说标 unavailable 是把"消息消失"从"故障恢复"
+     * 改判成"不知道"，这正是本项目要的方向。</p>
      */
     private void collectMSPT(MetricsSnapshot snap, ConfigManager.ConfigData cfg) {
         // 9A-1：先问"数据是否可信"，而不是"方法是否存在"。
@@ -1786,6 +1807,13 @@ public class MetricsCollector {
             collectMSPT_TPSFallback(snap);
         }
 
+        // P0-U：msptSource 是**本周期实际走的路径**（不是静态能力位），估算标记以它为准——
+        // 一级 invoke 失败降级时静态位仍为 true，用能力位判断会把真实路径的估算值当成精确值。
+        //
+        // 为什么这一条必须在这里算、而不是在三条路径里各写一遍：三条路径最终都汇到下面同一处
+        // 告警生成点，标记若跟着路径走，就会在"一级降级到三级"这类组合上漏掉（正是本 bug 的成因）。
+        boolean estimated = snap.msptSource == MetricsSnapshot.MSPT_SOURCE_TPS_FALLBACK;
+
         // v1.4：msptAvg <= 0 是「未采集」哨兵（TPS 反推路径无 MSPT），此时该维度不可判定。
         // v1.6：**必须显式写 ALERT_LEVEL_NO_VERDICT**，而不是让键缺席 ——
         // 缺席在告警层还有第二种含义（该维度本周期不适用，例如世界已卸载），告警据此正常恢复。
@@ -1795,10 +1823,12 @@ public class MetricsCollector {
         String key = ThresholdOperator.MSPT.key();
         if (level == 2) {
             addAlert(snap, Alert.measuredWithThresholds(key, Alert.LEVEL_CRITICAL, snap.msptAvg,
-                    cfg.mspt_criticalThreshold, cfg.mspt_criticalThreshold, MetricsSnapshot.MODULE_MSPT, snap.timestamp));
+                    cfg.mspt_criticalThreshold, cfg.mspt_criticalThreshold, MetricsSnapshot.MODULE_MSPT, snap.timestamp)
+                .asEstimated(estimated));
         } else if (level == 1) {
             addAlert(snap, Alert.measuredWithThresholds(key, Alert.LEVEL_WARNING, snap.msptAvg,
-                    cfg.mspt_warningThreshold, cfg.mspt_warningThreshold, MetricsSnapshot.MODULE_MSPT, snap.timestamp));
+                    cfg.mspt_warningThreshold, cfg.mspt_warningThreshold, MetricsSnapshot.MODULE_MSPT, snap.timestamp)
+                .asEstimated(estimated));
         }
         recordLevel(snap, key, level);
     }
@@ -1837,6 +1867,12 @@ public class MetricsCollector {
      * 边界（P0-13 哨兵语义）：空数组或全为非正值（尚无有效 tick 采样/未填充槽位）→ 三值置 -1"未知"，
      * 不做除零也不输出误导性 0；单元素 ≤0 按无效采样跳过，避免未填充槽位拉低 min/avg。
      * 一级 invoke 失败降级到第二级 getAverageTickTime（非估算），二级再失败才落 TPS 反推。
+     *
+     * <p><b>P1-S3：为什么 n==0 要标 unavailable</b>——旧实现只把三个值置 {@code -1} 就返回，
+     * 模块不进 {@code unavailable}，于是 {@code /ps status} 的模块表显示绿色「正常」，
+     * 而 {@code /ps} 的 MSPT 行显示「未知」。同一屏上"采集说没数、状态说没事"。
+     * 现在标 unavailable，状态表如实变红（或在前 10 秒内显示「预热中」，见
+     * {@link #markMsptCollectFailed}）。</p>
      */
     private void collectMSPT_Paper(MetricsSnapshot snap) {
         try {
@@ -1848,6 +1884,10 @@ public class MetricsCollector {
             snap.msptMax = stats.maxMs();
             if (stats.hasSamples()) {
                 snap.msptSource = MetricsSnapshot.MSPT_SOURCE_TICK_TIMES;
+            } else {
+                // 方法在、调用成功、但一个有效 tick 都没采到 —— 这是"采集失败"，不是"读数为 0"。
+                // msptSource 保持 UNKNOWN，使展示层不会把它当成任何"精确/估算"路径。
+                markMsptCollectFailed(snap);
             }
         } catch (Exception e) {
             collectMSPT_BukkitAvg(snap);
@@ -1934,6 +1974,13 @@ public class MetricsCollector {
      * Paper: getAverageTickTime() 获取平均 MSPT（反射方法已在构造时缓存）。
      * 9A-0：该路径只有平均值，**没有** min/max——两者置 -1 哨兵（展示层渲染"未采集"），
      * 绝不把平均值复制给 min/max 伪造极值区间。
+     *
+     * <p><b>P1-S3：invoke 成功但返回 0/负数怎么办</b>——旧实现把这个值原样写进快照，
+     * 于是"API 给出了物理上不可能的读数"被当成"tick 几乎不耗时"：{@code /ps} 会渲染
+     * 绿色的 {@code 0.00ms}，报告里写 {@code MSPT (avg): 0.00 ms}。而每 tick 至少花掉
+     * 可测量的时间（见 {@code check-sentinels.mjs} 的 {@code SENTINEL_AND_ZERO_BOTH_BAD}）。
+     * 现改为：非正值一律写 {@code -1} 哨兵并标 {@code unavailable}——与一级 {@code n==0}
+     * 同一处置，因为它们同属"采集拿到了无效数据"，而不是"没有这个方法"。</p>
      */
     private void collectMSPT_BukkitAvg(MetricsSnapshot snap) {
         if (avgTickMethod == null) {
@@ -1943,16 +1990,62 @@ public class MetricsCollector {
         try {
             Object server = Bukkit.getServer();
             double mspt = ((Number) avgTickMethod.invoke(server)).doubleValue();
-            snap.msptAvg = round2(mspt);
             snap.msptMin = -1;
             snap.msptMax = -1;
-            snap.msptSource = MetricsSnapshot.MSPT_SOURCE_AVG_TICK;
+            snap.msptSource = MetricsSnapshot.MSPT_SOURCE_AVG_TICK;  // 路径确实是二级，坏的是数据
+            snap.msptAvg = sanitizeAvgTick(mspt);
+            if (snap.msptAvg <= 0) {
+                markMsptCollectFailed(snap);
+            }
         } catch (Exception e) {
             collectMSPT_TPSFallback(snap);
         }
     }
 
-    /** Bukkit: 通过 TPS 反推近似 MSPT（满 TPS 时语义"估算不可用"，置 -1 而非 0） */
+    /**
+     * {@code getAverageTickTime()} 返回值的规约内核：可信则舍入，不可信则 {@code -1} 哨兵。
+     *
+     * <p><b>为什么抽成纯函数</b>：与 {@link #reduceTickTimes} 同一理由——{@code collectMSPT_BukkitAvg}
+     * 前两行是 {@code Bukkit.getServer()} 与反射 invoke，测试 JVM 里走不进去，于是"API 返回 0 时
+     * 会发生什么"此前零保护，而它正是 P1-S3 里那半条 bug（0 被原样当读数发出）。</p>
+     *
+     * <p>{@code !(mspt > 0)} 而不是 {@code mspt <= 0}：前者顺带挡住 {@code NaN}
+     * （{@code NaN <= 0} 是 false，会让 NaN 漏进快照再被 {@code round2} 静默变成 0）。</p>
+     *
+     * @param mspt 反射得到的每 tick 毫秒数
+     * @return 舍入到两位的读数；{@code <= 0} / 非有限值时返回 {@code -1}（"未采集"）
+     */
+    static double sanitizeAvgTick(double mspt) {
+        if (!(mspt > 0) || !Double.isFinite(mspt)) {
+            return -1;
+        }
+        return round2(mspt);
+    }
+
+    /**
+     * Bukkit: 通过 TPS 反推近似 MSPT（满 TPS 时语义"估算不可用"，置 -1 而非 0）。
+     *
+     * <h2>P1-S3：为什么这一条<b>不</b>标 {@code unavailable}，而前两条要标</h2>
+     *
+     * <p>三条降级路径的失败语义<b>不同</b>，不能用同一处置：</p>
+     * <ul>
+     *   <li>一级 {@code n==0}、二级返回 0/负 —— "本该采到却采到了坏数据" = <b>故障</b>，
+     *       必须标 unavailable，让 {@code /ps status} 变红；</li>
+     *   <li>本条 —— "服务端根本没有这个 API / 每次 invoke 都抛" = <b>能力缺失</b>，
+     *       而满 TPS 时反推公式按定义没有意义（{@code 1000/20 = 50ms} 是墙钟间隔，不是计算耗时），
+     *       所以置 {@code -1} 是<b>本路径的正常工作方式</b>，不是失败。</li>
+     * </ul>
+     *
+     * <p>更直接的判据：<b>标 unavailable 会给纯 Spigot 服制造永久红字</b>。Spigot 没有
+     * {@code getTickTimes}/{@code getAverageTickTime}（能力位为 false），本条是唯一路径；
+     * 一台满 TPS 的健康 Spigot 服会因此永远显示「MSPT 采集失败」——把"这个端本来就不提供"
+     * 谎报成"插件坏了"。这与 Folia 上 {@code platformSkipped} 要标成灰色而非红色是同一条原则。</p>
+     *
+     * <p>而且本条不需要靠 unavailable 保护告警：满 TPS 时 {@code msptAvg = -1} 会让
+     * {@link #msptAlertLevel} 返回 {@code NO_VERDICT}，MSPT 告警同样不会发（这是第三道闸门）；
+     * {@code /ps} 侧也已有 {@code msptAvg <= 0} 的「未知」分支。前两条路径没有这个保护——
+     * 它们的哨兵是"采集代码自己写坏的值"，下游必须靠 {@code unavailable} 才知道不可信。</p>
+     */
     private void collectMSPT_TPSFallback(MetricsSnapshot snap) {
         if (snap.tps1m > 0 && snap.tps1m < 20) {  // @sentinel-ok TPS 反推 MSPT：必须排除 0，否则 1000/0 = Infinity；else 分支显式置 -1 表示未采集
             snap.msptAvg = round2(1000.0 / snap.tps1m);
@@ -1963,6 +2056,31 @@ public class MetricsCollector {
         snap.msptMin = -1;
         snap.msptMax = -1;
         snap.msptSource = MetricsSnapshot.MSPT_SOURCE_TPS_FALLBACK;
+    }
+
+    /**
+     * P1-S3：把 MSPT 标成"本轮采集失败"（一级 {@code n==0} / 二级返回 0 或负值）。
+     *
+     * <p>只做两件事：写 {@code unavailable}、并在启动/重载后 {@link #WARMUP_WINDOW_MS} 宽限期内
+     * 同时写 {@code warmingUp}（展示层据此渲染"预热中"而不是红色「采集失败」——
+     * Paper 启动后头一两轮 {@code getTickTimes()} 确实可能还是空数组，那是预热不是故障）。</p>
+     *
+     * <p><b>为什么不写 {@code disabledModules}</b>：这个集合的语义是"服主显式关掉了"
+     * （{@code xxx.enabled=false}），采集失败不是服主的选择。写错会让
+     * {@code /ps status} 显示「已禁用（config …=false）」，把故障伪装成配置——
+     * 这是 {@code MetricsSnapshot} 那条 {@code disabledModules ⊆ unavailable} 契约存在的理由。
+     * 这里只写 {@code unavailable} 这一个集合，天然满足三条子集契约（另两个集合不变）。</p>
+     *
+     * <p><b>与告警层的联动（安全性论证）</b>：标了 unavailable 之后，{@code AlertService} 第 3 步
+     * 会把它归入 {@code moduleDown}，从而<b>不算干净周期、不宣布恢复</b>，只累计无结论时长，
+     * 超时转 unknown。也就是说这一改动把"消息消失"从"故障恢复"改判成"不知道"，
+     * 方向与「采集坏了却报已恢复」相反——不会引入那类 bug。</p>
+     */
+    private void markMsptCollectFailed(MetricsSnapshot snap) {
+        snap.unavailable.add(MetricsSnapshot.MODULE_MSPT);
+        if (System.currentTimeMillis() - startedAtMs <= WARMUP_WINDOW_MS) {
+            snap.warmingUp.add(MetricsSnapshot.MODULE_MSPT);
+        }
     }
 
     // ==================== 玩家 ====================
@@ -2425,14 +2543,19 @@ public class MetricsCollector {
      * 这里显式兜底：迟滞带非正即视为无效，退回无迟滞判据（与 {@code margin = 0}
      * "关闭迟滞 = 旧行为"的声明同口径），保证闩锁一定会在负载回落后解除。
      * 仅钳到 0 不足以修复——{@code value >= 0} 对恒正输入仍然恒真。</p>
+     *
+     * <p><b>进入线的比较符取自算子表</b>（{@link ThresholdOperator#CPU_PROCESS}）：
+     * 该字形同时也是 {@code alert.threshold.cpu} 文案里那个 {@code >}，
+     * 而展示层 {@code ThresholdColors} 判 CPU 颜色时读的同一条规则。
+     * 三处（文案 / 告警闩锁 / 颜色）因此不可能各自漂移——此前它们各写一个 {@code >}。</p>
      */
     private static boolean latched(boolean latched, double value, double threshold, double margin) {
         double exit = threshold - margin;
         // 迟滞带非正（margin >= threshold）即视为无效：退回无迟滞判据，避免负/零退出线造成永不解锁
         if (exit <= 0.0d) {
-            return value > threshold;
+            return ThresholdOperator.CPU_PROCESS.trips(value, threshold);
         }
-        return latched ? value >= exit : value > threshold;   // 带内保持上一状态
+        return latched ? value >= exit : ThresholdOperator.CPU_PROCESS.trips(value, threshold);   // 带内保持上一状态
     }
 
     // ==================== GC ====================

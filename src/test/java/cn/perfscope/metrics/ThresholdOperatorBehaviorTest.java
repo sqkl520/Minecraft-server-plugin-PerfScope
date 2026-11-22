@@ -50,12 +50,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <h2>三条验证路径</h2>
  * <ol>
  *   <li><b>规则表</b>：直接调 {@link ThresholdOperator.Rule#levelOf}。生产代码每个判定点都调
- *       同一张表，所以这里测的就是线上判定本身。</li>
+ *       同一张表，<b>展示层也从同一张表派生</b>（{@code ThresholdColors}），所以这里测的就是
+ *       线上判定本身，颜色与告警不会各有一套。</li>
  *   <li><b>判定半段方法</b>（{@code applyTpsLevel} / {@code applyPlayersLevel} /
  *       {@code applyEntitiesLevels} / {@code applyChunksLevels} / {@code applyMemoryLevel}）：
  *       额外锁住"表写对了但调用点用错档位 / 用错键名 / 忘了写 alertLevels"。</li>
  *   <li><b>另两条判定点</b>按其形态另有专测：{@code msptAlertLevel} 见
- *       {@code MsptAlertLevelTest}，CPU 迟滞见 {@code CpuHysteresisLatchTest}。</li>
+ *       {@code MsptAlertLevelTest}，CPU 迟滞见 {@code CpuHysteresisLatchTest}；
+ *       CPU 的进入线（{@link ThresholdOperator.SingleTier}）在
+ *       {@link #cpuEntryLinesAreRecordedAsSingleTierRules()} 里单测。</li>
  * </ol>
  *
  * <p><b>不测 {@code collectCPU} 的告警分支</b>：它读本机真实 CPU 读数，构造不出确定的边界值
@@ -112,6 +115,38 @@ class ThresholdOperatorBehaviorTest {
             ThresholdOperator.Direction.HIGH_IS_BAD, ThresholdOperator.Comparison.INCLUSIVE);
     }
 
+    /**
+     * CPU 是<b>单档</b>规则（迟滞闩锁没有 critical 档），但进入线的闭合性同样收在表里。
+     *
+     * <p>为什么单列：{@link ThresholdOperator.Rule} 的两档形状装不下"只有一档"这个事实，
+     * 硬塞会留下一个永远走不到的 critical 档。这条把 SinglesTier 的方向与算子写死，
+     * 让"CPU 进入线从 {@code >} 改成 {@code >=}"变成会红的事实——此前它只写在
+     * {@code latched} 的一行里，没有任何测试直接看它。</p>
+     */
+    @Test
+    void cpuEntryLinesAreRecordedAsSingleTierRules() {
+        assertSingleTier(ThresholdOperator.CPU_PROCESS, "cpu:process");
+        assertSingleTier(ThresholdOperator.CPU_SYSTEM, "cpu:system");
+
+        // 进入线是严格的：恰好等于阈值不进入（这条与 latched 的真实行为由
+        // ThresholdTextMatchesOperatorTest 交叉验证，那边反射调用 latched）
+        assertEquals(false, ThresholdOperator.CPU_PROCESS.trips(80.0, 80.0));
+        assertEquals(true, ThresholdOperator.CPU_PROCESS.trips(80.01, 80.0));
+        assertEquals(">", ThresholdOperator.CPU_PROCESS.symbol());
+        assertEquals(ThresholdOperator.CPU_PROCESS.symbol(), ThresholdOperator.CPU_ENTRY_SYMBOL,
+            "告警文案里的 CPU 进入线符号必须由规则派生，不能在模板里另写一个");
+    }
+
+    private static void assertSingleTier(
+            ThresholdOperator.SingleTier tier, String key) {
+        assertEquals(key, tier.key(), "CPU 规则 key 变了——Prometheus 序列名会跟着变");
+        assertEquals(ThresholdOperator.Direction.HIGH_IS_BAD, tier.direction(),
+            key + " 是高值差：CPU 越高越差");
+        assertEquals(ThresholdOperator.Comparison.STRICT, tier.comparison(),
+            key + " 的进入线必须是严格 `>`：改成 `>=` 会让恰好等于阈值的读数开始告警，"
+                + "而 alert.threshold.cpu 的文案仍写着 `>`");
+    }
+
     // ====================================================================================
     // 2. 七条规则的四点表（行为断言，期望值逐条写死以便 review）
     // ====================================================================================
@@ -120,7 +155,8 @@ class ThresholdOperatorBehaviorTest {
      * {@code tps}：低值差、两档严格 {@code <}。默认阈值 18 / 15。
      *
      * <p>{@code tps1m == 15.0} 时：{@code 15 < 15} 不成立 → 落进 warning 分支
-     * （{@code 15 < 18} 成立）→ 1 级。这就是"唯一差两档"的那一族。</p>
+     * （{@code 15 < 18} 成立）→ 1 级。展示层读同一条规则，所以那一格是黄色而不是红色——
+     * 这正是本次修正的靶点（此前展示层自写 {@code <=}，同样一个 15.0 会判 CRITICAL）。</p>
      */
     @Test
     void tpsUsesStrictLessThan() {
@@ -128,7 +164,7 @@ class ThresholdOperatorBehaviorTest {
             19.0, 0,   // 远离（高 TPS 健康）
             18.0, 0,   // 恰好 warning：严格 < 不成立
             17.99, 1,  // warning 内
-            15.0, 1,   // 恰好 critical：严格 < 不成立 → 仍是 warning（差两档）
+            15.0, 1,   // 恰好 critical：严格 < 不成立 → 仍是 warning
             14.99, 2,  // 刚过 critical
             0.0, 2);   // 远离（冻结）
     }
@@ -261,7 +297,8 @@ class ThresholdOperatorBehaviorTest {
 
         MetricsSnapshot atCritical = tps(cfg, 15.0);
         assertEquals(1, atLevel(atCritical, "tps:global"),
-            "TPS 恰好 15.0：采集层严格 `<` 不成立 → warning（早预警语义：告警比颜色晚一档）");
+            "TPS 恰好 15.0：采集层严格 `<` 不成立 → warning；展示层读同一条规则，"
+                + "所以那一格也是黄色（此前它是红色，与告警差一整档）");
         assertEquals(Alert.LEVEL_WARNING, onlyAlert(atCritical, "tps:global").level());
 
         assertEquals(2, atLevel(tps(cfg, 14.99), "tps:global"));

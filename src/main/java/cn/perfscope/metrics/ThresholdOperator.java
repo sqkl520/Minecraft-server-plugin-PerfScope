@@ -20,7 +20,11 @@ package cn.perfscope.metrics;
 import java.util.List;
 
 /**
- * 采集层阈值判定的<b>算子表</b>：每个指标用哪个比较符、朝哪个方向，写成一行可读的数据。
+ * 阈值判定的<b>算子表</b>：每个指标用哪个比较符、朝哪个方向，写成一行可读的数据。
+ *
+ * <p>消费者有两个：采集层（{@link MetricsCollector} 的 {@code collect*} / {@code apply*}，
+ * 决定发不发告警）与展示层（{@code cn.perfscope.util.ThresholdColors}，决定染什么颜色）。
+ * 它们读同一张表，所以「读数恰好等于阈值时算不算越界」在整份代码里只有一个答案。</p>
  *
  * <h2>为什么要有这张表</h2>
  *
@@ -34,14 +38,23 @@ import java.util.List;
  * 于是「新增第 8 个指标」在结构上等于「必须往这里加一行并给方向与算子」，
  * 而不是在某处再手写一段没人看的比较。</p>
  *
- * <h2>这不是「统一口径」</h2>
+ * <h2>这张表是「哪一侧越界」的唯一出处（展示层也从这里派生）</h2>
  *
- * <p>{@code README.md} 第 39 行明写：展示层闭区间、采集层部分指标严格比较，是<b>有意的
- * 早预警语义</b>——读数恰好等于阈值时，颜色先变、告警还在路上。本表<b>原样记录</b>这个现状：
- * {@link #TPS} / {@link #MSPT} / {@link #ENTITIES_WORLD} / {@link #ENTITIES_GLOBAL} /
+ * <p>此前有两种写法并存：采集层用本表，展示层（{@code ThresholdColors}）自己写闭区间
+ * {@code <=} / {@code >=}。当时把差异解释成「早预警」——读数恰好等于阈值时颜色先变、告警还在路上。
+ * 但实测下来它并不是「早一格」：{@code tps1m == 15.0} 时展示层判 CRITICAL，采集层因为
+ * {@code 15.0 < 15.0} 不成立只判 WARNING，<b>相差一整档</b>；而 README 承诺的只是「随后到达」。
+ * 展示层读的是同一个 config、同一屏数字，颜色与告警却各说一套，这不是预警，是两份副本必然的漂移。</p>
+ *
+ * <p>现在展示层改为调用本表（{@code ThresholdColors.levelOf} → {@link Rule#levelOf}），
+ * 于是：{@link #TPS} / {@link #MSPT} / {@link #ENTITIES_WORLD} / {@link #ENTITIES_GLOBAL} /
  * {@link #CHUNKS_WORLD} 是 {@link Comparison#STRICT}，{@link #PLAYERS} / {@link #MEMORY} 是
- * {@link Comparison#INCLUSIVE}。改这张表就是改线上行为，{@code ThresholdOperatorBehaviorTest}
- * 的四点表会先红。</p>
+ * {@link Comparison#INCLUSIVE}，<b>两侧逐点相同</b>。改这张表就是同时改颜色与告警，
+ * {@code ThresholdOperatorBehaviorTest} 的四点表与 {@code ThresholdBoundaryAsymmetryTest}
+ * 的「差值必须为零」会先红。</p>
+ *
+ * <p>代价说清楚：读数恰好等于阈值时颜色<b>不再</b>提前变。{@code entities = 20000} 现在与告警
+ * 一致地保持绿色，{@code 20001} 才变黄。这是刻意选择的「同口径」——宁可晚一格，也不要两套说法。</p>
  *
  * <h2>为什么每个规则有「critical 算子」和「warning 算子」两个字段</h2>
  *
@@ -51,28 +64,31 @@ import java.util.List;
  *
  * <h2>为什么告警文案的比较符也从这里取</h2>
  *
- * <p>算子在本仓库里曾有<b>四份副本</b>：本表、{@code ThresholdColors}（展示层闭区间，有意不同）、
+ * <p>算子在本仓库里曾有<b>四份副本</b>：本表、{@code ThresholdColors}（展示层另写闭区间）、
  * README 的散文说明、以及 {@code AlertMessages} 里 {@code alert.threshold.*} 那段
  * 「warning &gt; {0} / critical &gt; {1}」的模板。前两份有测试守着，后两份没有——而第四份
  * 面对的是服主：{@code players} 的判定是闭区间 {@code >=}（18/20 人 = 恰好 90% 是最常见的
  * 满员配置），模板却写着「大于」，于是一个真的在告警的读数会被文案描述成"还没到线"。
  * 这不是笔误，是<b>副本之间必然发生的漂移</b>。</p>
  *
- * <p>因此字形也由本表派生：{@link Comparison#symbolFor(Direction)} 把
- * 「方向 × 闭合性」投影成一个符号，{@link Rule#warningSymbol()} / {@link Rule#criticalSymbol()}
- * 是它的两条出口，{@code AlertService.thresholdText} 再把符号作为 {@code {2}} / {@code {3}}
- * 传给文案模板。改这张表里的算子，告警文案自动跟随——而不是等某天有人凑巧发现。</p>
+ * <p>现在四份只剩一份真源：展示层改调 {@link Rule#levelOf}（不再是副本），
+ * 字形由 {@link Comparison#symbolFor(Direction)} 把「方向 × 闭合性」投影成符号，
+ * {@link Rule#warningSymbol()} / {@link Rule#criticalSymbol()} 是它的两条出口，
+ * {@code AlertService.thresholdText} 再把符号作为 {@code {2}} / {@code {3}} 传给文案模板。
+ * 改这张表里的算子，颜色与文案同时跟随——而不是等某天有人凑巧发现另一半还在说旧话。</p>
  *
- * <p>唯一不在本表里的 CPU 除外：它的进入判据是 {@code value > threshold}（严格），
- * 退出判据 {@code >= threshold - margin} 由迟滞提示单独说明，文案里那句
- * {@code process > {0}%} 指的就是进入线，属实。</p>
- *
- * <h2>CPU 为什么不在表里</h2>
+ * <h2>CPU 为什么是 {@link SingleTier} 而不是 {@link Rule}</h2>
  *
  * <p>CPU 两路判定用的是<b>带迟滞的状态机</b>（{@link MetricsCollector} 的 {@code latched}）：
  * 进入用 {@code value > threshold}、退出用 {@code threshold - margin}，没有「critical 档」。
- * 把它塞进这张两档表会迫使这里引入 {@code warningOnly} 之类的分支，反而让表变难读。
- * 它的真值表由 {@code CpuHysteresisLatchTest}（12 个用例）单独覆盖。</p>
+ * 硬塞进两档的 {@link Rule} 会迫使本类引入「critical 恒不命中」之类的空档位，
+ * 于是表里出现一条永远走不到的规则——那种规则既读不懂也测不死。
+ * 单独一个 {@link SingleTier}（方向 + 闭合性，只有一档）是同一个事实的更小写法：
+ * <b>进入线的比较符仍然只有这一处出处</b>，展示层与 {@code latched} 都从它取。</p>
+ *
+ * <p>展示层对 CPU 用的是<b>瞬时值</b>（不走闩锁）：闩锁回答的是「这个状态要不要延续」，
+ * 是告警侧的防抖；颜色回答的是「此刻读数是多少」，两者量的是不同问题。
+ * 但<b>边界</b>是同一个：{@code 80.00%} 在两边都不算越界，{@code 80.01%} 两边都算。</p>
  *
  * <p>本类无状态、纯函数，可在任意线程调用。</p>
  */
@@ -125,15 +141,55 @@ public final class ThresholdOperator {
     }
 
     /**
+     * CPU 两路（进程 / 系统）：高值差、<b>单档</b>、进入线严格 {@code >}。
+     *
+     * <p>见类注释「CPU 为什么是 SingleTier」。config 只有一档阈值，迟滞带
+     * （{@code threshold - margin} 的退出线）由 {@link MetricsCollector#latched} 与
+     * {@code alert.msg.hysteresis} 单独说明，不属于「越界线」这个概念。</p>
+     */
+    public static final SingleTier CPU_PROCESS =
+        new SingleTier("cpu:process", Direction.HIGH_IS_BAD, Comparison.STRICT);
+
+    /** @see #CPU_PROCESS */
+    public static final SingleTier CPU_SYSTEM =
+        new SingleTier("cpu:system", Direction.HIGH_IS_BAD, Comparison.STRICT);
+
+    /**
      * CPU 两路迟滞闩锁的<b>进入线字形</b>。
      *
-     * <p>CPU 不在 {@link #ALL} 表里（迟滞状态机不是两档规则，见类注释），但它的进入判据
-     * 同样是"严格大于"——所以字形也要有唯一出处，而不是在 {@code alert.threshold.cpu}
-     * 模板里再写一个 {@code >}。真值由 {@code MetricsCollector.latched} 决定，
-     * {@code ThresholdTextMatchesOperatorTest} 会反射调用它，验证"进入线确实是严格的"
-     * 与这个字形一致。</p>
+     * <p>字形从 {@link #CPU_PROCESS} 派生，而不是在这里再写一个 {@code ">"}——
+     * 那样模板里那个 {@code >} 与本类的判定就会变成两份可以各自漂移的副本。
+     * {@code MetricsCollector.latched} 的进入分支同样读 {@link #CPU_PROCESS} 的闭合性，
+     * {@code ThresholdTextMatchesOperatorTest} 反射调用真实的 {@code latched} 验证两边一致。</p>
      */
-    public static final String CPU_ENTRY_SYMBOL = ">";
+    public static final String CPU_ENTRY_SYMBOL = CPU_PROCESS.symbol();
+
+    /**
+     * 一条<b>单档</b>规则：只有「越界 / 未越界」，没有 warning / critical 之分。
+     *
+     * <p>存在的唯一理由是 CPU 那两路迟滞告警：config 只有一档阈值（没有 critical 键），
+     * 判定又是带反馈的状态机。把它写成 {@link Rule} 会留下一个永远走不到的 critical 档位，
+     * 而写成这个二元组，「方向 + 比较符」仍有唯一出处，展示层也能照着它判边界。</p>
+     *
+     * <p>与 {@link Rule} 一样是纯函数、无状态。{@code NaN} 一律不越界
+     * （所有比较对 {@code NaN} 都是 {@code false}，展示层另有哨兵分支先拦）。</p>
+     */
+    public record SingleTier(String key, Direction direction, Comparison comparison) {
+
+        /** 该读数是否越过这一档的线。 */
+        public boolean trips(double value, double threshold) {
+            boolean highIsBad = direction == Direction.HIGH_IS_BAD;
+            return switch (comparison) {
+                case STRICT -> highIsBad ? value > threshold : value < threshold;
+                case INCLUSIVE -> highIsBad ? value >= threshold : value <= threshold;
+            };
+        }
+
+        /** 越界时用的比较符（告警文案用），与 {@link #trips} 一一对应。 */
+        public String symbol() {
+            return comparison.symbolFor(direction);
+        }
+    }
 
     /**
      * 一条判定规则：{@code key} 只用于人读与测试定位（与 {@code Alert.key()} 同一命名），
@@ -203,9 +259,9 @@ public final class ThresholdOperator {
     // ====================================================================================
     // 算子表本体
     //
-    // ⚠️ 改任何一行 = 改线上告警行为。README 第 39 行的早预警语义依赖 STRICT 与 INCLUSIVE
-    // 的差异，不是笔误，不要「统一」它。新增指标时在这里加一行，并在
-    // ThresholdOperatorBehaviorTest 的点表里加一条四点用例。
+    // ⚠️ 改任何一行 = 同时改「告警级别」与「界面颜色」两处可见行为。本表是两侧的共同出处：
+    // ThresholdColors.levelOf 对每个指标都调这里的 Rule#levelOf，不再自己写比较符。
+    // 新增指标时在这里加一行，并在 ThresholdOperatorBehaviorTest 的点表里加一条四点用例。
     // ====================================================================================
 
     /** TPS：低值差，两档都严格（{@code tps1m < critical} / {@code < warning}）。 */

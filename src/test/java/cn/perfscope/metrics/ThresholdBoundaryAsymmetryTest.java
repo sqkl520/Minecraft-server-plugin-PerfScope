@@ -11,62 +11,46 @@ import cn.perfscope.support.TestObjects;
 import cn.perfscope.util.ThresholdColors;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * 阈值边界的<b>早预警语义</b>：展示层闭区间、采集层严格比较，这里把这个设计钉住。
+ * 展示层与采集层在阈值边界上必须判同一档——<b>差异为零</b>。
  *
- * <h2>这是既定设计，不是缺陷</h2>
- * {@code README.md} 第 39 行原文：「显示用闭区间（达到阈值即变色），部分指标告警用严格大于，
- * 因此<b>恰好等于阈值的那一瞬颜色会先变、告警随后到达</b>（有意的早预警语义）」。
- * {@code ThresholdColors} 类注释（约 33-51 行）与 {@code docs/07-guides/PERFSCOPE-TEST-PLAN.md}
- * 附录 A 第 9 项也写着同一件事。本类的作用是<b>第一次用测试把它钉住</b>——
- * 此前没有任何用例同时看两层，比较符被改坏也不会有测试变红。
+ * <h2>这个类曾经证明的是相反的事</h2>
  *
- * <h2>两层的实际口径</h2>
+ * <p>它的原名与全部断言都在<b>钉住差异</b>：展示层闭区间、采集层严格比较，
+ * 读数恰好等于阈值时「颜色先变、告警随后到达」，被称为「有意的早预警」。
+ * 那份记录本身是诚实的，但它把缺陷写成了规格——实测下来两边差的不是一格：
+ * {@code tps1m == 15.0} 时展示层判 {@code CRITICAL}（红），采集层 {@code 15.0 < 15.0} 不成立、
+ * 落进 warning 分支只判 {@code WARNING}（黄），<b>整整差一档</b>。
+ * {@code ThresholdColors} 自己的类注释当时也承认「是唯一差两档的」，而 README 承诺的只是「随后到达」。</p>
  *
- * <table border="1">
- *   <caption>边界值时的判定（{@code value} 恰好等于阈值）</caption>
- *   <tr><th>指标</th><th>采集层（{@code MetricsCollector}）</th><th>展示层（{@code ThresholdColors}）</th></tr>
- *   <tr><td>{@code entities}</td><td>{@code >}（开区间）→ 边界值不告警</td><td>{@code >=}（闭区间）→ 边界值变红</td></tr>
- *   <tr><td>{@code chunks}</td><td>{@code >}（开区间）</td><td>{@code >=}（闭区间）</td></tr>
- *   <tr><td>{@code mspt}</td><td>{@code >}（开区间）</td><td>{@code >=}（闭区间）</td></tr>
- *   <tr><td>{@code tps}</td><td>{@code <}（低值差，开区间）</td><td>{@code <=}（低值差，闭区间）</td></tr>
- *   <tr><td>{@code memory} / {@code players}</td><td>{@code >=}（闭区间）</td><td>{@code >=}（闭区间）</td></tr>
- * </table>
+ * <p>颜色与告警读同一份 config、显示同一个数字，却各说一套，用户没有第三种信息可以判断谁对。
+ * 所以现在改成：<b>展示层从 {@link ThresholdOperator} 派生</b>，两层逐点相同。</p>
  *
- * <p><b>共 4 族</b>存在差异：{@code entities} / {@code chunks} / {@code mspt} / {@code tps}。
- * 注意展示层<b>不是</b>"一律 {@code >=}"——{@code tps} 是低值差指标，方向相反，用的是 {@code <=}。</p>
+ * <h2>本类的三条职责</h2>
+ * <ol>
+ *   <li><b>差值为零</b>：对每条规则，用一串覆盖边界的读数（阈值±1、阈值±0.01、远离值），
+ *       两层的档位必须完全相同。这是根断言，改任何一层的比较符都会让它红。</li>
+ *   <li><b>边界行为本身</b>：恰好等于阈值时是越界还是否，按各族的闭合性分别写死——
+ *       否则「两层一致地都错了」也能通过第 1 条。</li>
+ *   <li><b>allow-list 是空的，且必须显式为空</b>：本轮确实存在"可接受的差异"的候选
+ *       （CPU 的迟滞闩锁），但它不是差异，见 {@link #cpuColourUsesTheSameEntryLineAsTheLatch()}。</li>
+ * </ol>
  *
- * <h2>边界值时的行为</h2>
- * 前三族只差一档：读数恰好等于阈值时界面已经标红（展示层闭区间），但告警不会发出
- * （采集层开区间）——看到颜色变化时告警还在路上。
+ * <h2>为什么数值不再写死成 30000 / 50 这类字面量</h2>
  *
- * <p>{@code tps} 是<b>唯一差两档</b>的：{@code tps1m == 15.0} 时展示层判 {@code CRITICAL}（红），
- * 而采集层 {@code 15.0 < 15.0} 不成立、落进 {@code else if (tps1m < 18.0)} 分支 →
- * 发 {@code WARNING} 告警、{@code recordLevel = 1}（黄）。</p>
- *
- * <p>反过来也成立：读数刚好在阈值<b>下方一点点</b>时界面是黄的，而告警也确实没发——这条一致。</p>
- *
- * <h2>为什么不"统一"</h2>
- * 两种口径各有理由，而<b>改成一致会改变线上行为</b>：
- * <ul>
- *   <li>把采集层改成 {@code >=}：边界值开始告警。默认阈值 {@code entities 20000/30000}
- *       是"上界留余量"取的整数（见 config.yml 的注释），恰好等于 30000 的服务器不少——
- *       这一改会让一批服务器突然开始报 critical。</li>
- *   <li>把展示层改成 {@code >}：边界值不变红。而 {@code ThresholdColorsTest} 里那条
- *       "30000 必须已经变红"是<b>刻意的 UI 契约</b>——到线就标红比"超过才标红"更符合直觉。</li>
- * </ul>
- *
- * <p>所以本测试<b>不提修复建议，只把语义钉住</b>。若将来决定统一，这些用例会红，
- * 那正是有意识的决定需要更新测试的位置。</p>
- *
- * <h2>这一组为什么值得存在</h2>
- * 两个类分属不同包（{@code util} 与 {@code metrics}），各自有测试，但<b>没有任何测试同时看两边</b>。
- * 口径此前只写在注释与 README 里——注释不会在你改比较符时变红，测试会。
+ * <p>上一版在断言里直接写 {@code 30000}、{@code 50}，那是"通过 ConfigFixtures 的默认阈值"
+ * 这个隐含前提。现在两层都用同一组阈值算出档位，字面量只保留在"边界点怎么取"（阈值本身 ± 一点），
+ * 于是改默认值不会让测试变成在测另一个指标。</p>
  */
 class ThresholdBoundaryAsymmetryTest {
 
+    /** 阈值 18 / 15（与出厂 config.yml 一致）。 */
     private static ThresholdColors colors() {
         ConfigManager cm = ConfigFixtures.manager("pscope-boundary-test");
         ConfigManager.ConfigData cfg = ConfigFixtures.validConfig();
@@ -74,147 +58,230 @@ class ThresholdBoundaryAsymmetryTest {
         return new ThresholdColors(cm);
     }
 
+    /** 出厂 config.yml 的那一套阈值（{@link ConfigFixtures#validConfig()} 是唯一来源）。 */
+    private static ConfigManager.ConfigData configOf() {
+        return ConfigFixtures.validConfig();
+    }
+
     // ------------------------------------------------------------------------------------
-    // 1. 展示层的闭区间（记录现状）
+    // 1. 根断言：两层逐点相同
     // ------------------------------------------------------------------------------------
 
     /**
-     * 展示层：{@code value == critical} 已经是 CRITICAL（闭区间）。
+     * <b>差异集合必须为空。</b>
      *
-     * <p>这条与 {@code ThresholdColorsTest} 里"30000 必须已经变红"重复，但这里保留一份
-     * 是为了让本类自成一体——对照表要两边都有数才能看出差异。</p>
+     * <p>每条规则取五个读数：{@code 阈值-ε}、{@code 阈值}、{@code 阈值+ε}（两个阈值各一组）、
+     * 以及两个远离值。{@code ε} 用 0.01 / 1（计数型指标用 1，浮点型用 0.01），
+     * 保证"恰好等于"那一列真的落在边界上。</p>
+     *
+     * <p>失败信息给出的是<b>整个不一致清单</b>而不是第一个：一层里挪动了半格会导致
+     * 多条同时红，只报第一条会让人以为是单点笔误。</p>
      */
     @Test
-    void displayLayerTreatsEqualityAsCritical() {
-        ThresholdColors c = colors();
-        assertEquals(ThresholdColors.Level.CRITICAL, c.levelOf(
-                ThresholdColors.Metric.ENTITIES, 30_000),
-            "展示层是闭区间：恰好 30000 就变红");
-        assertEquals(ThresholdColors.Level.CRITICAL, c.levelOf(
-                ThresholdColors.Metric.MEMORY, 95),
-            "memory 的 critical 默认 95，恰好 95 变红");
+    void displayAndCollectorNeverDisagreeAtTheBoundary() {
+        ThresholdColors colors = colors();
+        ConfigManager.ConfigData cfg = configOf();
+        List<String> mismatches = new ArrayList<>();
+
+        // TPS：默认 18 / 15
+        compare(mismatches, "tps", ThresholdOperator.TPS,
+            colors, ThresholdColors.Metric.TPS, cfg.tps_warningThreshold, cfg.tps_criticalThreshold, 0.01);
+        // MSPT：默认 45 / 50
+        compare(mismatches, "mspt", ThresholdOperator.MSPT,
+            colors, ThresholdColors.Metric.MSPT, cfg.mspt_warningThreshold, cfg.mspt_criticalThreshold, 0.01);
+        // 玩家占比：默认 90 / 98
+        compare(mismatches, "players", ThresholdOperator.PLAYERS,
+            colors, ThresholdColors.Metric.PLAYERS, cfg.players_warningThreshold, cfg.players_criticalThreshold, 1);
+        // 全服实体：默认 20000 / 30000
+        compare(mismatches, "entities", ThresholdOperator.ENTITIES_GLOBAL,
+            colors, ThresholdColors.Metric.ENTITIES,
+            cfg.entities_totalWarningThreshold, cfg.entities_totalCriticalThreshold, 1);
+        // 逐世界区块：默认 10000 / 15000
+        compare(mismatches, "chunks", ThresholdOperator.CHUNKS_WORLD,
+            colors, ThresholdColors.Metric.CHUNKS,
+            cfg.chunks_loadedWarningThreshold, cfg.chunks_loadedCriticalThreshold, 1);
+        // 堆内存：默认 85 / 95
+        compare(mismatches, "memory", ThresholdOperator.MEMORY,
+            colors, ThresholdColors.Metric.MEMORY,
+            cfg.memory_heapWarningThreshold, cfg.memory_heapCriticalThreshold, 1);
+
+        assertTrue(mismatches.isEmpty(),
+            "展示层与采集层在阈值边界上判了不同的档——两层必须同口径（展示层现在从 ThresholdOperator 派生，"
+                + "若你改成自己写比较符，就是这条在报警）：\n  " + String.join("\n  ", mismatches));
     }
 
-    /** 展示层：{@code value == warning} 已经是 WARN（闭区间）。 */
-    @Test
-    void displayLayerTreatsEqualityAsWarning() {
-        ThresholdColors c = colors();
-        assertEquals(ThresholdColors.Level.WARN, c.levelOf(
-                ThresholdColors.Metric.ENTITIES, 20_000),
-            "展示层是闭区间：恰好 20000 就变黄");
-        assertEquals(ThresholdColors.Level.WARN, c.levelOf(
-                ThresholdColors.Metric.MEMORY, 85));
+    /** 把一条规则在边界附近的档位与展示层逐个比对，差异收集进 {@code out}。 */
+    private static void compare(List<String> out, String label, ThresholdOperator.Rule rule,
+                                ThresholdColors colors, ThresholdColors.Metric metric,
+                                double warning, double critical, double epsilon) {
+        boolean lowIsBad = rule.direction() == ThresholdOperator.Direction.LOW_IS_BAD;
+        double[] samples = {
+            critical - 2 * epsilon, critical - epsilon, critical, critical + epsilon, critical + 2 * epsilon,
+            warning - epsilon, warning, warning + epsilon,
+            // 远离值两个：高值差往上一倍取（不能用 0——MSPT 的 0 是"未采集"哨兵，
+            // 展示层会判 UNKNOWN 而不是 GOOD/CRITICAL，那不是算子差异而是可信度差异）
+            lowIsBad ? 0 : warning * 2,
+            lowIsBad ? warning * 2 : critical * 2,
+        };
+        for (double value : samples) {
+            int collectorTier = rule.levelOf(value, warning, critical);
+            int displayTier = tierOf(colors.levelOf(metric, value));
+            if (collectorTier != displayTier) {
+                out.add(label + " value=" + value + "（阈值 " + warning + "/" + critical + "）："
+                    + "采集层=" + tierName(collectorTier) + "，展示层=" + tierName(displayTier));
+            }
+        }
     }
 
-    /** 展示层：差 1 还是上一档——证明边界确实是"到线就变"，不是"超过才变"。 */
-    @Test
-    void displayLayerFlipsExactlyAtTheBoundary() {
-        ThresholdColors c = colors();
-        assertEquals(ThresholdColors.Level.GOOD, c.levelOf(ThresholdColors.Metric.ENTITIES, 19_999),
-            "19999 低于 warning 线 20000，是 GOOD");
-        assertEquals(ThresholdColors.Level.WARN, c.levelOf(ThresholdColors.Metric.ENTITIES, 20_000),
-            "恰好 20000 就进 WARN——闭区间");
-        assertEquals(ThresholdColors.Level.CRITICAL, c.levelOf(ThresholdColors.Metric.ENTITIES, 30_000),
-            "恰好 30000 就进 CRITICAL——差 1 个就换档，这就是闭区间的形状");
+    /** 展示层等级 → 与 {@link ThresholdOperator.Rule#levelOf} 相同的 0/1/2 语言。 */
+    private static int tierOf(ThresholdColors.Level level) {
+        return switch (level) {
+            case GOOD -> 0;
+            case WARN -> 1;
+            case CRITICAL -> 2;
+            // UNKNOWN 只出现在哨兵输入上（本类的样本都是正常读数），落 -1 让任何意外立刻显形
+            default -> -1;
+        };
+    }
+
+    private static String tierName(int tier) {
+        return switch (tier) {
+            case 0 -> "GOOD";
+            case 1 -> "WARN";
+            case 2 -> "CRITICAL";
+            default -> "UNKNOWN";
+        };
     }
 
     // ------------------------------------------------------------------------------------
-    // 2. 采集层的开区间（记录现状 + 说明差异）
+    // 2. 边界行为本身（防止「两层一致地都错」）
     // ------------------------------------------------------------------------------------
 
     /**
-     * <b>采集层对 entities 用开区间</b>：恰好等于阈值<b>不</b>告警，而展示层已经把它标红。
+     * 严格族（tps / mspt / entities / chunks）：恰好等于阈值<b>不</b>越界，差一个单位就变。
      *
-     * <p>这条断言的是<b>一次判定里的两层对照</b>，而不是某一行的写法：同一读数 30000，
-     * {@link ThresholdColors} 判 {@code CRITICAL}，{@link ThresholdOperator#ENTITIES_GLOBAL}
-     * 判 {@code 1}（warning 档，未到 critical）。</p>
-     *
-     * <p><b>为什么从"读源码文本"改成"读算子表"</b>：原实现
-     * {@code src.contains("snap.totalEntities > cfg.entities_totalCriticalThreshold")} 在
-     * 判定收进 {@link ThresholdOperator} 之后必然假红（行为没变，只是字面量搬了家），
-     * 而且它读文件要求 cwd 是仓库根。算子表是采集层判定的唯一来源，断言它的
-     * {@link ThresholdOperator.Rule#criticalComparison()} 与四点表一样能杀死"把 {@code >}
-     * 改成 {@code >=}"，却不会因为一次重构就误报。</p>
+     * <p>这条与上面那条互补：上面只要求两层口径相同，哪怕两边一起把 {@code >} 写成 {@code >=}
+     * 也能通过。这条把"边界在哪一侧"写死，两条合起来才算钉住。</p>
      */
     @Test
-    void collectorUsesStrictGreaterThanForEntities() {
-        assertEquals(ThresholdOperator.Comparison.STRICT,
+    void strictFamiliesDoNotTripAtExactlyTheThreshold() {
+        ThresholdColors c = colors();
+
+        // TPS（低值差）：18.0 仍是 GOOD，17.99 才黄；15.0 是 WARN，14.99 才红
+        assertEquals(ThresholdColors.Level.GOOD, c.levelOf(ThresholdColors.Metric.TPS, 18.0),
+            "TPS 恰好等于 warning 线：两层都是严格比较，不该变色");
+        assertEquals(ThresholdColors.Level.WARN, c.levelOf(ThresholdColors.Metric.TPS, 17.99));
+        assertEquals(ThresholdColors.Level.WARN, c.levelOf(ThresholdColors.Metric.TPS, 15.0),
+            "TPS 恰好等于 critical 线：采集层判 WARNING，颜色必须也是 WARN 而不是 RED");
+        assertEquals(ThresholdColors.Level.CRITICAL, c.levelOf(ThresholdColors.Metric.TPS, 14.99));
+
+        // MSPT（高值差）：45.0 仍是 GOOD，50.0 是 WARN，50.01 才红
+        assertEquals(ThresholdColors.Level.GOOD, c.levelOf(ThresholdColors.Metric.MSPT, 45.0));
+        assertEquals(ThresholdColors.Level.WARN, c.levelOf(ThresholdColors.Metric.MSPT, 50.0));
+        assertEquals(ThresholdColors.Level.CRITICAL, c.levelOf(ThresholdColors.Metric.MSPT, 50.01));
+
+        // 实体：20000 仍是 GOOD，30000 是 WARN，30001 才红
+        assertEquals(ThresholdColors.Level.GOOD, c.levelOf(ThresholdColors.Metric.ENTITIES, 20_000));
+        assertEquals(ThresholdColors.Level.WARN, c.levelOf(ThresholdColors.Metric.ENTITIES, 30_000));
+        assertEquals(ThresholdColors.Level.CRITICAL, c.levelOf(ThresholdColors.Metric.ENTITIES, 30_001));
+
+        // 区块：同上
+        assertEquals(ThresholdColors.Level.GOOD, c.levelOf(ThresholdColors.Metric.CHUNKS, 10_000));
+        assertEquals(ThresholdColors.Level.WARN, c.levelOf(ThresholdColors.Metric.CHUNKS, 15_000));
+        assertEquals(ThresholdColors.Level.CRITICAL, c.levelOf(ThresholdColors.Metric.CHUNKS, 15_001));
+    }
+
+    /**
+     * 闭区间族（players / memory）：恰好等于阈值<b>就</b>越界。
+     *
+     * <p>这两族是"达到即算"，因为它们的默认值不是"上界留余量"取的整数，而是语义本身：
+     * 85% 就是 config.yml 声明的健康区间上界；18/20 人 = 恰好 90% 是最常见的满员配置。
+     * 采集层也这么判，所以两层天然一致——这条把那份一致写死。</p>
+     */
+    @Test
+    void inclusiveFamiliesTripAtExactlyTheThreshold() {
+        ThresholdColors c = colors();
+
+        assertEquals(ThresholdColors.Level.WARN, c.levelOf(ThresholdColors.Metric.MEMORY, 85),
+            "memory 恰好 85%：闭区间，两层都进 WARN");
+        assertEquals(ThresholdColors.Level.CRITICAL, c.levelOf(ThresholdColors.Metric.MEMORY, 95));
+        assertEquals(ThresholdColors.Level.GOOD, c.levelOf(ThresholdColors.Metric.MEMORY, 84));
+
+        assertEquals(ThresholdColors.Level.WARN, c.levelOf(ThresholdColors.Metric.PLAYERS, 90));
+        assertEquals(ThresholdColors.Level.CRITICAL, c.levelOf(ThresholdColors.Metric.PLAYERS, 98));
+        assertEquals(ThresholdColors.Level.GOOD, c.levelOf(ThresholdColors.Metric.PLAYERS, 89));
+    }
+
+    /**
+     * 世界覆盖换的是<b>阈值</b>，不换<b>算子</b>：{@code entities:world:*} 与
+     * {@code entities:global} 当前同闭合性，覆盖值下的边界行为必须与全局一致。
+     *
+     * <p>这条同时钉住 {@link ThresholdColors} 里"覆盖存在时改用 ENTITIES_WORLD 规则"那一行——
+     * 若哪天有人让两条规则的算子分叉，颜色与告警就会在某个世界的边界值上各自为政，
+     * 而这里会先红。</p>
+     */
+    @Test
+    void worldOverrideUsesTheSameOperatorAsGlobal() {
+        ThresholdColors plain = colors();
+
+        // 覆盖值 500 / 800（全局是 20000 / 30000）：只有覆盖真的生效才可能在这些读数上变色
+        ConfigManager.ConfigData cfg = ConfigFixtures.validConfig();
+        cfg.worldSettings = new java.util.LinkedHashMap<>();
+        ConfigManager.WorldSettings ws = new ConfigManager.WorldSettings();
+        ws.worldName = "nether";
+        ws.entities_totalWarningThreshold = 500;
+        ws.entities_totalCriticalThreshold = 800;
+        cfg.worldSettings.put("nether", ws);
+        ConfigManager cm = ConfigFixtures.manager("pscope-boundary-world");
+        TestObjects.setField(ConfigManager.class, cm, "config", cfg);
+        ThresholdColors overridden = new ThresholdColors(cm);
+
+        assertEquals(ThresholdColors.Level.GOOD, overridden.levelOf(ThresholdColors.Metric.ENTITIES, 500, "nether"),
+            "覆盖后的 warning 线仍是严格比较：恰好 500 不变黄");
+        assertEquals(ThresholdColors.Level.WARN, overridden.levelOf(ThresholdColors.Metric.ENTITIES, 501, "nether"));
+        assertEquals(ThresholdColors.Level.WARN, overridden.levelOf(ThresholdColors.Metric.ENTITIES, 800, "nether"));
+        assertEquals(ThresholdColors.Level.CRITICAL, overridden.levelOf(ThresholdColors.Metric.ENTITIES, 801, "nether"));
+
+        assertEquals(ThresholdOperator.ENTITIES_WORLD.criticalComparison(),
             ThresholdOperator.ENTITIES_GLOBAL.criticalComparison(),
-            "采集层对 entities 用的是 `>`（开区间），展示层 ThresholdColors 用 `>=`（闭区间）——"
-                + "这是 README 第 39 行明写的早预警语义：读数恰好等于 30000 时界面先标红、告警还在路上。"
-                + "若你刚把它改成 `>=`，那是有意识的行为变更（早预警语义被取消）——请同时确认"
-                + "ThresholdColorsTest 的「30000 必须已经变红」仍然成立，并更新本测试的说明");
-
-        // 行为侧同一件事：恰好 30000 只到 1 级，展示层却是 CRITICAL
-        assertEquals(1, ThresholdOperator.ENTITIES_GLOBAL.levelOf(30_000, 20_000, 30_000),
-            "读数恰好等于 critical 阈值时采集层必须只到 warning（开区间）");
-        assertEquals(ThresholdColors.Level.CRITICAL,
-            colors().levelOf(ThresholdColors.Metric.ENTITIES, 30_000),
-            "同一个 30000 在展示层必须已经是 CRITICAL——两者的差就是「早预警」本身");
-    }
-
-    /**
-     * 采集层对 memory / players 用<b>闭</b>区间（{@code >=}），与展示层一致。
-     *
-     * <p>这两个是百分比指标，"达到 85%" 比 "超过 85%" 更符合直觉，
-     * 且它们的默认值（85/95、90/98）不是"上界留余量"取的——所以两侧一致是正确的。</p>
-     */
-    @Test
-    void collectorUsesClosedIntervalForPercentMetrics() {
-        assertEquals(ThresholdOperator.Comparison.INCLUSIVE,
-            ThresholdOperator.PLAYERS.criticalComparison(),
-            "players 是百分比指标，采集层用闭区间 `>=`，与展示层一致");
-        assertEquals(ThresholdOperator.Comparison.INCLUSIVE,
-            ThresholdOperator.MEMORY.criticalComparison(),
-            "memory 是百分比指标，采集层用闭区间 `>=`，与展示层一致");
-
-        // 行为侧：恰好到线就进档，两层同时成立才叫"一致"
-        assertEquals(1, ThresholdOperator.PLAYERS.levelOf(90, 90, 98));
-        assertEquals(1, ThresholdOperator.MEMORY.levelOf(85, 85, 95));
-        assertEquals(ThresholdColors.Level.WARN, colors().levelOf(ThresholdColors.Metric.MEMORY, 85));
+            "逐世界与全服实体的闭合性一旦分叉，覆盖世界的边界值上颜色与告警就会不同；"
+                + "要分叉请先给 ThresholdColors 与阈值文案各自加用例");
+        // 未覆盖的世界仍走全局那条（同一个读数在 nether 上 GOOD、在全局口径下 GOOD，但阈值不同）
+        assertEquals(plain.levelOf(ThresholdColors.Metric.ENTITIES, 20_000),
+            overridden.levelOf(ThresholdColors.Metric.ENTITIES, 20_000, "end"));
     }
 
     // ------------------------------------------------------------------------------------
-    // 3. 早预警语义的汇总断言（让"设计意图"本身成为一条可失败的用例）
+    // 3. 唯一看似该进 allow-list 的候选：CPU
     // ------------------------------------------------------------------------------------
 
     /**
-     * <b>钉住差异清单</b>：本条覆盖高值差两族（{@code entities} / {@code mspt}）的口径差异。
+     * CPU：采集层走迟滞闩锁、展示层走瞬时值，但<b>进入线是同一个比较符</b>，
+     * 所以它<b>不是</b>需要 allow-list 的差异。
      *
-     * <p>作用是把"早预警语义"从注释里的一句话变成会变红的断言。它断言的是<b>当前设计下的差异集合</b>——
-     * 若将来有人统一了口径，这里会红，让他必须来更新这份清单（而不是让语义悄悄消失或悄悄扩大）。</p>
-     *
-     * <p>另两族（{@code chunks} 同为高值差开区间、{@code tps} 为低值差且差两档）见类注释的对照表；
-     * 本条不重复断言它们，断言内容保持不变。</p>
+     * <p>这条替原本可能写下的 allow-list 说明原因。两层量的是不同问题
+     * （闩锁答"状态要不要延续"、颜色答"此刻读数是多少"），差异只在<b>是否存在记忆</b>，
+     * 不在边界位置：{@code 80.00%} 两边都不越界，{@code 80.01%} 两边都越界。
+     * 一条"看起来不一致"的注释会让人以为这里也有 shim，而实际没有。</p>
      */
     @Test
-    void knownDivergencesBetweenLayersAreExactlyThese() {
-        // 采集层用开区间（>）的指标——判定的唯一来源是 ThresholdOperator 这张表，
-        // 所以这里断言表的取值，而不是 MetricsCollector 里的某一行字面量
-        //（判定收进表之后字面量必然搬走，文本断言会假红；见 collectorUsesStrictGreaterThanForEntities 的说明）。
-        boolean entitiesStrict =
-            ThresholdOperator.ENTITIES_GLOBAL.criticalComparison() == ThresholdOperator.Comparison.STRICT;
-        // mspt 的判定已抽进纯函数 msptAlertLevel 并委托给 ThresholdOperator.MSPT（v1.6 让哨兵口径可测）；
-        // 探针跟着搬到表里，语义仍是「开区间」——顺便把"改表时把 STRICT 写成 INCLUSIVE"变成会红的事实。
-        boolean msptStrict =
-            ThresholdOperator.MSPT.criticalComparison() == ThresholdOperator.Comparison.STRICT;
-
-        // 展示层对高值差指标用闭区间（>=）；低值差指标 TPS 方向相反，用 <=。
+    void cpuColourUsesTheSameEntryLineAsTheLatch() {
         ThresholdColors c = colors();
-        boolean displayEntitiesClosed =
-            c.levelOf(ThresholdColors.Metric.ENTITIES, 30_000) == ThresholdColors.Level.CRITICAL;
-        boolean displayMsptClosed =
-            c.levelOf(ThresholdColors.Metric.MSPT, 50) == ThresholdColors.Level.CRITICAL;
+        double threshold = configOf().cpu_processWarningThreshold;   // 80.0
 
-        assertEquals(true, displayEntitiesClosed && displayMsptClosed,
-            "展示层对高值差指标 entities 与 mspt 用闭区间（恰好到线就变红）");
+        assertEquals(ThresholdColors.Level.GOOD, c.levelOf(ThresholdColors.Metric.CPU_PROCESS, threshold),
+            "CPU 恰好等于阈值：闩锁的进入线是严格 `>`，颜色也不能变黄");
+        assertEquals(ThresholdColors.Level.WARN, c.levelOf(ThresholdColors.Metric.CPU_PROCESS, threshold + 0.01));
 
-        assertEquals("entities 开 / mspt 开",
-            (entitiesStrict ? "entities 开" : "entities 闭")
-                + " / " + (msptStrict ? "mspt 开" : "mspt 闭"),
-            "早预警语义的差异清单变了。当前：entities 与 mspt 在采集层是开区间（>），"
-                + "在展示层是闭区间（>=），所以边界值会出现「界面已标红但告警未发」——这是 README 第 39 行"
-                + "明写的既定设计。若你刚统一了口径（取消了早预警），更新这份清单与"
-                + " ThresholdBoundaryAsymmetryTest 的说明");
+        assertEquals(ThresholdColors.Level.GOOD, c.levelOf(ThresholdColors.Metric.CPU_SYSTEM,
+                configOf().cpu_systemWarningThreshold));
+        // 最高只到 WARN：config 根本没有 critical 键，凭空造一档红色才是错
+        assertEquals(ThresholdColors.Level.WARN, c.levelOf(ThresholdColors.Metric.CPU_PROCESS, 100.0));
+
+        // 与采集层同一个出处：这条规则若被改坏（比如 STRICT→INCLUSIVE），
+        // latched 与颜色会同时挪，而 ThresholdTextMatchesOperatorTest 会先发现文案说了别的话
+        assertEquals(ThresholdOperator.Comparison.STRICT, ThresholdOperator.CPU_PROCESS.comparison(),
+            "CPU 进入线的闭合性属于算子表；改它必须同时改文案模板与这条断言");
+        assertEquals(">", ThresholdOperator.CPU_PROCESS.symbol());
     }
 }

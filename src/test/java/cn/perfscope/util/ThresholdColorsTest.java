@@ -46,10 +46,14 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  *
  * <h2>实现事实（下面每条都有用例钉住）</h2>
  * <ul>
- *   <li><b>阈值是闭区间</b>：恰好等于阈值即变色。低值差指标（TPS）用 {@code <=}，
- *       其余全部用 {@code >=}。这与采集层告警的严格比较（MSPT/实体/区块用 {@code >}）
- *       刻意不一致——"看到颜色变化时告警还在路上"，属有意的早预警。</li>
- *   <li><b>哨兵 {@code -1} 只有 MSPT / CPU_PROCESS / CPU_SYSTEM 识别</b>（{@code <= 0 → UNKNOWN}）。
+ *   <li><b>比较符不写在本类被测代码里</b>：{@link ThresholdColors} 对每个指标都调
+ *       {@link cn.perfscope.metrics.ThresholdOperator} 的规则。因此 TPS 用 {@code <}、
+ *       MSPT / 实体 / 区块用 {@code >}（恰好等于阈值<b>不</b>变色），
+ *       MEMORY / PLAYERS 用 {@code >=}（恰好等于就变色），CPU 用 {@code >}（只有一档）。
+ *       这与采集层告警<b>逐点相同</b>——此前展示层自写闭区间、边界值上比告警早一整档，
+ *       是把缺陷写成了"早预警"，见 {@code ThresholdBoundaryAsymmetryTest} 的说明。</li>
+ *   <li><b>哨兵 {@code -1} 只有 MSPT / CPU_PROCESS / CPU_SYSTEM 识别</b>（MSPT 是 {@code <= 0}，
+ *       CPU 是 {@code < 0}——0% 是空载服务器的真实读数）。
  *       TPS / MEMORY / PLAYERS / ENTITIES / CHUNKS 的 {@code -1} 会落到正常比较里，
  *       TPS 因此判成 <b>CRITICAL</b>。见 {@link #sentinelMinusOneIsHonouredOnlyForMsptAndCpu}
  *       与类尾的"已知不一致"说明。</li>
@@ -121,20 +125,24 @@ class ThresholdColorsTest {
         return new ThresholdColors(manager(cfg));
     }
 
-    // ==================== TPS：低值差，闭区间，最高到 CRITICAL ====================
+    // ==================== TPS：低值差，严格比较，最高到 CRITICAL ====================
 
     @Test
-    @DisplayName("TPS 闭区间：20 GOOD / 18 恰好 WARN / 15 恰好 CRITICAL / 0 是真实冻结值")
+    @DisplayName("TPS 严格比较：20 GOOD / 17.99 WARN / 14.99 CRITICAL / 0 是真实冻结值")
     void tpsBoundariesAreClosedIntervals() {
         ThresholdColors c = colors();
         // 满 TPS 与略低于满值：GOOD
         assertEquals(Level.GOOD, c.levelOf(Metric.TPS, 20.0));
-        assertEquals(Level.GOOD, c.levelOf(Metric.TPS, 18.01), "略高于 warning 仍是 GOOD");
-        // 恰好等于 warning → WARN（闭区间；若把 <= 写成 < 这里会是 GOOD）
-        assertEquals(Level.WARN, c.levelOf(Metric.TPS, 18.0), "18.0 必须已经变黄");
-        assertEquals(Level.WARN, c.levelOf(Metric.TPS, 15.01), "略高于 critical 仍是 WARN");
-        // 恰好等于 critical → CRITICAL
-        assertEquals(Level.CRITICAL, c.levelOf(Metric.TPS, 15.0), "15.0 必须已经变红");
+        // 恰好等于 warning 线仍是 GOOD：采集层判据是 <，颜色必须同口径（曾经这里是 WARN）
+        assertEquals(Level.GOOD, c.levelOf(Metric.TPS, 18.0),
+            "18.0 与告警同口径：严格 < 不成立，仍是绿色");
+        assertEquals(Level.GOOD, c.levelOf(Metric.TPS, 18.01), "略高于 warning 还是 GOOD");
+        assertEquals(Level.WARN, c.levelOf(Metric.TPS, 17.99), "低于 warning 线才变黄");
+        // 恰好等于 critical 线是 WARN，不是 CRITICAL——这一格是本次修正的核心
+        assertEquals(Level.WARN, c.levelOf(Metric.TPS, 15.0),
+            "15.0 与告警同为 WARNING：曾经这里判红，与告警差一整档");
+        assertEquals(Level.WARN, c.levelOf(Metric.TPS, 15.01));
+        assertEquals(Level.CRITICAL, c.levelOf(Metric.TPS, 14.99), "越过 critical 才变红");
         assertEquals(Level.CRITICAL, c.levelOf(Metric.TPS, 10.0));
         // TPS=0 是"服务器完全冻结"的真实读数，必须红而不是 UNKNOWN（javadoc 明示）
         assertEquals(Level.CRITICAL, c.levelOf(Metric.TPS, 0.0), "TPS 0 是真实告警值，不是未采集");
@@ -147,17 +155,19 @@ class ThresholdColorsTest {
         assertEquals(Level.GOOD, colors().levelOf(Metric.TPS, 100.0));
     }
 
-    // ==================== MSPT：高值差，闭区间 ====================
+    // ==================== MSPT：高值差，严格比较 ====================
 
     @Test
-    @DisplayName("MSPT 闭区间：44.99 GOOD / 45 恰好 WARN / 50 恰好 CRITICAL")
+    @DisplayName("MSPT 严格比较：44.99 GOOD / 45 仍 GOOD / 50 是 WARN / 50.01 CRITICAL")
     void msptBoundariesAreClosedIntervals() {
         ThresholdColors c = colors();
         assertEquals(Level.GOOD, c.levelOf(Metric.MSPT, 1.0));
         assertEquals(Level.GOOD, c.levelOf(Metric.MSPT, 44.99), "略低于 warning 仍是 GOOD");
-        assertEquals(Level.WARN, c.levelOf(Metric.MSPT, 45.0), "45.0 必须已经变黄");
+        assertEquals(Level.GOOD, c.levelOf(Metric.MSPT, 45.0), "恰好 45 不变黄：采集层是严格 >");
+        assertEquals(Level.WARN, c.levelOf(Metric.MSPT, 45.01), "越过 warning 才变黄");
         assertEquals(Level.WARN, c.levelOf(Metric.MSPT, 49.99));
-        assertEquals(Level.CRITICAL, c.levelOf(Metric.MSPT, 50.0), "50.0 必须已经变红");
+        assertEquals(Level.WARN, c.levelOf(Metric.MSPT, 50.0), "恰好 50 是 WARN：与告警同档");
+        assertEquals(Level.CRITICAL, c.levelOf(Metric.MSPT, 50.01), "越过 critical 才变红");
         assertEquals(Level.CRITICAL, c.levelOf(Metric.MSPT, 500.0));
     }
 
@@ -175,22 +185,26 @@ class ThresholdColorsTest {
     }
 
     @Test
-    @DisplayName("CPU_PROCESS 只到 WARN（config 无 critical 键），80 恰好变黄、永不返回 CRITICAL")
+    @DisplayName("CPU_PROCESS 只到 WARN（config 无 critical 键），80 仍 GOOD、80.01 变黄、永不 CRITICAL")
     void cpuProcessCapsAtWarn() {
         ThresholdColors c = colors();
         assertEquals(Level.GOOD, c.levelOf(Metric.CPU_PROCESS, 79.99));
-        assertEquals(Level.WARN, c.levelOf(Metric.CPU_PROCESS, 80.0), "80 必须已经变黄");
+        // 恰好等于阈值是 GOOD：采集层闩锁的进入线是严格 `>`，颜色不能比告警早
+        assertEquals(Level.GOOD, c.levelOf(Metric.CPU_PROCESS, 80.0),
+            "80.0 与迟滞闩锁同口径：恰好等于阈值不进入告警，也不该变黄");
+        assertEquals(Level.WARN, c.levelOf(Metric.CPU_PROCESS, 80.01));
         // 关键：即便 100% 也只有 WARN——没有 critical 键就不该凭空造一档红色
         assertEquals(Level.WARN, c.levelOf(Metric.CPU_PROCESS, 100.0));
         assertEquals(Level.WARN, c.levelOf(Metric.CPU_PROCESS, 1_000.0));
     }
 
     @Test
-    @DisplayName("CPU_SYSTEM 只到 WARN，90 恰好变黄")
+    @DisplayName("CPU_SYSTEM 只到 WARN，90 仍 GOOD、90.01 变黄")
     void cpuSystemCapsAtWarn() {
         ThresholdColors c = colors();
         assertEquals(Level.GOOD, c.levelOf(Metric.CPU_SYSTEM, 89.99));
-        assertEquals(Level.WARN, c.levelOf(Metric.CPU_SYSTEM, 90.0), "90 必须已经变黄");
+        assertEquals(Level.GOOD, c.levelOf(Metric.CPU_SYSTEM, 90.0), "恰好 90 不进入（严格 >）");
+        assertEquals(Level.WARN, c.levelOf(Metric.CPU_SYSTEM, 90.01));
         assertEquals(Level.WARN, c.levelOf(Metric.CPU_SYSTEM, 100.0));
     }
 
@@ -207,24 +221,28 @@ class ThresholdColorsTest {
     }
 
     @Test
-    @DisplayName("CHUNKS 闭区间：9999 GOOD / 10000 WARN / 15000 CRITICAL")
+    @DisplayName("CHUNKS 严格比较：9999 GOOD / 10000 仍 GOOD / 15000 是 WARN / 15001 CRITICAL")
     void chunksBoundaries() {
         ThresholdColors c = colors();
         assertEquals(Level.GOOD, c.levelOf(Metric.CHUNKS, 9_999));
-        assertEquals(Level.WARN, c.levelOf(Metric.CHUNKS, 10_000), "10000 必须已经变黄");
+        assertEquals(Level.GOOD, c.levelOf(Metric.CHUNKS, 10_000), "恰好 10000 不变黄（严格 >）");
+        assertEquals(Level.WARN, c.levelOf(Metric.CHUNKS, 10_001));
         assertEquals(Level.WARN, c.levelOf(Metric.CHUNKS, 14_999));
-        assertEquals(Level.CRITICAL, c.levelOf(Metric.CHUNKS, 15_000), "15000 必须已经变红");
+        assertEquals(Level.WARN, c.levelOf(Metric.CHUNKS, 15_000), "恰好 15000 是 WARN：与告警同档");
+        assertEquals(Level.CRITICAL, c.levelOf(Metric.CHUNKS, 15_001), "越过 critical 才变红");
         assertEquals(Level.CRITICAL, c.levelOf(Metric.CHUNKS, 100_000));
     }
 
     @Test
-    @DisplayName("ENTITIES（全局阈值）闭区间：19999 GOOD / 20000 WARN / 30000 CRITICAL")
+    @DisplayName("ENTITIES（全局阈值）严格比较：19999 GOOD / 20000 仍 GOOD / 30000 WARN / 30001 CRITICAL")
     void entitiesGlobalBoundaries() {
         ThresholdColors c = colors();
         assertEquals(Level.GOOD, c.levelOf(Metric.ENTITIES, 19_999));
-        assertEquals(Level.WARN, c.levelOf(Metric.ENTITIES, 20_000), "20000 必须已经变黄");
+        assertEquals(Level.GOOD, c.levelOf(Metric.ENTITIES, 20_000), "恰好 20000 不变黄（严格 >）");
+        assertEquals(Level.WARN, c.levelOf(Metric.ENTITIES, 20_001));
         assertEquals(Level.WARN, c.levelOf(Metric.ENTITIES, 29_999));
-        assertEquals(Level.CRITICAL, c.levelOf(Metric.ENTITIES, 30_000), "30000 必须已经变红");
+        assertEquals(Level.WARN, c.levelOf(Metric.ENTITIES, 30_000), "恰好 30000 是 WARN：与告警同档");
+        assertEquals(Level.CRITICAL, c.levelOf(Metric.ENTITIES, 30_001), "越过 critical 才变红");
         assertEquals(Level.CRITICAL, c.levelOf(Metric.ENTITIES, 1_000_000));
     }
 
@@ -239,11 +257,13 @@ class ThresholdColorsTest {
         assertEquals(Level.GOOD, c.levelOf(Metric.ENTITIES, 600));
         assertEquals(Level.WARN, c.levelOf(Metric.ENTITIES, 600, "world_nether"));
 
-        // 世界阈值同样是闭区间
+        // 世界阈值同样是严格比较（与全局同一条算子）
         assertEquals(Level.GOOD, c.levelOf(Metric.ENTITIES, 499, "world_nether"));
-        assertEquals(Level.WARN, c.levelOf(Metric.ENTITIES, 500, "world_nether"), "500 必须已经变黄");
+        assertEquals(Level.GOOD, c.levelOf(Metric.ENTITIES, 500, "world_nether"), "恰好 500 不变黄");
+        assertEquals(Level.WARN, c.levelOf(Metric.ENTITIES, 501, "world_nether"));
         assertEquals(Level.WARN, c.levelOf(Metric.ENTITIES, 799, "world_nether"));
-        assertEquals(Level.CRITICAL, c.levelOf(Metric.ENTITIES, 800, "world_nether"), "800 必须已经变红");
+        assertEquals(Level.WARN, c.levelOf(Metric.ENTITIES, 800, "world_nether"), "恰好 800 是 WARN");
+        assertEquals(Level.CRITICAL, c.levelOf(Metric.ENTITIES, 801, "world_nether"), "越过 critical 才变红");
     }
 
     @Test
@@ -268,9 +288,10 @@ class ThresholdColorsTest {
     @DisplayName("非 ENTITIES 指标忽略 worldOrNull 参数")
     void worldArgumentIsIgnoredForOtherMetrics() {
         ThresholdColors c = colorsWithWorld("world_nether", 500, 800);
-        // 同一个世界名对 CHUNKS 无效：仍是全局 10000/15000
+        // 同一个世界名对 CHUNKS 无效：仍是全局 10000/15000（严格比较）
         assertEquals(Level.GOOD, c.levelOf(Metric.CHUNKS, 9_999, "world_nether"));
-        assertEquals(Level.WARN, c.levelOf(Metric.CHUNKS, 10_000, "world_nether"));
+        assertEquals(Level.GOOD, c.levelOf(Metric.CHUNKS, 10_000, "world_nether"), "恰好 10000 仍 GOOD");
+        assertEquals(Level.WARN, c.levelOf(Metric.CHUNKS, 10_001, "world_nether"));
         assertEquals(c.levelOf(Metric.TPS, 16.0), c.levelOf(Metric.TPS, 16.0, "world_nether"));
         assertEquals(c.levelOf(Metric.MSPT, 46.0), c.levelOf(Metric.MSPT, 46.0, "world_nether"));
     }
@@ -283,7 +304,9 @@ class ThresholdColorsTest {
         nullWorlds.worldSettings = null;
         ThresholdColors c1 = new ThresholdColors(manager(nullWorlds));
         assertEquals(Level.GOOD, c1.levelOf(Metric.ENTITIES, 600, "world_nether"));
-        assertEquals(Level.CRITICAL, c1.levelOf(Metric.ENTITIES, 30_000, "world_nether"));
+        assertEquals(Level.WARN, c1.levelOf(Metric.ENTITIES, 30_000, "world_nether"),
+            "回退到全局 20000/30000，严格比较下恰好 30000 是 WARN");
+        assertEquals(Level.CRITICAL, c1.levelOf(Metric.ENTITIES, 30_001, "world_nether"));
 
         // worldSettings 为空 map
         ThresholdColors c2 = colors();
@@ -295,10 +318,16 @@ class ThresholdColorsTest {
     void zeroWorldThresholdsMakeEverythingCritical() {
         // 这条不是"期望行为"，而是把职责边界钉住：0/0 的清洗在
         // ConfigManager.validateThresholds（sanitizeIntPair 要求 w >= 1）里，不在本类。
-        // 若有人删掉那处校验，世界覆盖会变成"永远红"，而这里会立刻告诉后来者原因。
+        // 若有人删掉那处校验，世界覆盖会变成"任何正数都红"，而这里会立刻告诉后来者原因。
+        //
+        // 注意改成严格比较之后的形状变化：判据是 `value > 0`，所以**恰好 0 个实体反而是 GOOD**
+        //（空世界确实是最健康的状态），从 1 开始永远 CRITICAL。这比原来的闭区间更隐蔽——
+        // 原来 0 也红，异常一眼看得见；现在只在真有实体时才红，而"永远红"本身就是错的。
         ThresholdColors c = colorsWithWorld("world_nether", 0, 0);
-        assertEquals(Level.CRITICAL, c.levelOf(Metric.ENTITIES, 0, "world_nether"));
-        assertEquals(Level.CRITICAL, c.levelOf(Metric.ENTITIES, 1, "world_nether"));
+        assertEquals(Level.GOOD, c.levelOf(Metric.ENTITIES, 0, "world_nether"),
+            "严格比较下 0 > 0 不成立，这个坏配置在空世界上看起来完全正常");
+        assertEquals(Level.CRITICAL, c.levelOf(Metric.ENTITIES, 1, "world_nether"),
+            "任何正数都红——0/0 必须在校验层被清掉，本类不做这件事");
     }
 
     // ==================== 哨兵值 ====================
@@ -505,17 +534,20 @@ class ThresholdColorsTest {
     // ==================== TPS 趋势桶 ====================
 
     @Test
-    @DisplayName("tpsTrendBucket：>=20 为 3，GOOD 2，WARN 1，CRITICAL 0")
+    @DisplayName("tpsTrendBucket：>=20 为 3，GOOD 2，WARN 1，CRITICAL 0（边界随严格比较移动）")
     void tpsTrendBucketMapping() {
         ThresholdColors c = colors();
         assertEquals(3, c.tpsTrendBucket(20.0), "恰好 20.0 就是满档 3");
         assertEquals(3, c.tpsTrendBucket(20.5));
         assertEquals(2, c.tpsTrendBucket(19.99));
         assertEquals(2, c.tpsTrendBucket(18.01));
-        // 恰好等于 warning 阈值时，levelOf 已判 WARN → 桶 1
-        assertEquals(1, c.tpsTrendBucket(18.0));
+        // 恰好等于 warning 阈值时 levelOf 仍是 GOOD（严格 <）→ 桶 2。
+        // 这正是"颜色与告警同口径"在趋势字符上的投影：18.0 不再提前变成 ":"
+        assertEquals(2, c.tpsTrendBucket(18.0));
+        assertEquals(1, c.tpsTrendBucket(17.99));
         assertEquals(1, c.tpsTrendBucket(15.01));
-        assertEquals(0, c.tpsTrendBucket(15.0));
+        assertEquals(1, c.tpsTrendBucket(15.0), "恰好 critical 线是 WARN 档 → 桶 1");
+        assertEquals(0, c.tpsTrendBucket(14.99));
         assertEquals(0, c.tpsTrendBucket(0.0), "TPS 0 是真实冻结，归 0 档");
     }
 
@@ -568,8 +600,8 @@ class ThresholdColorsTest {
     void repeatedCallsAreStable() {
         ThresholdColors c = colors();
         for (int i = 0; i < 3; i++) {
-            assertEquals(Level.WARN, c.levelOf(Metric.TPS, 18.0));
-            assertEquals(Level.CRITICAL, c.levelOf(Metric.MSPT, 50.0));
+            assertEquals(Level.WARN, c.levelOf(Metric.TPS, 17.99));
+            assertEquals(Level.WARN, c.levelOf(Metric.MSPT, 50.0));
             assertEquals(Level.UNKNOWN, c.levelOf(Metric.CPU_PROCESS, -1));
         }
         // 两个独立实例对同一配置给出同一答案（构造函数不缓存任何派生值）
@@ -583,7 +615,8 @@ class ThresholdColorsTest {
         strict.tps_warningThreshold = 19.5;
         strict.tps_criticalThreshold = 19.0;
         ThresholdColors c = new ThresholdColors(manager(strict));
-        // 18.0 在出厂阈值下是 WARN，在"更严"的配置下必须是 CRITICAL
+        // 出厂阈值(18/15)下 18.0 是 GOOD（严格 <）；"更严"配置(19.5/19.0)下 18.0 < 19.0 成立 → CRITICAL。
+        // 同一条断言证明的是"阈值变了，颜色就跟着变"，与闭合性无关
         assertEquals(Level.CRITICAL, c.levelOf(Metric.TPS, 18.0));
         assertEquals(Level.WARN, c.levelOf(Metric.TPS, 19.25));
         assertEquals(Level.GOOD, c.levelOf(Metric.TPS, 19.6));
@@ -594,10 +627,10 @@ class ThresholdColorsTest {
     void picksUpReplacedConfigWithoutReconstruction() {
         ConfigManager cm = manager(defaults());
         ThresholdColors c = new ThresholdColors(cm);
-        assertEquals(Level.WARN, c.levelOf(Metric.TPS, 18.0));
+        assertEquals(Level.GOOD, c.levelOf(Metric.TPS, 18.0), "出厂阈值下 18.0 是 GOOD（严格 <）");
 
         // 模拟 reload：ConfigManager.load() 末尾是整体替换 config 字段（单次发布）。
-        // 两个阈值都要抬：18.0 要变成 CRITICAL，critical 必须 >= 18.0 才可能命中
+        // 阈值抬到 19.9/19.5 后，同一个 18.0 变成 CRITICAL（18.0 < 19.5 成立）
         ConfigManager.ConfigData reloaded = defaults();
         reloaded.tps_warningThreshold = 19.9;
         reloaded.tps_criticalThreshold = 19.5;
