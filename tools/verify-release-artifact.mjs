@@ -86,6 +86,11 @@
 //   # 7. the same controls as an automated suite (asserts each exit code, 7 cases)
 //   node tools/verify-release-artifact.controls.mjs            # --fast: blob-only, no Maven
 //
+//   # 8. byte-level verdict using the SAME JDK CI uses (Temurin 17). Without --jdk this machine
+//   #    builds on whatever JAVA_HOME says (often 21/25), and SHA256/CONTENT degrade to SKIP
+//   #    (exit 3, INCOMPLETE) because class-file bytes are JDK-dependent.
+//   node tools/verify-release-artifact.mjs --jdk "C:\\Path\\to\\temurin-17" --ref v1.4.5-SNAPSHOT-fix1 --version 1.4.5-SNAPSHOT-fix1
+//
 // Full write-up -- what --ref can and cannot prove, and why git worktree was rejected:
 //   tools/VERIFY-RELEASE-ARTIFACT.md
 //
@@ -100,9 +105,36 @@
 //   node tools/verify-release-artifact.mjs --version 1.3.0
 //   node tools/verify-release-artifact.mjs --ref v1.3.0 [--version 1.3.0]
 //   node tools/verify-release-artifact.mjs --jar <path> --target <path>
+//   node tools/verify-release-artifact.mjs --jdk <path-to-jdk-home>  # build with THAT JDK
 //   node tools/verify-release-artifact.mjs --skip-fresh-build       # compare against existing target/
 //   node tools/verify-release-artifact.mjs --keep-workdir           # keep the --ref temp build dir
 //   node tools/verify-release-artifact.mjs --json
+//
+// ======================================================================================
+// JDK IDENTITY: the release is built by CI's Temurin 17 on Linux; this machine has 21/25
+// ======================================================================================
+// The shipped jar carries `Build-Jdk-Spec` in its manifest and JDK-version-dependent bytes in
+// the class constant pool (e.g. the `source` of a record's attribute, StackMapTable framing).
+// Building here on a different JDK than CI used cannot reproduce those bytes, so SHA256 and the
+// per-entry CONTENT comparison legitimately differ even for a perfectly good archive. Before
+// `--jdk` existed this was reported as FAIL -- a false alarm on every run, which trains people
+// to ignore the gate.
+//
+// Now the JDK used for the fresh build is an explicit input:
+//   * `--jdk <home>`  build with that JDK's java (sets JAVA_HOME for the Maven child);
+//   * otherwise       the ambient JAVA_HOME (or the mvn default if unset).
+// Then we compare the fresh build's manifest `Build-Jdk-Spec` (major version only) against the
+// archive's. When they differ, SHA256 and CONTENT are NOT failures -- they degrade to SKIP, and
+// the run reports INCOMPLETE (exit 3). Key-level checks (CONFIG / MESSAGES / plugin.yml) do not
+// depend on the JDK and keep running, so the run still proves a lot.
+//
+// Why compare major version and not the exact build string: `17.0.20.1` (Microsoft) vs
+// `17.0.11` (Temurin) is the same class-file target and reproduces identically; only the major
+// version changes the version-dependent bytes we care about. Vendor-specific manifest lines are
+// compared with `Build-Jdk-Spec` only.
+//
+// If you DO have the CI-matching JDK, pass it and expect a real PASS:
+//   node tools/verify-release-artifact.mjs --ref v1.4.5-SNAPSHOT-fix1 --version ... --jdk "C:\\Path\\to\\temurin-17"
 //
 // Design note: this script never writes to the repo and never bumps anything. --ref extracts to
 // and builds in os.tmpdir() only. It never runs git stash/checkout/switch and never creates a
@@ -135,6 +167,7 @@ const SKIP_BUILD = flag('--skip-fresh-build');
 const ALLOW_DIRTY = flag('--allow-dirty');
 const REF_INPUT = argOf('--ref', '');
 const KEEP_WORKDIR = flag('--keep-workdir');
+const JDK_ARG = argOf('--jdk', '');
 const MODE = REF_INPUT ? 'ref' : 'head';
 
 const results = [];
@@ -144,6 +177,21 @@ const pass = (id, detail) => rec(id, true, detail);
 const skip = (id, why) => results.push({ id, status: 'skip', detail: why });
 const note = (id, detail) => results.push({ id, status: 'info', detail });
 const info = (msg) => { if (!AS_JSON) console.log(msg); };
+
+// archive-release.ps1 is NOT in this repo -- it lives in the parent workspace's tools/
+// directory (D:\Server\MCServers\Server plugin\tools\), alongside the other plugin repos and
+// deliberately outside git. It never travelled with the backend repo, so "tools/archive-release.ps1"
+// as printed to the user was a path that does not resolve from a fresh clone. Resolve it
+// relative to REPO and fall back to an honest description when the sibling checkout is absent.
+const ARCHIVE_TOOL = (() => {
+  const rel = path.resolve(REPO, '..', 'tools', 'archive-release.ps1');
+  const abs = path.resolve(REPO, 'tools', 'archive-release.ps1');
+  if (fs.existsSync(rel)) return { path: rel, where: 'workspace (outside the repo)' };
+  if (fs.existsSync(abs)) return { path: abs, where: 'in the repo' };
+  return { path: rel, where: 'MISSING -- workspace copy not found' };
+})();
+const archiveToolHint = () =>
+  `tools/archive-release.ps1 is ${ARCHIVE_TOOL.where}: ${ARCHIVE_TOOL.path}`;
 
 // --------------------------------------------------------------------------------------
 // small helpers
@@ -357,7 +405,8 @@ const ARCHIVE = path.resolve(argOf('--jar', path.join(REPO, 'versions', JAR_NAME
 if (!fs.existsSync(ARCHIVE)) {
   info('');
   info(`  archive : MISSING  ${ARCHIVE}`);
-  info(`  Run tools/archive-release.ps1 first, then re-run this check.`);
+  info(`  ${archiveToolHint()}`);
+  info(`  Run it first, then re-run this check.`);
   console.error(`RESULT: FAIL (archive jar not found)`);
   process.exit(2);
 }
@@ -367,6 +416,67 @@ if (!fs.existsSync(ARCHIVE)) {
 //    head mode : mvn clean package in the repo (existing behaviour)
 //    ref  mode : git archive -> temp extraction -> mvn clean package there
 // ======================================================================================
+// --------------------------------------------------------------------------------------
+// JDK identity
+// --------------------------------------------------------------------------------------
+// A JDK install is a directory with `release` (key=value) and `bin/java[.exe]`. `--jdk` may
+// point at either the home or the java launcher; normalise both to the home.
+function normalizeJdkHome(p) {
+  if (!p) return null;
+  let abs = path.resolve(p);
+  // allow ".../bin/java" or ".../bin/java.exe"
+  if (/[\\/]bin[\\/]java(\.exe)?$/i.test(abs)) abs = path.dirname(path.dirname(abs));
+  return abs;
+}
+
+/** Read the JDK's `release` file -- present in every modern JDK, unlike needing to run java. */
+function jdkInfo(home) {
+  const rel = path.join(home, 'release');
+  if (!fs.existsSync(rel)) {
+    // still accept a dir that has bin/java (some trimmed runtimes drop `release`)
+    const javaExe = process.platform === 'win32'
+      ? path.join(home, 'bin', 'java.exe') : path.join(home, 'bin', 'java');
+    return fs.existsSync(javaExe) ? { home, version: null, vendor: null } : null;
+  }
+  const txt = fs.readFileSync(rel, 'utf8');
+  const get = (k) => {
+    const m = txt.match(new RegExp(`^${k}="?([^"\\r\\n]+)"?`, 'm'));
+    return m ? m[1] : null;
+  };
+  // JAVA_VERSION looks like "17.0.20.1" or "21.0.10"; major = leading integer.
+  const version = get('JAVA_VERSION');
+  const major = version ? parseInt(String(version).split('.')[0], 10) : null;
+  const implVendor = get('IMPLEMENTOR') || get('IMPLEMENTOR_URL') || null;
+  return { home, version, major, vendor: implVendor };
+}
+
+/** What JDK will the Maven child actually use? --jdk wins; else JAVA_HOME; else unknown. */
+function effectiveJdk() {
+  if (JDK_ARG) {
+    const home = normalizeJdkHome(JDK_ARG);
+    const infoRec = home && jdkInfo(home);
+    if (!infoRec) return { home, info: null, source: '--jdk', invalid: true };
+    return { home, info: infoRec, source: '--jdk' };
+  }
+  if (process.env.JAVA_HOME) {
+    const home = normalizeJdkHome(process.env.JAVA_HOME);
+    const infoRec = jdkInfo(home);
+    return { home, info: infoRec, source: 'JAVA_HOME' };
+  }
+  return { home: null, info: null, source: 'mvn default (JAVA_HOME unset)' };
+}
+
+/** Major JDK version recorded in a jar's manifest as `Build-Jdk-Spec`, or null. */
+function jarBuildJdkSpec(zipMap) {
+  for (const [name, e] of zipMap) {
+    if (!/^META-INF\/MANIFEST\.MF$/i.test(name)) continue;
+    const txt = e.data().toString('utf8').replace(/\r\n/g, '\n').replace(/\n /g, '');
+    const m = txt.match(/^Build-Jdk-Spec:\s*(\d+)/m);
+    return m ? parseInt(m[1], 10) : null;
+  }
+  return null;
+}
+
 function mvnCandidates() {
   // `mvn` is frequently NOT on PATH on this machine (CLAUDE.md pins it to
   // D:\maven\apache-maven-3.9.9\bin\mvn.cmd). Trying the bare name first made the build check
@@ -377,12 +487,17 @@ function mvnCandidates() {
 
 function runMvn(cwd) {
   let lastErr = '';
+  // Force JAVA_HOME (hence the JDK) for the Maven child when --jdk was given. Maven prefers
+  // JAVA_HOME over everything else, so this is enough -- no PATH surgery needed.
+  const childEnv = { ...process.env };
+  const jdk = effectiveJdk();
+  if (JDK_ARG && jdk.home) childEnv.JAVA_HOME = jdk.home;
   for (const mvn of mvnCandidates()) {
     try {
       // On Windows a .cmd shim cannot be spawned directly (EINVAL) -- it needs a shell.
       const isWinShim = /\.(cmd|bat)$/i.test(mvn);
       execFileSync(mvn, ['-B', '-ntp', '-q', 'clean', 'package', '-DskipTests'], {
-        cwd, stdio: ['ignore', 'inherit', 'inherit'], shell: isWinShim,
+        cwd, stdio: ['ignore', 'inherit', 'inherit'], shell: isWinShim, env: childEnv,
       });
       return { ok: true, mvn };
     } catch (e) {
@@ -527,12 +642,66 @@ if (fresh) info(`  fresh  : ${path.basename(TARGET)}  ${fresh.bytes} B  sha ${fr
 if (KEEP_WORKDIR && tmpRoot) info(`  workdir: kept at ${tmpRoot} (--keep-workdir)`);
 
 // ======================================================================================
+// 3b. JDK identity -- decides whether byte-level checks are even comparable
+// ======================================================================================
+// Class-file bytes depend on the JDK that compiled them (StackMapTable framing, record
+// attribute `source` strings, `Build-Jdk-Spec` in the manifest). CI builds the release with
+// Temurin 17 on Linux; a machine with only 21/25 cannot reproduce those bytes no matter how
+// correct the source is. So: compare the major version, and when it differs, DEMOTE the two
+// byte-level checks to SKIP instead of FAIL. A FAIL here is a false alarm that teaches people
+// to ignore the gate -- which is worse than an honest "not verified".
+const jdkUsed = effectiveJdk();
+if (JDK_ARG && jdkUsed.invalid) {
+  fail('JDK --jdk usable',
+    `--jdk ${JDK_ARG} does not look like a JDK (no release file and no bin/java under ${jdkUsed.home})`);
+} else if (JDK_ARG && jdkUsed.info) {
+  pass('JDK --jdk usable',
+    `${jdkUsed.info.version || 'unknown version'}${jdkUsed.info.vendor ? ` (${jdkUsed.info.vendor})` : ''} at ${jdkUsed.home}`);
+}
+
+const archJdkSpec = jarBuildJdkSpec(archived.zip);
+const freshJdkSpec = fresh ? jarBuildJdkSpec(fresh.zip) : null;
+
+/** true / false when both sides are known; null when we cannot tell. */
+const jdkMajorsMatch = (archJdkSpec != null && freshJdkSpec != null)
+  ? (archJdkSpec === freshJdkSpec) : null;
+
+if (!JDK_ARG) {
+  info(`  jdk    : ${jdkUsed.info ? `${jdkUsed.info.version}${jdkUsed.info.vendor ? ` (${jdkUsed.info.vendor})` : ''}` : 'unknown'}`
+    + `  [${jdkUsed.source}]`);
+}
+info(`  jdk    : archive built by JDK ${archJdkSpec ?? '?'}`
+  + (fresh ? `, fresh build by JDK ${freshJdkSpec ?? '?'}` : '')
+  + (jdkMajorsMatch === false ? '  <- MISMATCH: byte-level checks cannot be compared' : ''));
+
+if (fresh) {
+  if (jdkMajorsMatch === true) {
+    pass('JDK fresh build == archive build',
+      `both JDK ${freshJdkSpec}; byte-level comparisons are meaningful`);
+  } else if (jdkMajorsMatch === false) {
+    note('JDK fresh build == archive build',
+      `archive was built by JDK ${archJdkSpec}, this fresh build by JDK ${freshJdkSpec}. SHA256 and`
+      + ` per-entry CONTENT will be reported as SKIPPED, not FAILED: class-file bytes differ by JDK,`
+      + ` so this run cannot decide byte identity. Run with --jdk <the CI JDK (17)> to get a verdict,`
+      + ` or set JAVA_HOME to it before running this script.`);
+  } else {
+    note('JDK fresh build == archive build',
+      'could not read Build-Jdk-Spec from one side; assuming the comparison is meaningful');
+  }
+}
+
+// ======================================================================================
 // 4. SHA256
 // ======================================================================================
 if (!fresh) {
   skip('SHA256 archive == fresh build',
     `no fresh build of ${BASELINE_LABEL} (${SKIP_BUILD ? '--skip-fresh-build was passed' : 'the build failed'});`
     + ` archive byte-identity is UNVERIFIED -- re-run without --skip-fresh-build`);
+} else if (jdkMajorsMatch === false) {
+  skip('SHA256 archive == fresh build',
+    `not comparable: archive built by JDK ${archJdkSpec}, fresh build by JDK ${freshJdkSpec}.`
+    + ` Class-file bytes are JDK-dependent, so a sha mismatch here proves nothing. Pass`
+    + ` --jdk <the JDK CI uses (17)> to compare for real.`);
 } else if (archived.sha256 === fresh.sha256) {
   pass('SHA256 archive == fresh build', `${archived.sha256.slice(0, 16)}... (${archived.bytes} B) [${BASELINE_LABEL}]`);
 } else {
@@ -551,6 +720,15 @@ const isFunc = (n) => n.endsWith('.class') || n.endsWith('.yml') || n.endsWith('
 if (!fresh) {
   skip('CONTENT archive entries == fresh entries',
     `no fresh build of ${BASELINE_LABEL} to compare entries against; per-entry identity is UNVERIFIED`);
+} else if (jdkMajorsMatch === false) {
+  // Class entries are JDK-dependent. Dropping them and comparing only the resources would
+  // silently weaken the check (the whole point is the .class files), so this degrades to SKIP.
+  // The .yml/.json resources DO still get compared below in the CONFIG check, so the run is
+  // still informative.
+  skip('CONTENT archive entries == fresh entries',
+    `not comparable: archive built by JDK ${archJdkSpec}, fresh build by JDK ${freshJdkSpec}.`
+    + ` ${[...archived.zip.keys()].filter(isFunc).length} functional entries cannot be compared`
+    + ` across JDKs (class-file bytes differ). Pass --jdk <the JDK CI uses (17)> to compare for real.`);
 } else {
   const onlyInArchive = [];
   const onlyInFresh = [];
@@ -890,7 +1068,8 @@ if (fs.existsSync(provPath)) {
     rec('PROVENANCE sidecar readable', false, `cannot parse ${path.basename(provPath)}: ${e.message}`);
   }
 } else {
-  info(`  (no provenance sidecar at ${path.basename(provPath)} -- run tools/archive-release.ps1 to record one)`);
+  info(`  (no provenance sidecar at ${path.basename(provPath)} -- run archive-release.ps1 to record one:`
+    + ` ${ARCHIVE_TOOL.path})`);
 }
 
 // ======================================================================================
@@ -949,8 +1128,18 @@ if (AS_JSON) {
   if (counts.fail) {
     console.log('');
     console.log('Fix: rebuild from a clean checkout of the tag, copy target/*.jar over versions/,');
-    console.log('     then run tools/archive-release.ps1 -Version <x.y.z> to refresh the provenance file.');
+    console.log(`     then run ${ARCHIVE_TOOL.path} -Version <x.y.z> to refresh the provenance file.`);
+    console.log('     (That script lives OUTSIDE this repo -- see the path above.)');
     console.log(`     To check against the tag instead of the worktree: --ref v${VERSION} --version ${VERSION}`);
+  }
+  // INCOMPLETE caused specifically by a JDK mismatch is the common local case; say what to do
+  // about it rather than leaving the user to guess from the SKIP lines.
+  if (counts.fail === 0 && counts.skip > 0 && jdkMajorsMatch === false) {
+    console.log('');
+    console.log(`Note: the archive was built by JDK ${archJdkSpec} but this run built it with JDK ${freshJdkSpec}.`);
+    console.log('      Class-file bytes differ by JDK, so SHA256/CONTENT could not be compared. To get a');
+    console.log('      real verdict, point at the JDK CI uses for releases (Temurin 17):');
+    console.log(`        node tools/verify-release-artifact.mjs --jdk "<path to a JDK 17>" ...`);
   }
 }
 // Set for BOTH output modes. Previously this lived inside the text branch, so --json always
