@@ -10,6 +10,7 @@ import cn.perfscope.config.ConfigManager;
 import cn.perfscope.metrics.MetricsCollector;
 import cn.perfscope.metrics.MetricsSnapshot;
 import cn.perfscope.support.TestObjects;
+import cn.perfscope.util.Messages;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -30,11 +31,15 @@ class DiagnosticEngineContractTest {
 
     @BeforeAll
     static void initMessages() throws Exception {
-        Class.forName("cn.perfscope.config.ConfigMessages").getMethod("init").invoke(null);
-        Class.forName("cn.perfscope.diagnose.DiagnoseMessages").getMethod("init").invoke(null);
-        Class.forName("cn.perfscope.util.Messages")
-            .getMethod("load", Class.forName("cn.perfscope.PerfScope"))
-            .invoke(null, (Object) null);
+        // 走真实入口（裸 plugin 的 load(plugin)），**不要**用 Messages.load(null)。
+        //
+        // 为什么：load(null) 是"无插件"分支。它当前发布哪张表取决于该分支是否包含
+        // touchModules()+mergeModules()——那条 P1 修复正在另一个分支上评审中，
+        // 修好之前 diag.* 键不在表里、修好之后在。本类若依赖 load(null)，
+        // 就会变成"哪个分支上跑决定成败"的测试，而这正是 CoverageProblemTest 踩过的坑。
+        // AlertFixtures.initMessages() 走的是带 plugin 的那条路径（生产环境同款），
+        // 键在不在与分支状态无关，只与模块是否注册有关。
+        cn.perfscope.support.AlertFixtures.initMessages();
     }
 
     private static ConfigManager.ConfigData config() {
@@ -96,9 +101,23 @@ class DiagnosticEngineContractTest {
         DiagnosticEngine.Result r = engine(now, now - 5_000L).run();
         assertTrue(r.total() > 0, "stale-config path must still carry a real evaluation base");
         assertEquals(r.total(), r.skipped().size(), "every rule must be explicitly skipped");
-        assertTrue(r.skipped().stream()
-                .allMatch(s -> "diag.skip.stale-config".equals(s.reason())),
-            "skip reason must name the config generation");
+
+        // 期望值取自**文案表里的实际字符串**，不是键名。
+        //
+        // 旧写法是 `"diag.skip.stale-config".equals(s.reason())` —— 那条断言只有在
+        // Messages 查不到这个键（resolve 退回键名本身）时才成立，正是"恒真的假绿"：
+        // 它把"文案没接上"当成正确结果，于是 Messages 的加载一旦修好、真正解析出文案，
+        // 这条就红了。实测取证（本地）：Messages.load(null) 前后同一键分别解析出
+        // "diag.skip.stale-config" 与 "Configuration was reloaded after this sample was collected…"。
+        //
+        // 现在的判据是"reason 必须是这条键**解析出来的那句话**"——文案改了这里不会假红
+        // （直接取表），文案没接上则立刻红。
+        String expected = staleReason();
+        assertFalse("diag.skip.stale-config".equals(expected),
+            "fixture precondition: the key must resolve to real text, not fall back to itself");
+        assertTrue(r.skipped().stream().allMatch(s -> expected.equals(s.reason())),
+            "skip reason must name the config generation; got "
+                + r.skipped().stream().map(Diagnosis.Skip::reason).distinct().toList());
     }
 
     @Test
@@ -107,8 +126,9 @@ class DiagnosticEngineContractTest {
         // 发布 10 分钟前，快照更早：宽限窗口（30s~5min）已过，必须照常评估
         DiagnosticEngine.Result r = engine(now - 600_000L, now - 610_000L).run();
         assertFalse(r.skipped().stream()
-                .anyMatch(s -> "diag.skip.stale-config".equals(s.reason())),
-            "a stalled collector must not be silenced forever by the generation guard");
+                .anyMatch(s -> staleReason().equals(s.reason())),
+            "a stalled collector must not be silenced forever by the generation guard; got "
+                + r.skipped().stream().map(Diagnosis.Skip::reason).distinct().toList());
     }
 
     @Test
@@ -116,8 +136,22 @@ class DiagnosticEngineContractTest {
         long now = System.currentTimeMillis();
         DiagnosticEngine.Result r = engine(now - 10_000L, now).run();
         assertFalse(r.skipped().stream()
-                .anyMatch(s -> "diag.skip.stale-config".equals(s.reason())),
-            "a snapshot newer than the config publish must evaluate normally");
+                .anyMatch(s -> staleReason().equals(s.reason())),
+            "a snapshot newer than the config publish must evaluate normally; got "
+                + r.skipped().stream().map(Diagnosis.Skip::reason).distinct().toList());
+    }
+
+    /**
+     * 代次 skip 的期望文案（消息层对该键的<b>解析结果</b>）。
+     *
+     * <p><b>为什么两条负向断言也必须改</b>：它们原先写的是 {@code "diag.skip.stale-config"
+     * .equals(reason)}。键缺失时 reason 退回键名，{@code assertFalse(anyMatch(...))} 才有
+     * 拦截力；{@code Messages.load(null)} 修好之后 reason 是翻译文案，键名比对<b>恒为 false</b>，
+     * 于是这两条 {@code assertFalse} 退化成永真——规则真的"永久沉默"了它们也会绿。
+     * 负向断言比正向断言更危险，因为它绿的时候看起来像"通过了"。</p>
+     */
+    private static String staleReason() {
+        return Messages.get("diag.skip.stale-config");
     }
 
     @Test

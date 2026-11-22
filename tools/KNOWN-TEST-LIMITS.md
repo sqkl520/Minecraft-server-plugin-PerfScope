@@ -24,6 +24,7 @@
 | `FoliaSchedulerBridge` (121 行) | **部分已测** | `wrap` / `cancel` 已由 `FoliaSchedulerBridgeContractTest`（7 个用例）覆盖；另三个方法首步就调 `Bukkit.getGlobalRegionScheduler()`，仍不可测 |
 | `BstatsCharts` (197 行) | **部分已测** | `bucket()` / `normalizeLanguage()` 已由 `BstatsChartsBucketTest`（9 个用例）覆盖。此条此前判为"全部零测试"，**理由是错的**——见下方更正 |
 | `ReportGeneratorTest` 的 TPS 可用分支 | 部分 | 该测试已按"两条契约里必中一条"处理，不算缺失 |
+| **任何需要 `Server` 实例的路径** | **大部分已解** | 见下方 **1b**：`FakeServer`（手写 205 方法）可用。仍不可测的只有需要**真实** `Player` 或 `Bukkit.server` 静态入口的那些 |
 
 **注意一个反直觉的点**：`SchedulerAdapter` 的 import 里没有任何 `Bukkit.` 静态调用，
 只依赖 `Plugin` 与 `BukkitTask` 两个接口——看起来完全可以用 `Proxy` 造假。
@@ -116,6 +117,79 @@ Java 21 编译的**（class major 65），而项目锁定 `release 17`（major 6
 本地 Maven 仓库没有这个 artifact，当前网络受限无法拉取。
 如果要推进，第一件事是确认这两点。
 
+---
+
+## 1b. `Bukkit.server` 那堵墙已被绕过一半：`FakeServer`（2026-11-23 实测）
+
+> **状态更新**：第 1 条说的"造不出假 `Server`"对 **`Proxy`** 成立，对**手写具体实现**不成立。
+> 解法是 `src/test/java/cn/perfscope/support/FakeServer.java`，205 个方法，零生产代码改动。
+
+### 实测对照（同一台机器，同一份 test classpath）
+
+| JVM | `Proxy.newProxyInstance(Server.class, …)` | `new FakeServer(null)` |
+|---|---|---|
+| **JDK 17**（`mvn -version` 实测：Microsoft OpenJDK 17.0.20.1，surefire 实际用它） | **FAILED**：`ExceptionInInitializerError → NPE: Bukkit.server is null` | **OK** |
+| JDK 21（`D:\Java\zulu21…`） | OK | OK |
+
+JDK 17 的失败栈（实测，逐字）：
+
+```
+org.bukkit.generator.structure.StructureType.getStructureType(StructureType.java:35)
+org.bukkit.generator.structure.StructureType.<clinit>(StructureType.java:17)
+java.lang.Class.forName0(Native Method)
+jdk.proxy2.$Proxy13.<clinit>(Unknown Source)
+java.lang.reflect.Proxy.newProxyInstance(Proxy.java:1053)
+```
+
+### 根因（这条比结论更有用）
+
+`Server` 接口上有 `createExplorerMap(World, Location, StructureType, …)`。
+JDK 17 的 `Proxy` 生成的类在**自己的 `<clinit>` 里** `Class.forName` 解析全部方法的参数类型，
+于是触发 `StructureType.<clinit>` → 它第一件事就是 `Bukkit.server.getRegistry(...)` → NPE。
+JDK 21 的 `Proxy` 实现不再这么做，所以同一个调用在 21 上能过——
+**"能不能用 Proxy 造 Server" 会随 JVM 版本变化，把测试结论押在它上面本身就不该做。**
+
+### 为什么手写实现绕得开
+
+`implements Server` 在**编译期**要解析全部方法签名（所以 `FakeServer` 的 205 个方法
+是从 `Server.class.getMethods()` 生成的，不手写），但**运行期加载**它不初始化
+`StructureType`：JLS 12.4.1 只在"首次主动使用"时初始化，而**声明**一个参数类型不算主动使用。
+
+### 代价与维护
+
+- 205 个方法，绝大多数是 `throw new UnsupportedOperationException()`。只有 `getMessenger()`、
+  `sendPluginMessage`、`getListeningPluginChannels`、`audiences()` 有真实行为。
+- 升级 paper-api 后若 `Server` 新增抽象方法，`FakeServer` **编译失败**（不是运行期
+  `AbstractMethodError`）——这是想要的信号，照那三条规则补一个方法即可。
+- **已经吃到的收益**：`SummaryPublisher.register()` 的 P0-E 从"源码文本断言"升级成真行为测试
+  （注入会抛的 `Messenger`，断言返回 `false` 且不抛），以及 `unregister()` / `resetState()`
+  从零测试变成有测试。见 `SummaryPublisherRegisterTest`。
+
+### 仍然做不到的
+
+- **`Player`**：仍然造不出来。`Proxy(Player.class, …)` 要解析七层继承链，牵出
+  `PotionEffectType.<clinit>` → 同一个 `Bukkit.server` 墙。手写一个 `Player` 是 200+ 方法的
+  两倍规模，且 `Player` 的语义（在线/掉线/世界）不是桩能给的。
+- **`Bukkit.getServer()` 这个静态入口**：`FakeServer` 只能写进 `JavaPlugin.server` 字段，
+  改不了 `Bukkit.server`（还是那句话，需要 `Server` 实例——现在有了，但改静态字段是另一件事，
+  会影响同 JVM 的所有测试类，风险大于收益）。
+- **真实的 `Messenger` 语义**（"通道被别的插件占了"）：桩只能模拟"抛异常"这个形状，
+  不能模拟 Bukkit 内部的通道表。对 `register()` 的返回契约来说够了。
+
+---
+
+## 1c. 用 `Proxy` 造 `Messenger` / `PluginMessageRecipient` 是安全的（实测）
+
+这两个接口只有 15 / 2 个方法，且没有方法签名牵出需要 `Bukkit.server` 的类型。
+JDK 17 与 JDK 21 上**都实测可用**。`SummaryPublisherRegisterTest` 与
+`PublisherFailureThrottleTest` 都靠这一点。
+
+判据可以复用：**建代理前先看接口方法签名里有没有会在 `<clinit>` 里解引用 `Bukkit.server`
+的类型**（`StructureType` / `PotionEffectType` / `Registry` 家族）。`Server` 有，所以不行；
+`Messenger` 没有，所以行。
+
+---
+
 ### 如果将来要解，按这个顺序
 
 1. 确认 `mockbukkit-v1.20` 存在且能用 Java 17 编译（`javap -v` 看 major version）
@@ -125,6 +199,9 @@ Java 21 编译的**（class major 65），而项目锁定 `release 17`（major 6
    抛 `UnsupportedOperationException`；关键是**不能碰 `StructureType`**，
    而这一点在编译期无法回避（`implements Server` 就要解析所有方法签名）——
    除非用字节码生成（ASM/ByteBuddy），那又是一个新依赖
+
+> **第 3 条已落地**（2026-11-23）：见下方 1b。编译期解析方法签名是可以的，
+> 运行期才是不行的——原判断把两者混为一谈了。
 
 ---
 
