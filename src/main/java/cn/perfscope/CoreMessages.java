@@ -156,6 +156,13 @@ public final class CoreMessages {
         put(en, zh, "core.bstats.init-failed-detail",
             "[PerfScope] bStats initialization failed (skipped; the plugin itself is unaffected): {0}",
             "[PerfScope] bStats 匿名统计初始化失败（已跳过，不影响插件本体）: {0}");
+        // P0-F 附带：general.bstats-enabled 此前只在 onEnable 生效，reload 完全不碰它。
+        // 改 false 后遥测照发到下次重启 —— 隐私开关失效。现在 reload 会真的停，这条是回执。
+        put(en, zh, "core.bstats.reload-stopped",
+            "[PerfScope] bStats anonymous metrics stopped by reload (general.bstats-enabled=false): "
+                + "no telemetry will be sent until this is set back to true and reloaded again",
+            "[PerfScope] 已按 reload 后的配置停止 bStats 匿名统计（general.bstats-enabled=false）："
+                + "在改回 true 并再次 reload 之前不会再发送任何遥测数据");
 
         // ---- Prometheus 指标端点（v1.4）----
         put(en, zh, "core.prometheus.started",

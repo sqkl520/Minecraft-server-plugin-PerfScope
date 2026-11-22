@@ -83,6 +83,9 @@ public final class SummaryPublisher {
     private static final long ID_WARN_INTERVAL_MS = 300_000L;
     private long lastIdWarnAtMs;
 
+    /** 上一次 {@link #register()} 失败的原因（null = 成功或尚未登记）；供 /status 展示。 */
+    private volatile String registrationFailureReason;
+
     public SummaryPublisher(PerfScope plugin) {
         this.plugin = plugin;
     }
@@ -93,14 +96,27 @@ public final class SummaryPublisher {
      * <p>不登记的话 {@code sendPluginMessage} 会抛 {@code IllegalArgumentException}
      * （"Not registered"），而且是在采集线程里抛——会被外层 catch 吞掉，表现为
      * "功能开了但代理永远收不到"，是最难查的一类。所以登记失败必须大声。</p>
+     *
+     * <p><b>为什么返回 boolean 而不是自己打一条日志了事</b>：失败只记一条 warning 时，
+     * 调用方会紧接着无条件打一条「已启用」——两条日志相邻，后一条更像结论，控制台的
+     * 最终印象是"开好了"。登记成败是<b>调用方</b>才能正确叙述的事实（它同时知道配置开关、
+     * 间隔与"要不要提玩家在线"），所以这里只把结果交出去，由调用方决定打哪一句。</p>
+     *
+     * @return true = 通道已登记；false = 登记抛异常（原因见 {@link #registrationFailureReason()}）
      */
-    public void register() {
+    public boolean register() {
         try {
             plugin.getServer().getMessenger()
                 .registerOutgoingPluginChannel(plugin, NetworkSummary.CHANNEL);
+            registrationFailureReason = null;
+            return true;
         } catch (Exception | LinkageError e) {
+            // 留档给 /perfscope status：警告只在启动那一瞬间可见，翻过去就查不到了。
+            registrationFailureReason = e.getClass().getSimpleName()
+                + (e.getMessage() == null ? "" : ": " + e.getMessage());
             plugin.getLogger().warning("[PerfScope] 登记跨服通道失败，network 功能不可用："
-                + e.getClass().getSimpleName() + ": " + e.getMessage());
+                + registrationFailureReason);
+            return false;
         }
     }
 
@@ -344,5 +360,16 @@ public final class SummaryPublisher {
         } catch (Exception | LinkageError e) {
             return false;
         }
+    }
+
+    /**
+     * {@link #register()} 失败的原因（null = 没失败过 / 尚未登记）；给 /perfscope status 用。
+     *
+     * <p>为什么要留这一份而不是让 /status 自己再问一次 {@link #channelRegistered()}：
+     * 那条只能回答"现在登记着没有"，回答不了"为什么没登记上"。启动时的 warning 早已
+     * 滚出控制台，翻不到原因时管理员唯一能做的就是盲目重启。</p>
+     */
+    public String registrationFailureReason() {
+        return registrationFailureReason;
     }
 }

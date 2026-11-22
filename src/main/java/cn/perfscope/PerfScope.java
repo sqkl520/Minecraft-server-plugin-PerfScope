@@ -51,6 +51,34 @@ public final class PerfScope extends JavaPlugin {
      */
     private Metrics bstatsMetrics;
 
+    /**
+     * bStats 当前状态的枚举。{@code bstatsMetrics == null} 只能回答"没在发"，
+     * 回答不了"为什么没在发"——而"服主自己关的"与"初始化炸了"对排障是两件完全不同的事
+     * （前者无需处理，后者说明 jar 里的 shade/relocate 有问题）。所以状态必须单独留一份。
+     */
+    public enum BstatsState {
+        /** 正在上报。 */
+        ENABLED,
+        /** general.bstats-enabled=false（服主的隐私开关）。 */
+        DISABLED_BY_CONFIG,
+        /** 作者未填 pluginId（占位 0），无可上报目标。 */
+        DISABLED_NO_PLUGIN_ID,
+        /** 初始化抛异常（shade/relocate 破损、bStats 内部错误等），已跳过。 */
+        FAILED
+    }
+
+    /**
+     * 最近一次 bStats 启停的结果。
+     *
+     * <p>默认值与 {@link #startBstats()} 的"配置关闭"分支一致；{@code onEnable} 里
+     * {@code startBstats()} 在命令注册<b>之后</b>、任何命令可执行<b>之前</b>就会覆盖它，
+     * 因此不存在"用户看到默认值"的窗口。字段用 volatile：写入在 {@code onEnable}/reload，
+     * 读取在命令线程。</p>
+     */
+    private volatile BstatsState bstatsState = BstatsState.DISABLED_BY_CONFIG;
+    /** bStats 初始化失败的原因（null = 没失败过）；供 /perfscope status 展示。 */
+    private volatile String bstatsFailureReason;
+
     private static PerfScope instance;
 
     private ConfigManager configManager;
@@ -269,6 +297,24 @@ public final class PerfScope extends JavaPlugin {
     /** v1.4：供命令层 /status 展示端点状态（未启用时返回 null）。 */
     public cn.perfscope.export.PrometheusEndpoint getPrometheusEndpoint() {
         return prometheusEndpoint;
+    }
+
+    /**
+     * P0-F：bStats 当前状态（供 /perfscope status 展示）。
+     *
+     * <p>永不返回 {@code null}：字段初始化器保证真实实例总有值，但测试夹具用
+     * {@code allocateInstance} 造对象时字段初始化器不执行，返回 null 会让命令层
+     * 走进最后那个 else——那恰好是"已禁用"，语义上仍然安全；这里再做一次显式收口，
+     * 是为了让契约本身成立，而不是靠调用方的 if 链兜底。</p>
+     */
+    public BstatsState getBstatsState() {
+        BstatsState s = bstatsState;
+        return s == null ? BstatsState.DISABLED_BY_CONFIG : s;
+    }
+
+    /** P0-F：bStats 初始化失败的原因（null = 没失败过）；供 /perfscope status 展示。 */
+    public String getBstatsFailureReason() {
+        return bstatsFailureReason;
     }
 
     @Override
@@ -593,12 +639,22 @@ public final class PerfScope extends JavaPlugin {
             summaryPublisher = new cn.perfscope.network.SummaryPublisher(this);
         }
         try {
-            summaryPublisher.register();
-            getLogger().info("[PerfScope] 跨服摘要已启用：通道 " + cn.perfscope.network.NetworkSummary.CHANNEL
-                + "，间隔 " + cfg.network_pushIntervalSeconds + " 秒。"
-                + "（plugin messaging 需有玩家在线才能转发，空服期间代理侧收不到）");
+            // P0-E：register() 现在返回成败，**只有真的登记成功**才打「已启用」。
+            // 原先 catch 在 register() 内部吞掉异常并正常返回，调用方无条件打「已启用」，
+            // 于是控制台先 warning「登记失败」紧跟 info「已启用」——后一句更像结论，
+            // 管理员会以为跨服摘要正常，实际代理侧永远收不到数据。
+            if (summaryPublisher.register()) {
+                getLogger().info("[PerfScope] 跨服摘要已启用：通道 "
+                    + cn.perfscope.network.NetworkSummary.CHANNEL
+                    + "，间隔 " + cfg.network_pushIntervalSeconds + " 秒。"
+                    + "（plugin messaging 需有玩家在线才能转发，空服期间代理侧收不到）");
+            } else {
+                getLogger().warning("[PerfScope] 跨服摘要未启用：通道登记失败（原因见上一条 warning，"
+                    + "/perfscope status 也会显示）。network.enabled 仍是 true，但跨服摘要不会发出任何数据。");
+            }
         } catch (Exception | LinkageError e) {
-            getLogger().warning("[PerfScope] 跨服摘要启动失败：" + e.getClass().getSimpleName());
+            getLogger().warning("[PerfScope] 跨服摘要启动失败：" + e.getClass().getSimpleName()
+                + (e.getMessage() == null ? "" : ": " + e.getMessage()));
         }
     }
 
@@ -616,11 +672,16 @@ public final class PerfScope extends JavaPlugin {
 
     private void startBstats() {
         if (!configManager.get().general_bstatsEnabled) {
+            // P0-F：状态必须留档，否则 /status 只能说"没在发"，说不出"为什么"。
+            bstatsState = BstatsState.DISABLED_BY_CONFIG;
+            bstatsFailureReason = null;
             getLogger().info(Messages.get("core.bstats.disabled-by-config"));
             return;
         }
         int bstatsPluginId = BSTATS_PLUGIN_ID; // 防常量折叠，见方法注释
         if (bstatsPluginId <= 0) {
+            bstatsState = BstatsState.DISABLED_NO_PLUGIN_ID;
+            bstatsFailureReason = null;
             getLogger().info(Messages.get("core.banner.bstats-disabled"));
             return;
         }
@@ -628,8 +689,16 @@ public final class PerfScope extends JavaPlugin {
             Metrics metrics = new Metrics(this, bstatsPluginId);
             bstatsMetrics = metrics;
             BstatsCharts.register(metrics, this);
+            bstatsState = BstatsState.ENABLED;
+            bstatsFailureReason = null;
             getLogger().info(Messages.get("core.bstats.enabled", bstatsPluginId));
         } catch (Exception | LinkageError e) {
+            // 失败时句柄必须归零：构造器抛异常时 {@code bstatsMetrics} 仍是上一次的值
+            // （reload 场景下可能是已经不响应的旧实例），留着会让 /status 说"已启用"。
+            bstatsMetrics = null;
+            bstatsState = BstatsState.FAILED;
+            bstatsFailureReason = e.getClass().getSimpleName()
+                + (e.getMessage() == null ? "" : ": " + e.getMessage());
             // general.debug 门控堆栈（与 safeCollect / monitor 推送同款日志口径）
             if (configManager.get().general_debug) {
                 getLogger().log(java.util.logging.Level.WARNING, Messages.get("core.bstats.init-failed-detail", e.getMessage()), e);
@@ -657,6 +726,71 @@ public final class PerfScope extends JavaPlugin {
         } catch (Exception | LinkageError e) {
             // 关闭期静默：此时日志可能已不可用，且遥测失败无用户可见影响
         }
+    }
+
+    /**
+     * P0-F 附带：让 {@code general.bstats-enabled} 在 {@code /perfscope reload} 后立刻生效。
+     *
+     * <p><b>为什么必须单独做一次</b>：reload 会重建 Prometheus / network / webhook / 日报，
+     * 唯独跳过了 bStats——遥测句柄只在 {@code onEnable} 里创建。于是服主把
+     * {@code general.bstats-enabled} 改成 {@code false} 再 reload，数据会继续发到下一次重启为止。
+     * 这是个<b>隐私开关失效</b>：开关的含义是"我说停就停"，而它的实际语义变成了
+     * "我说停，下次重启才停"——用户读到的是前者，且没有任何提示告诉他真相。</p>
+     *
+     * <p>关闭方向必须在 reload 里立即执行（不能只提示"需重启"），因为这是唯一一个
+     * 一旦被违反就构成隐私问题的配置项。打开方向同理重启即可，代价只是多创建一个提交线程。</p>
+     */
+    private void reloadBstats() {
+        boolean wanted = configManager.get() != null && configManager.get().general_bstatsEnabled;
+        boolean running = bstatsMetrics != null;
+        switch (bstatsReloadAction(wanted, running)) {
+            case START:
+                startBstats();
+                break;
+            case STOP:
+                stopBstats();
+                bstatsState = BstatsState.DISABLED_BY_CONFIG;
+                bstatsFailureReason = null;
+                // 明说"这次真的停了"：服主改这个开关的动机通常就是隐私，他需要确认生效了。
+                getLogger().info(Messages.get("core.bstats.reload-stopped"));
+                break;
+            case REFRESH_STATE:
+                // 本来就是关的：只刷新状态快照（比如从"pluginId 占位"变成"enabled=false"），不刷日志。
+                bstatsState = BstatsState.DISABLED_BY_CONFIG;
+                bstatsFailureReason = null;
+                break;
+            case KEEP:
+            default:
+                // 配置要开、句柄也在：什么都不做。**绝不能**重启——那会白白重建一次提交线程，
+                // 而且 bStats 每次启动都会重新读一次 bStats/config.yml。
+                break;
+        }
+    }
+
+    /** reload 时对 bStats 该做什么（抽成枚举 + 纯函数，便于单测穷举四象限）。 */
+    enum BstatsReloadAction {
+        /** 配置要开但没有句柄 → 启动。 */
+        START,
+        /** 配置关了但句柄还在 → 立刻停（隐私开关）。 */
+        STOP,
+        /** 配置本来就关着 → 只同步状态位，不打日志。 */
+        REFRESH_STATE,
+        /** 配置要开、句柄也在 → 不动。 */
+        KEEP
+    }
+
+    /**
+     * bStats 在 reload 时的决策。
+     *
+     * <p>单独抽出来是为了能被单测穷举四个象限——这段逻辑的价值全在
+     * {@code wanted=false, running=true} 那一格（隐私开关失效的那个），
+     * 而它在真实环境里必须靠 {@code /perfscope reload} 才能触发。</p>
+     */
+    static BstatsReloadAction bstatsReloadAction(boolean wanted, boolean running) {
+        if (wanted) {
+            return running ? BstatsReloadAction.KEEP : BstatsReloadAction.START;
+        }
+        return running ? BstatsReloadAction.STOP : BstatsReloadAction.REFRESH_STATE;
     }
 
     /**
@@ -702,6 +836,10 @@ public final class PerfScope extends JavaPlugin {
             summaryPublisher.resetState();
         }
         startNetworkPush();
+        // P0-F 附带：bStats 是**唯一**一个此前被 reload 漏掉的出口（Prometheus / network /
+        // webhook / 日报都会重建）。漏掉的后果不是"没刷新"，而是 general.bstats-enabled 这个
+        // **隐私开关**失效到下次重启——改 false 后遥测照发。所以这里必须真的启停，不能只提示。
+        reloadBstats();
         startDailySummary();
         if (configManager.get().report_autoExport) {
             startAutoReport();

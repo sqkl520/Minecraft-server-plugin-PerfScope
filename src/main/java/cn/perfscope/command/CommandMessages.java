@@ -492,6 +492,65 @@ public final class CommandMessages {
             "Unavailable (Folia has no global Bukkit scheduler)",
             "不可用（Folia 无全局 Bukkit 调度器）");
 
+        // ==================== 插件状态：可选出口（P0-F） ====================
+        // 为什么单独成段：Prometheus / network / bStats 三个出口此前在 /status 里**完全隐身**——
+        // 它们失败时只有启动那一瞬间的一条控制台 warning，翻过去就再也查不到。
+        // 而这三个出口的失败形态恰好都是"看起来没问题"：面板没数据可以解释成"没配置"，
+        // 遥测没数据根本没人看。把它们摆进 /status，失败才有可查的落点。
+        put(en, zh, "cmd.status.section.exports", "--- Optional Exports ---", "--- 可选出口 ---");
+        put(en, zh, "cmd.status.export.prometheus-label", "Prometheus: ", "Prometheus: ");
+        put(en, zh, "cmd.status.export.prometheus-off",
+            "Disabled (config prometheus.enabled=false)", "未启用（config prometheus.enabled=false）");
+        // 已启动：地址 + 鉴权状态。鉴权是"谁都能读"与"要 token"的分界线，和地址同样重要。
+        put(en, zh, "cmd.status.export.prometheus-on",
+            "Listening on {0} ({1})", "已启动：{0}（{1}）");
+        put(en, zh, "cmd.status.export.prometheus-auth", "auth required", "需鉴权");
+        put(en, zh, "cmd.status.export.prometheus-no-auth", "no auth", "无鉴权");
+        // 失败：原因原文来自 PrometheusEndpoint.failureReason()。技术细节
+        // （BindException: Address already in use）对排障必要，故不脱敏，只截断长度。
+        put(en, zh, "cmd.status.export.prometheus-failed",
+            "Failed to start: {0}", "启动失败：{0}");
+        // 配置说启用、实际没起来，却拿不到原因：状态仍是失败，只是这句话要能独立成立。
+        // （不能用"启动失败：失败（未记录…）"——前半句的冒号后面又接一个"失败"，读起来像结巴。）
+        put(en, zh, "cmd.status.export.prometheus-failed-no-reason",
+            "Failed to start (no reason recorded; check the startup log)",
+            "启动失败（未记录到原因，请看启动日志）");
+        put(en, zh, "cmd.status.export.prometheus-failed-hint",
+            "  Action: check whether the port is taken by another program; fix prometheus.port "
+                + "in config.yml and run /perfscope reload (no restart needed)",
+            "  处理: 确认该端口是否被其它程序占用；改 config.yml 的 prometheus.port 后 "
+                + "执行 /perfscope reload 即可（无需重启）");
+
+        put(en, zh, "cmd.status.export.network-label", "Cross-server summary: ", "跨服摘要: ");
+        put(en, zh, "cmd.status.export.network-off",
+            "Disabled (config network.enabled=false)", "未启用（config network.enabled=false）");
+        put(en, zh, "cmd.status.export.network-on",
+            "Channel registered ({0})", "已登记（{0}）");
+        put(en, zh, "cmd.status.export.network-failed",
+            "Channel registration failed: {0}", "登记失败：{0}");
+        put(en, zh, "cmd.status.export.network-failed-no-reason",
+            "Channel registration failed (no reason recorded; check the console log)",
+            "登记失败（未记录到原因，请看控制台日志）");
+        // network.enabled=true 但通道没登记上：这一行是 P0-E 在界面上的落点。
+        // 启动日志里它曾经被一句「已启用」盖住，现在 /status 会一直说"没登记上"。
+        put(en, zh, "cmd.status.export.network-failed-hint",
+            "  Note: network.enabled is true, but nothing is being sent; the proxy will keep showing this "
+                + "backend as having no data. Check the console for the registration error.",
+            "  注意: network.enabled 为 true，但实际没有发出任何数据；代理侧会把本后端一直显示为无数据。"
+                + "登记错误详见控制台日志。");
+
+        put(en, zh, "cmd.status.export.bstats-label", "bStats: ", "bStats 匿名统计: ");
+        put(en, zh, "cmd.status.export.bstats-on", "Enabled", "已启用");
+        put(en, zh, "cmd.status.export.bstats-off",
+            "Disabled (config general.bstats-enabled=false)", "已禁用（config general.bstats-enabled=false）");
+        put(en, zh, "cmd.status.export.bstats-no-id",
+            "Disabled (pluginId not configured)", "已禁用（未配置 pluginId）");
+        put(en, zh, "cmd.status.export.bstats-failed",
+            "Initialization failed: {0}", "初始化失败：{0}");
+        put(en, zh, "cmd.status.export.bstats-failed-no-reason",
+            "Initialization failed (no reason recorded; check the console log)",
+            "初始化失败（未记录到原因，请看控制台日志）");
+
         // ==================== 告警历史 ====================
         put(en, zh, "cmd.alerts.service-disabled",
             "Alert service is not enabled (alerts.enabled=false)", "告警服务未启用（alerts.enabled=false）");
