@@ -209,9 +209,24 @@ const noSentinelRe = new RegExp(
  * 于是 `msptMax >= 0` 这种把"0 也不可信"的字段当成"0 可信"的改动，测试与门禁双双放行。
  * 那是一轮可维护性审计实测出来的。</p>
  */
+/**
+ * 对「哨兵是 -1 且 0 也不可信」的字段，两个方向都必须判"不可信"，
+ * 所以只有下面四组是**正确**写法：
+ *
+ *   x <= 0   /  x > 0      （小于等于 0 不可信 / 大于 0 才可信）
+ *   x < 0    /  x >= 0     ← 这两个**错**：漏掉 0 这一半
+ *   x == 0   /  x != 0     ← 这两个**错**：只判了一个点，另一半完全没提
+ *
+ * 此前正则只接了 `==` / `!=`（`SENTINEL_AND_ZERO_BOTH_BAD` 是孤儿常量），
+ * 于是 `msptMax >= 0` 这类把"0 也不可信"当"0 可信"的改动测试与门禁双双放行。
+ *
+ * **但扩到序关系后不能一刀切报**：`<= 0` 与 `> 0` 正是正确写法，
+ * 一刀切会产生 20 处误报（实测），噪声一多这条门禁就没人看了。
+ * 所以只报**漏掉 0 那一半**的两种：`>= 0` 与 `< 0`，外加等值的 `== 0` / `!= 0`。
+ */
 const bothBadRe = new RegExp(
   String.raw`(\b(?:snap\.|s\.|sample\.|last\.|first\.|prev\.)?(?:${fieldAlt(SENTINEL_AND_ZERO_BOTH_BAD)})\b|` +
-  String.raw`\b(?:${fieldAlt(SENTINEL_AND_ZERO_BOTH_BAD)})\s*\(\s*\))\s*(==|!=)\s*0(?:\.0+[dDfF]?)?(?![\d.])`, 'g');
+  String.raw`\b(?:${fieldAlt(SENTINEL_AND_ZERO_BOTH_BAD)})\s*\(\s*\))\s*(==|!=|>=|<)\s*0(?:\.0+[dDfF]?)?(?![\d.])`, 'g');
 
 function lineOf(text, idx) {
   let n = 1;
@@ -277,7 +292,10 @@ for (const f of files) {
       op,
       code: whole.trim(),
       rule: 'EQUALITY_AGAINST_ZERO',
-      detail: `${SENTINEL_AND_ZERO_BOTH_BAD[name]}。用 '${op} 0' 做等值比较会漏掉另一半情形；应当用 '< 0' 或 '<= 0' 判不可信`,
+      // 建议必须按实际运算符给，不能写死。对 >= 0 建议 '< 0' 是错的——
+      // '< 0' 同样漏掉 0 这一半，正是这个字段不该有的写法。
+      detail: `${SENTINEL_AND_ZERO_BOTH_BAD[name]}。用 '${op} 0' 会把 -1 与 0 中的一个当成可信；`
+        + `应当用 '<= 0' 判"不可信"或 '> 0' 判"可信"（两者互补，都覆盖 -1 与 0）`,
     });
   }
 
