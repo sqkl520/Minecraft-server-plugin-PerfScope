@@ -1190,7 +1190,9 @@ public class ConfigManager {
                 "prometheus.path", raw, cfg.prometheus_path));
         }
 
-        // === network.push-interval-seconds：钳制 1–300 ===
+        // === network.push-interval-seconds：越界回退默认值（有效范围 1–300） ===
+        // 注意：**不是钳到边界**，而是整体回退 NETWORK_PUSH_INTERVAL_DEFAULT（10）；
+        // 写 500 得到的是 10，不是 300。config.yml 的注释也是这么写的，两处别改岔。
         // 下限 1：低于采集周期没有意义。上限 300：再长代理侧会把"没上报"误判成"后端失联"，
         // 而这两件事必须能分开——一个是配置选择，一个是服务端出问题了。
         if (cfg.network_pushIntervalSeconds < NETWORK_PUSH_INTERVAL_MIN
@@ -1201,6 +1203,83 @@ public class ConfigManager {
                 + " 超出 " + NETWORK_PUSH_INTERVAL_MIN + "–" + NETWORK_PUSH_INTERVAL_MAX
                 + " 秒，已回退 " + cfg.network_pushIntervalSeconds + " 秒");
         }
+
+        // === network.push-interval-seconds × general.update_interval：交叉校验（P1-O） ===
+        //
+        // 上面那条只查 push-interval 的**绝对值**，从不看它和采集周期的关系。而发送只能
+        // 发生在采集周期末尾，代理侧又按「3 × pushInterval」判过期——于是"采集 60 秒一次、
+        // 上报间隔仍写 10 秒"这种配置会让一台完全健康的后端有近一半时间显示「数据过期」，
+        // 并且因为代理只把 State.OK 计入聚合，它还一半时间被踢出全网 TPS 平均与玩家合计。
+        //
+        // 实测（红队数据，push=10s 固定扫 update_interval）：
+        //   20t (1s 默认) → 假 STALE 0.0%；800t (40s) → 22.5%；1200t (60s) → 48.3%。
+        // 两个值单看都合法，原有校验一条都不会报——必须靠这条关系式拦。
+        //
+        // ── 关系式是怎么推出来的（别凭直觉写成 "push ≥ 3 × update"）────────────────
+        // 代理侧的年龄是 now - collectedAt，而**每一包都会刷新 collectedAt**，所以一包
+        // 数据的最坏年龄 = 两包之间的实际间隔。发送又被限制在采集周期末尾，因此
+        /*   ceil(push / update) × update  ←← 有效上报周期（会被采集周期向上取整）
+         *   3 × push                       ←← 代理的判过期阈值
+         * 判据：有效上报周期 ≤ 3 × push。
+         *
+         * 代入实测：push=10、update=40 → 有效周期 ceil(10/40)×40 = 40 > 30 → 假 STALE
+         * 占比 (40-30)/40 = 25%（实测 22.5%）；update=60 → 60 > 30 → 50%（实测 48.3%）。
+         *
+         * 由此可知**不是** "push ≥ 3 × update"（那会把 60 秒采集推成 180 秒上报，白白丢掉
+         * 三分之二的更新频率）。真正要的只是 push ≥ 一个采集周期——那时有效周期 ≈ push，
+         * 代理的 3 倍窗口才真正作用在"上报节奏"上，而不是被采集周期吃掉。
+         * ────────────────────────────────────────────────────────────────────── */
+        //
+        // **为什么是"自动上调 + 告警"而不是拒绝启动或仅告警**：
+        //   • 拒绝启动：现有 40–60 秒采集周期的服，升级后突然起不来，把一个显示问题
+        //     升级成停服事故。不可接受。
+        //   • 仅告警：服主把 update_interval 调到 60 秒通常是为了省采集开销，他不会因为
+        //     一条 warning 就把它调回 1 秒（那正是他主动放弃的东西）；而 push-interval
+        //     才是"发多快"这个**唯一能由后端控制**的量——代理判多慢是代理的事，改不了。
+        //     所以正确的做法是让 push-interval 自动适配采集周期，而不是要求用户自己算。
+        //   • 值写回 cfg 但不落盘（本函数全部副作用都在入参上，见类注释）：用户的
+        //     config.yml 保持原样，下次改了采集周期仍会重新算，不会把一次性调整固化成
+        //     一个他看不懂的数字。
+        //
+        // 换算：update_interval 的单位是 tick，20 tick = 1 秒。少乘这 50 会让 40 秒的
+        // 采集周期被算成 2 秒，整条校验就白做了。
+        int updateTicks = Math.max(1, cfg.general_updateInterval);
+        long updateMs = updateTicks * 50L;
+        // 向上取整：宁可多等不到 1 秒，也不要因为差几百毫秒而周期性闪一次「数据过期」。
+        int minPushSec = (int) Math.max(NETWORK_PUSH_INTERVAL_MIN,
+            (updateMs + 999L) / 1000L * PUSH_INTERVAL_MIN_COLLECT_PERIODS);
+        // 上限 300 已在上面那条绝对值校验里管过；这里仍夹一次，防止 update_interval
+        // 的未来上界被调大后，这里算出一个超过协议上限的值。
+        minPushSec = Math.min(minPushSec, NETWORK_PUSH_INTERVAL_MAX);
+        if (cfg.network_pushIntervalSeconds < minPushSec) {
+            int raw = cfg.network_pushIntervalSeconds;
+            cfg.network_pushIntervalSeconds = minPushSec;
+            // 告警必须同时给出三个量（采集周期 / 原上报间隔 / 调整后的值）：服主只有知道
+            // 这个调整是照着哪两个数算出来的，才不会以为插件擅自动了他的配置。
+            plugin.getLogger().warning("[PerfScope] network.push-interval-seconds=" + raw
+                + " 秒小于一个采集周期（general.update_interval=" + updateTicks + " tick ≈ "
+                + (updateMs / 1000L) + " 秒），已自动上调为 " + minPushSec + " 秒。"
+                + "上报只能发生在采集周期末尾，而代理侧按「3 × 上报间隔」判过期——"
+                + "上报间隔小于采集周期时，健康后端会周期性显示「数据过期」，"
+                + "并被排除出全网 TPS 平均与在线合计。"
+                + "本次调整不写入 config.yml；若要真正降低上报频率，请把 "
+                + "network.push-interval-seconds 显式调大。");
+        }
+
+        // === network.server-id：发送前校验（长度 / 保留字）===
+        // 判据本体在 SummaryPublisher.validateServerId —— 只允许有一份，两份必然漂移。
+        //
+        // 为什么在**加载期**也查一次，而不是只靠 SummaryPublisher 在发送时拒发：
+        // 发送发生在采集周期里，而采集周期只在 network.enabled 时才有意义；服主也可能
+        // 先配 server-id、后开 network.enabled。加载期的这一条让"配错了"在启动那一屏
+        // 就出现，不必等到第一个采集周期（默认 20 tick 后）才看见。
+        // 发送端那次校验仍然保留：配置可以在两次 load 之间不变，但运行时才是最终防线。
+        //
+        // 三项候选都查：network.server-id 优先，其次 prometheus.server-id。哪一项不合格
+        // 就点名哪一项——只说"server-id 无效"时，服主会去改 network.server-id，而他真正
+        // 写错的可能正是 prometheus.server-id（后者只在他把 network.server-id 留空时才生效）。
+        checkCrossServerId("network.server-id", cfg.network_serverId);
+        checkCrossServerId("prometheus.server-id", cfg.prometheus_serverId);
 
         // === general.language：界面语言归一化（i18n） ===
         // 语言项没有"越界"概念——写错就是一个不存在的语言，因此只做"识别 / 不认识"二分支。
@@ -1214,6 +1293,47 @@ public class ConfigManager {
             language = LANGUAGE_DEFAULT;
         }
         cfg.general_language = language;
+    }
+
+    /**
+     * 加载期的跨服身份校验：不合格就 WARNING，并说清是长度还是保留字。
+     *
+     * <p><b>只告警，不改值</b>。这与 {@code network.push-interval-seconds} 的"越界回退默认"
+     * 刻意不同：间隔回退成一个安全值不会有语义损失，而 {@code server-id} 回退成"端口派生"
+     * 会凭空造出一个服主没写过的名字——面板上那台后端看起来"有数"，他真正配的名字则一直
+     * 显示「无数据」，成了一行查不出原因的幽灵行。所以这里保持原值，由
+     * {@code SummaryPublisher} 在发送时整体拒发（那时也会告警一次，说同样的话）。</p>
+     *
+     * <p><b>为什么这里按"单项"报警而不做优先级判断</b>：{@code network.server-id} 留空时
+     * 才会用 {@code prometheus.server-id}，所以后者配错在那种情况下才是真问题。两项各自
+     * 独立判定、点名各自的键名，比在这里复刻一遍优先级链更不容易出错——
+     * 误报一条"prometheus.server-id 无效"的代价，远低于漏报一条。</p>
+     *
+     * <p><b>判据复用 {@code SummaryPublisher.validateServerId}</b>，不在这里另写一份。
+     * 两份判据必然漂移，而漂移的表现正是本次要修的那个 bug——"后端发得出去、代理收不下"。</p>
+     *
+     * @param key 配置键名（只用于日志点名）
+     * @param raw 原值
+     */
+    private void checkCrossServerId(String key, String raw) {
+        cn.perfscope.network.SummaryPublisher.ServerIdVerdict verdict =
+            cn.perfscope.network.SummaryPublisher.validateServerId(raw);
+        switch (verdict) {
+            case RESERVED:
+                plugin.getLogger().warning("[PerfScope] " + Messages.get(
+                    "config.check.network-server-id-reserved", key,
+                    raw.trim(), cn.perfscope.network.SummaryPublisher.RESERVED_SERVER_ID));
+                break;
+            case TOO_LONG:
+                plugin.getLogger().warning("[PerfScope] " + Messages.get(
+                    "config.check.network-server-id-too-long", key,
+                    raw.trim(), String.valueOf(raw.trim().length()),
+                    String.valueOf(cn.perfscope.network.SummaryPublisher.MAX_SERVER_ID_LENGTH)));
+                break;
+            default:
+                // OK / BLANK 都无事可做：BLANK 是合法的"留空 = 回退"，不是错误。
+                break;
+        }
     }
 
     /**
@@ -1375,6 +1495,28 @@ public class ConfigManager {
     private static final int NETWORK_PUSH_INTERVAL_MIN = 1;
     /** 跨服上报间隔上限：300 秒。再长代理侧就会把后端判成"失联"而不是"没变化"。 */
     private static final int NETWORK_PUSH_INTERVAL_MAX = 300;
+
+    /**
+     * P1-O：上报间隔至少要有"几个采集周期"那么长。
+     *
+     * <p><b>为什么是 1 而不是 3</b>：容易凭直觉写成 {@code push ≥ 3 × update}，因为代理侧
+     * 的判过期阈值是 {@code 3 × push}。但一键推导就露馅：代理算的是
+     * {@code now - collectedAt}，而**每一包都会刷新 collectedAt**，所以一包数据的最坏年龄
+     * 等于两包之间的实际间隔；而发送被限制在采集周期末尾，实际间隔是
+     * {@code ceil(push / update) × update}。判据是「实际间隔 ≤ 3 × push」：</p>
+     *
+     * <ul>
+     *   <li>{@code push ≥ update} → 实际间隔 ≈ push ≤ 3 × push，恒成立；</li>
+     *   <li>{@code push < update} → 实际间隔 ≥ update，而阈值仍是 3 × push。update 越大
+     *       偏离越多：push=10/update=60 时阈值 30 &lt; 实际 60，近一半时间假 STALE。</li>
+     * </ul>
+     *
+     * <p>所以只需要"一个采集周期"，不需要三个。取 3 的代价是把 60 秒采集的服推成 180 秒
+     * 上报——白白丢掉三分之二的更新频率，而一点收益都没有。</p>
+     *
+     * <p>常量单独命名而不是写字面量 1：它承载的是一条推导结论，不是"某个数"。</p>
+     */
+    private static final int PUSH_INTERVAL_MIN_COLLECT_PERIODS = 1;
     /** v1.4：分片数上限——再大每片只剩个位数区块，固定开销反超收益。 */
     private static final int HOTSPOTS_SCAN_SHARDS_MAX = 100;
 
@@ -1822,7 +1964,10 @@ public class ConfigManager {
         public String network_serverId;
 
         /**
-         * 上报间隔秒数（{@code network.push-interval-seconds}，默认 10，钳制 1–300）。
+         * 上报间隔秒数（{@code network.push-interval-seconds}，默认 10，有效范围 1–300）。
+         *
+         * <p><b>越界不是钳到边界，而是回退默认值 10</b>——写 500 得到的是 10，不是 300。
+         * 见 {@code validateThresholds} 里对应的分支。</p>
          *
          * <p>采集周期默认 1 秒，逐周期上报会把 5 个后端变成每秒 5 条跨服消息。
          * 配合"摘要没变化就跳过"，空闲服的流量接近 0。</p>

@@ -1,7 +1,7 @@
 # Changelog
 
 本项目：**PerfScope** —— Minecraft 服务器性能监测插件（Paper 1.20.4+ / Purpur / Pufferfish / Folia / Leaves，Java 17）。
-后台定时采集性能快照 → 游戏内 17 个子命令一屏诊断 → HTML/TXT/JSON 报告导出 → ActionBar 实时监测 → 阈值告警。
+后台定时采集性能快照 → 游戏内 24 个子命令一屏诊断 → HTML/TXT/JSON 报告导出 → ActionBar 实时监测 → 阈值告警。
 
 > **仓库**：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope> ｜ **版本**：`1.4.5-SNAPSHOT-fix5`（当前构建）｜ **上一个归档**：`1.4.5-SNAPSHOT-fix1`
 
@@ -11,6 +11,479 @@
 > Added / Changed / Fixed / Removed / Optimized / Refactored / Notes 分类追加）；**编译前先更新**。
 > 版本号只在用户明确说"更新版本号"时 bump（Patch = Bug 修复，Minor = 新功能）。
 > **本文件是开发流水账** —— 记"改了什么、为什么改、验证到哪一步、还欠什么"，不是给用户看的发布说明。
+
+---
+
+## [Unreleased] — 2026-11-23 — `PublisherFailureThrottleTest` 4 个 error：载体接缝让 `publish()` 的 catch 分支真正跑起来
+
+> 这 4 个是 **error（`NoClassDefFound` / `ExceptionInInitializerError`）而不是断言失败**，
+> 根因是测试可测性，不是生产缺陷。修法是给"用哪个连接发"加一个接缝，
+> **生产行为零变更**，测试从此真实执行 `publish()` 的失败分支。
+
+### Fixed — 4 个 error 的根因与修法
+
+**现象**（`mvn -B -ntp test`，923 例 4 error）：
+
+```
+PublisherFailureThrottleTest.repeatedFailuresAreThrottled:161  NoClassDefFound jdk.proxy2.$Proxy14
+PublisherFailureThrottleTest.rollbackClearsEveryThrottleAnchor:259 NoClassDefFound
+PublisherFailureThrottleTest.successResetsTheFailureCounter:227  NoClassDefFound
+PublisherFailureThrottleTest.suppressedFailuresStillIncrementTheCounter:192 ExceptionInInitializer
+```
+
+**根因（实测栈）**：夹具用 `Proxy.newProxyInstance(..., new Class<?>[]{Player.class}, ...)`
+伪造玩家。建代理要解析 `Player` 七层继承链上的**全部方法签名**，触发
+`PotionEffectType.<clinit>` → 它调 `Bukkit.server.getRegistry(...)`，而 `Bukkit.server`
+在测试 JVM 里是 `null`：
+
+```
+org.bukkit.potion.PotionEffectType.getPotionEffectType(PotionEffectType.java:195)
+org.bukkit.potion.PotionEffectType.<clinit>(PotionEffectType.java:25)
+jdk.proxy2.$Proxy14.<clinit>
+Proxy.newProxyInstance(Proxy.java:1053)
+```
+
+第一次是 `ExceptionInInitializerError`，**失败后不可重试**，同 JVM 里后续用例拿到
+`NoClassDefFoundError`——所以 1 个根因表现为 4 个 error。
+
+**修法：`SummaryPublisher.CarrierSource` 接缝**（`network/SummaryPublisher.java`）
+
+- 新增 `@FunctionalInterface CarrierSource { PluginMessageRecipient pick() throws Exception; }`，
+  只回答"用哪个连接发"，**不回答"怎么发"**。发送仍是生产代码原来那行
+  `carrier.sendPluginMessage(plugin, CHANNEL, payload)`，在同一个 `try` 里。
+- 生产构造器 `SummaryPublisher(PerfScope)` **一字未改**，直接
+  `this(plugin, CarrierSource.fromServer(plugin))`；`PerfScope.java:639` 的调用点没动。
+  注入用构造器是**包内可见**，不给生产代码留可变入口。
+- 载体静态类型从 `Player` 放宽到 `PluginMessageRecipient`——`Player` 的
+  `sendPluginMessage` 本来就是从它继承的（`javap` 实测 Player 未重新声明），
+  而这个接口只有两个方法，建代理**不会**解析 Player 的继承链。**任何 Player 都是
+  PluginMessageRecipient**，所以这不是改语义，只是把静态类型挪到它本来所在的接口。
+- `pickCarrier()` 的 `catch (Exception | LinkageError)` 原样保留（`LinkageError` 必须接：
+  测试 JVM 抛的是 `NoClassDefFoundError`，只写 `Exception` 会穿出 `publish()`）。
+- "取第一个 / 空集合当没有"提成静态纯函数 `CarrierSource.firstOf(Collection)`，
+  于是那段判据也可单测了。
+
+**为什么不用注入 `BiConsumer<Player, byte[]>` 的"发送"接缝**：那解决不了问题——
+载体仍然是 `pickCarrier()` 造出来的 `Player`，测试照样死在创建那一步。
+真正的堵点是"造 Player"，不是"发"。
+
+### Changed — 测试里三处断言从"恒真"变成真断言
+
+1. **`successResetsTheFailureCounter` 原来恒真**。旧版先在一个 publisher 上失败，然后
+   **另建一个 publisher** 断言新实例的计数器是 0——新对象的字段本来就 0，什么都没锁住。
+   现在同一个实例上把载体从"抛"切成"不抛"，`consecutiveSendFailures` 真的执行了清零。
+2. **`rollbackClearsEveryThrottleAnchor` 多了一条**：旧版只断言"有新日志出现"，
+   现在同时断言 `publish` 返回 `FAILED`（证明回拨重置后确实继续走到发送并失败）。
+3. **`repeatedFailuresAreThrottled` 多两条**：载体真的收到 50 份 payload、且首份含
+   `server-id`。这锁住"异常发生在 payload 组装之后"——若有人把失败提前到 payload 生成前，
+   这个用例会红，而那意味着 `publish` 的 catch 分支根本没被覆盖到。
+
+### Added — 2 例（925 例）
+
+- `firstOfPicksFirstAndTreatsEmptyAsNone`：`null` / 空集合 → `null`（否则空服抛
+  `NoSuchElementException`，被 catch 吞成"空服"，结论碰巧对但堆栈掩盖真因）；
+  非空取第一个
+- `productionConstructorStillUsesTheServer`：单参构造器的默认来源必须仍是**服务端在线玩家**
+  （`server=null` → `NO_PLAYER`）。若有人把默认值改成"发明一个载体"，空服发布就会变成
+  静默的 `SENT`，而生产环境可能把消息发到不相干的连接上
+
+### Verified — 变异验证（全部实测 KILLED）
+
+对 `SummaryPublisher.java` 逐个下变异，跑 `-Dtest=PublisherFailureThrottleTest`：
+
+| # | 变异 | 结果 |
+|---|---|---|
+| M1 | 发送失败日志去掉限频窗口（`if (failNow - lastSendFailWarnAtMs > WARN_INTERVAL_MS)` → `if (true)`） | **KILLED**：`repeatedFailuresAreThrottled` 期望 1 条实际 50 条；`suppressedFailuresStillIncrementTheCounter` 期望 1 条实际 5 条 |
+| M2 | 删掉 `consecutiveSendFailures++` | **KILLED**：2 例红（日志显示"连续第 0 次"） |
+| M3 | 成功路径删掉 `consecutiveSendFailures = 0` | **KILLED**：`successResetsTheFailureCounter` 期望 0 实际 3 |
+| M4 | 回拨重置只清 `lastSentAtMs`，不清另两个锚点 | **KILLED**：`rollbackClearsEveryThrottleAnchor` 期望 0 实际 `1796000000000` |
+| M5 | catch 分支改成 rethrow（不再吞异常） | **KILLED**：4 例全红（异常穿出 `publish`） |
+| M6 | `firstOf` 去掉 `null` / 空集合的守卫 | **KILLED**：`NoSuchElementException` |
+| M7 | 单参构造器注入一个"总是返回假载体"的默认实现 | **KILLED**：期望 `NO_PLAYER` 实际 `SENT` |
+
+每次变异后从校验过的备份副本还原，还原后 `sha256sum` 与变异前一致
+（`56f77a86…`），工作树无变异残留。
+
+### Notes — 剩余缺口（更新 `tools/KNOWN-TEST-LIMITS.md` 第 5 条）
+
+`publish()` 的 **`SENT` / `UNCHANGED` / `THROTTLED` 三条路径现在可测**（`THROTTLED` 是
+`Result` 里**从未被任何代码返回过的枚举值**——`shouldSend` 返回 false 时代码返回 `UNCHANGED`，
+这是既有行为，本次不动，只记录）。仍做不到的是**真实 Bukkit `Player` 语义**：
+比如"向一个已经掉线的玩家发"——那需要真服务端，不是这次的目标。
+
+---
+
+## [Unreleased] — 2026-11-23 — 测试盲区：跨仓库 golden fixture、network 三个未跑过的函数、代理侧两个零覆盖类
+
+> 这一批**零生产判定逻辑改动**，只补测试、fixture 与一条源码门禁。
+> 起因是审计里最重要的一条结构性缺陷：两个仓库的测试**从来没有共享过同一个字节串**。
+
+### Added — 跨仓库 golden fixture（结构性缺陷修复）
+
+**问题**：后端 `NetworkSummaryTest` 断言"我的 `toMap()` 里有这些 key"；代理 `SummaryTest`
+喂的是**手写 JSON 字面量**。两侧从没比对过同一份字节，于是**改名会响**（parse 失败记日志），
+但**同字段换单位/换语义完全沉默**——数值还在、范围也合法、面板照常渲染，只是数字全错。
+
+**做法**：把"线上字节"提升为被版本控制共享的产物。
+
+- 后端 `src/test/resources/protocol/` 放 7 条 fixture，全部由
+  `NetworkSummary.Report.builder(...).build().toMap()` **真实生成**（不是手写）：
+  `normal` / `no-tps` / `no-mspt` / `legacy-no-interval`（无 `pushIntervalSec`）/
+  `boundary`（15.0 / 18.0 / 0.0 / 50.0 / 300 五个边界点）/ `unavailable-all` / `collector-dead`
+- 后端 `NetworkProtocolFixtureTest`（5 例）：断言 `toMap()` 输出与 fixture **逐字节相等**；
+  `FIXTURES.sha256` 索引与实际字节一致；可选字段的在场/缺席按**语义**断言（不是数量断言，
+  否则以后加可选字段这个**合法**变更就会红）
+- 代理 `ProtocolFixtureTest`（10 例）：读**同一份文件的副本**，断言 `parse()` 出来的
+  每个字段值正确——三个 TPS 窗口取不同值，键读错就红
+- **同步靠门禁**：`tools/check-protocol-fixtures-sync.mjs`（L1，advisory）比对两个仓库的目录，
+  查文件集合、逐字节内容、索引三方一致。任一仓库单方面改动而没同步，它红。
+  这是唯一能看见"两个仓库"的检查——单测各自看不见对方。
+- 设计上容纳后续新增字段：fixture 用"逐字节 + 语义断言"两条腿，新加**可选**字段只需重生成
+  （一条命令：`-Dperfscope.protocol.regenerate=true`，会自动把副本写到代理仓库）
+
+### Added — 后端 network 的四个未跑过的函数
+
+审计实测（809 例时）只有 `shouldSend` / `fieldsAvailable` 两个静态函数被碰过。
+新增 `SummaryPublisherReportTest`（16 例）与 `SummaryPublisherPublishTest`（10 例）覆盖：
+
+| 函数 | 覆盖点 |
+|---|---|
+| `buildReport` | MSPT **三道闸门**（模块不可用 / 来源 UNKNOWN / `msptAvg > 0`）、TPS 三窗口成组缺席、玩家数 `-1` vs `0`、`collectedAt=0` 兜底 `nowMs`、`pushIntervalSec=0` 整条缺席、`alive` 透传 |
+| `resolveServerId` | 优先级 + trim、空白逐级回退、**两个 id 都空时绝不返回世界名**、显式 id 不合格时**拒发**（不截断、不悄悄改用派生值）、64 字符边界、大写 `Unknown` 合法 |
+| `validateServerId` | 四态判定表（空白/保留字/超长/合格）及其**顺序**、长度按字符数（中文一字算 1） |
+| `publish` | 六个早退分支：`snap=null` / `config=null` / 禁用 / `REJECTED_ID` / `NO_PLAYER`；且 `REJECTED_ID` 早于"有没有玩家"判断 |
+| `onCycleFailure` / `onCycleSuccess` | 两者都**必须**调用上报（见下）；失败计数跨过存活门槛；成功一次清零 |
+
+### Fixed — 三个此前 SURVIVED 的变异（全部实测击杀）
+
+1. **`buildReport` 去掉 `msptAvg > 0` 闸门** → `msptSentinelIsNeverPublished` 红。
+   **这是可达 bug**：TPS 反推路径满 20 TPS 时置 `msptAvg = -1` 且**不**标 `unavailable`、
+   来源是 `TPS_FALLBACK(2)` 而非 `UNKNOWN`，前两道闸门都放行 → `-1.0` 上路，
+   代理渲染成绿色的 "-1.0 毫秒"。（另加 `zeroMsptIsMissingWhileZeroTpsIsReal` 钉住
+   MSPT 与 TPS 对 `0` 的**不对称**语义）
+2. **`resolveServerId` 加回"首个世界名"回退** → 见下面"如实标注的缺口"一节
+3. **`onCycleFailure` 去掉 `publishNetworkSummary()`** → `failureCycleStillPublishesSummary` 红。
+   删掉那一行后 `alive` 恒为 `true`，代理侧 `COLLECTOR_DEAD` 分支成为**死代码**：
+   采集真坏了，面板显示"数据过期（可能空服）"，把服主指向完全错误的方向
+
+### Added — 代理侧两个零覆盖类
+
+- `NetworkCommandTest`（18 例，此前 0%）：`hasPermission` 的 **fail-closed**
+  （控制台无条件放行 / **非 Player 的自定义 source 仍必须查 `perfscope.network`** /
+  未定义权限默认拒绝）、`reset` **真的清空**（视图 + 来源绑定表，变异"不 clear 直接 return" 已被杀）、
+  未知子命令只回用法、期望后端列表（含未上报的）、空白名跳过、取后端列表抛异常时降级、
+  零正常后端时的排查提示、`Level→颜色` 映射（UNKNOWN 必须是灰）
+- `PerfScopeVelocityTest`（10 例，此前 0%）：通道闸门（别的通道**既不解析也不认领**）、
+  **安全边界**（玩家伪造的包被丢弃且不认领）、解析失败仍认领（不放大垃圾流量）、
+  身份闸门（缺失/空白/`unknown`）、来源绑定（抢占被拒且**不接触视图**、
+  名字不一致但未占用时接受、取不到来源名时放弃绑定）、生命周期（登记通道 + 注册命令 + 反登记）
+- 手段：`VelocityStubs`（动态代理，零 mock 框架依赖）。Velocity 的 API 没有静态初始化地雷，
+  所以 `Proxy.newProxyInstance` 够用——这与后端 `org.bukkit.Server` 的情况**正相反**
+
+### Notes — 如实标注测不到的（不假装覆盖）
+
+- **`publish` 的 `SENT` 之后的路径**（`THROTTLED` / `UNCHANGED`）：`SENT` 需要真实
+  `Player.sendPluginMessage`，而 `Player` 在测试 JVM 里造不出来
+  （`Proxy(Player.class)` → `Bukkit.server.getRegistry(...)` NPE，见 `tools/KNOWN-TEST-LIMITS.md`）
+- **"世界名回退"的正面证伪**：需真实 `org.bukkit.Server`。已实测两条路都被堵死：
+  回退写在 `try` 外会 NPE（本测试抓到，已验）、写在 `try` 内则与"端口取不到"不可区分
+  （变异 SURVIVED，已验）。现断言的是**契约下界**（降级值必须精确等于 `"perfscope"`
+  且不得等于任何常见世界名），不是"世界名回退不可能发生"
+- **`NetworkCommand.expectedServers()` 的降级范围过大**（已知缺陷，未修）：一台后端
+  `getServerInfo()` 返回 `null` 会让**整张列表**降级成空，正常的那几台也一起消失。
+  已用 `nullServerInfoDegradesWholeList_DocumentedCurrentBehavior` 固定**现状**，
+  进 `tools/KNOWN-TEST-LIMITS.md` 待修
+
+### 测试数
+
+- 后端新增 31 例（`NetworkProtocolFixtureTest` 5 / `SummaryPublisherReportTest` 16 /
+  `SummaryPublisherPublishTest` 10），其中 1 例是"按需重生成"、正常跑时 skipped
+- 代理新增 38 例（`ProtocolFixtureTest` 10 / `NetworkCommandTest` 18 / `PerfScopeVelocityTest` 10）
+
+---
+
+## [Unreleased] — 2026-11-23 — 文档失修与发布链：命令命名空间写法、版本元数据、`--jdk`
+
+> 这一批全是**文档说了与实现不符**，没有一条改到游戏行为。共同点是：单个页面看起来都对，
+> 但把它们与真实运行结果对一遍就发现四处硬伤——一个根本敲不出来的命令写法在三个 README 里
+> 抄了三遍、测试数与子命令数全线落后、发布链的校验工具在本机必然误报 FAIL。
+
+### Fixed — `/perfscope:tps` 是敲不出来的写法（P1-AA）
+
+三份 README（后端中/英、代理）都教用户用 `/perfscope:tps` 绕过代理侧的命令覆盖。
+**这个写法在任何 Bukkit 系服务端上都不会命中。**
+
+根因在 `SimpleCommandMap`：`register(prefix, command)` 转调
+`register(label, command, false, prefix)`，最后往 `knownCommands` 里 put 的键是
+`prefix + ":" + label`（反汇编确认 concat recipe 是 `\u0001:\u0001`）。其中
+`prefix` 来自 `SimplePluginManager.enablePlugin` 传的 `getDescription().getName()`，
+即 `plugin.yml` 的 `name` = **`PerfScope`**；`label` 是 `Command.getName()` = **`perfscope`**。
+所以命令表里的键是 `perfscope:perfscope` / `perfscope:pscope` / `perfscope:perf`，
+**`tps` 是子命令，从不进命令表**。`getCommand(name)` 是纯 `knownCommands.get(name.toLowerCase())`，
+没有剥命名空间的逻辑。
+
+**实机验证**（不是推断——本机起了 Paper 1.21.4-232，装本插件，走 RCON 敲）：
+
+| 输入 | 结果 |
+|---|---|
+| `perfscope:tps` | `Unknown or incomplete command, see below for error` |
+| `pscope:tps` | `Unknown or incomplete command` |
+| `perfscope:perfscope tps` | 正常输出 TPS 诊断 |
+| `perfscope:pscope tps` | 正常输出 TPS 诊断（别名也按 `prefix:alias` 注册） |
+
+三份 README 改成 `/perfscope:perfscope tps`，并补一段说明「为什么不是 `/perfscope:tps`」，
+附上实机验证结论。代理 README 里「后端 22 个子命令」也在同一处更正为 24。
+
+### Fixed — 版本元数据全线失修
+
+| 位置 | 原值 | 实测值 | 核实方式 |
+|---|---|---|---|
+| `README.md` / `README-EN.md` 徽章 | 798 passing | **869** | `mvn test` → `Tests run: 869, Failures: 0, Errors: 0, Skipped: 8`（surefire 72 个报告求和 = 869） |
+| `CHANGELOG.md:4` | 17 个子命令 | **24** | `onTabComplete` 的 `subs` 数组逐项数 = 24 |
+| `CHANGELOG.md` 代理测试段落 | 24 → 34 | **24 → 36** | 代理仓库 `git show 5324fdb:...SummaryTest.java \| grep -c @Test` = 36 |
+| `PerfScope-Velocity/README.md` 测试数 | 18 个用例 | 实测当时为 **36**（HEAD 提交树 `git grep -c @Test HEAD -- src/test` = 36） | `mvn test` → `Tests run: 36, Failures: 0`（本次工作期间代理仓库另有 Agent 增测，故 README 已改为不写死数字、指向 `Tests run:` 汇总行） |
+| `PerfScope-Velocity/README.md` 子命令 | 22 | **24** | 同后端 |
+
+测试数没有一处是抄文档，全部是跑出来的。**注意徽章取的是 surefire 的 `Tests run`（含 skipped），
+不是源码里的 `@Test` 计数**——两者会差几个（`Skipped: 8`），因为条件跳过的用例在源码里仍是
+一条 `@Test`。本次工作期间另有 Agent 在同一工作树增删测试文件，`@Test` 计数一度在 865/870 之间
+跳动；869 是全部改动落定后 `mvn test` 的实际输出（`BUILD SUCCESS`）。README 的构建小节已写明
+「数 `Tests run:` 而不是数 `@Test`」，就是为了让下次的人不再踩这个坑。
+代理侧只有一个 `SummaryTest`（HEAD 提交树里 `@Test` = 36，surefire 运行数一致、无 skipped），
+故 README 里「18 个用例」改为 36 是可直接核实的；但本次工作期间代理仓库另有 Agent 在增测，
+所以最终把 README 的数字换成了「读 `Tests run:` 汇总行」的写法，而不是钉一个会立刻过期的常数。
+
+### Fixed — 代理 README 的协议版本自相矛盾
+
+原文先说「`PROTOCOL_VERSION` 决定能不能通信，**两侧必须一致**」，紧接着说「高于本端就拒、
+低于就容忍」。**后半句独立成立，前半句是错的**：`SummaryPacket.parse` 的判据是
+`version < 1 || version > PROTOCOL_VERSION`，即单向上界——代理接受所有「≤ 本端」的包。
+所以两侧**不必相同**，只有「代理版本 ≥ 后端版本」是必需条件。
+
+已改为按实现描述：单向兼容 + 「代理协议版本不能低于后端」+ 升级顺序先升代理侧。
+原来那句「必须一致」会让人以为后端协议号涨一格而代理没跟上时只是「不推荐」，
+实际是**整包被丢弃**。
+
+### Fixed — 文档缺项
+
+- **代理 README 没写 `reset` 子命令。** `/pscope network reset` 早就实现了
+  （`NetworkCommand` 里 `NetworkView.clear()` 的唯一调用点，注释写着"没有它 clear() 就是死代码"），
+  但 README 只字未提。补一节，含权限与别名写法。
+- **`config.yml` 的 `server-id` 没写「必须与 `velocity.toml` 的后端名一致」。** 三份 README
+  都写了，唯独用户真正动手改的那个文件漏了。补上，并带上幽灵行的具体例子。
+  （这正是本项目 MEMORY 里记的教训：说明书写了、配置文件没写，等于没写。）
+- **后端 README / FAQ 没提「改了后端阈值，代理面板颜色不会跟着变」。** 只有代理 README 写了。
+  代理侧读不到后端 `config.yml`，TPS/MSPT 分级是 `NetworkRenderer` 里四个硬编码常量。
+  用户调完阈值看到两个面板不一致时，后端文档里找不到任何解释。已在后端 README（中/英）
+  的跨服摘要小节与 FAQ 各补一条，并明确「不一致时以后端面板为准」。
+- **`ConfigManager` 两处注释写「钳制 1–300」，实际是回退默认值 10。** 写 500 得到的是 10，
+  不是 300。`config.yml` 的注释本来是对的，代码注释错了。已按实际行为改写，两处同步。
+
+### Fixed — `verify-release-artifact.mjs` 的 JDK 感知（P1-AC）
+
+工具用本机 `mvn` 构建，而 release 是 CI 的 **Temurin 17 / Linux** 构建的。本机只有
+JDK 17（Microsoft）/ 21（Zulu）/ 25，用 21 或 25 构建时产物必然与归档不同：
+
+**实测**（同一份源码，分别用 JDK 17 与 21 构建，两次都 `clean package`）：
+- sha256 不同：`d9ba0745…`（17） vs `395ebcac…`（21）；
+- 解包后逐文件 `cmp`：112 个功能性条目里 **63 个字节不同**（全部是 `.class`），
+  另有 **3 个条目只存在于 JDK 17 的产物里**（`PerfScope$1.class`、
+  `ThresholdOperator$1.class`、`ThresholdColors$1.class`——JDK 21 不再生成同名匿名类，
+  改用 `invokedynamic`）；`diff -rq` 一共报 64 处差异；
+- manifest `Build-Jdk-Spec: 17` vs `21`。
+
+在此之前工具没有 `--jdk` 参数，遇到这种情况一律报 **FAIL**——每次本地跑都红，
+而红的原因与归档质量无关。一个永远红的门禁等于没有门禁。
+
+改动：
+1. 新增 `--jdk <path>`（指向 JDK home 或 `bin/java` 都接受），构建子进程用它的
+   `JAVA_HOME`；不给则用环境里的 `JAVA_HOME`。
+2. 读归档与本机构建各自的 manifest `Build-Jdk-Spec`，**只比主版本号**（`17.0.20.1` 与
+   `17.0.11` 是同一个 class 目标、字节可复现；换大版本才改变我们关心的字节）。
+3. 主版本不一致时，SHA256 与 CONTENT **降级为 SKIP**，整轮报 **INCOMPLETE（exit 3）**，
+   而不是 FAIL。键级检查（CONFIG / MESSAGES / plugin.yml / GIT）与 JDK 无关，照常跑，
+   所以这轮仍然证明了很多东西。
+4. 明确的提示：要真判定就 `--jdk <CI 用的 JDK 17>`。
+
+**实测三条路径**（都用 `--ref v1.4.5-SNAPSHOT-fix4`）：
+
+| 场景 | 结果 |
+|---|---|
+| `JAVA_HOME=JDK21`，不给 `--jdk` | SHA256/CONTENT → SKIP，`ARTIFACT CHECK: INCOMPLETE`，**exit 3** |
+| `--jdk <JDK 17>` | SHA256/CONTENT → PASS，`ARTIFACT CHECK: PASS (13/13)`，**exit 0** |
+| `--jdk <不存在>` | `[FAIL] JDK --jdk usable`，exit 1 |
+
+### Fixed — `archive-release.ps1` 的指引指向仓库外的路径
+
+工具在三处让用户「跑 `tools/archive-release.ps1`」。**这个文件不在 git 仓库里**——
+它在上层工作区 `D:\Server\MCServers\Server plugin\tools\archive-release.ps1`，
+和新 clone 一份仓库后的相对路径对不上。现在打印的是**解析后的绝对路径**，并标注
+「workspace (outside the repo)」；同级目录找不到时明说「MISSING -- workspace copy not found」。
+
+### Notes — 发现但本次未修
+
+`tools/verify-release-artifact.controls.mjs` 里的用例仍写着 `--ref v1.3.0` / `v1.2.0`，
+而实际 tag 从 2026-11-18 的版本号方案变更起都带 `-SNAPSHOT` 后缀
+（`v1.3.0-SNAPSHOT` 等）。于是 `--fast` 模式下 5 个用例里有 2 个以「ref 解析不到」
+提前退出，报的 exit 2 与用例期望的 1/3 不符。**这是本次改动之前就存在的失修**
+（`git show HEAD:tools/verify-release-artifact.mjs | grep -c jdk` = 0，确认 `--jdk` 与它无关），
+不在 `local-gate.ps1` 的必需步骤里，也没在这次任务范围内。修它需要重新测量每个用例的
+期望退出码（tag 改名后 `GIT tag exists` 这一项本身就会 FAIL），留待单独处理。
+
+---
+
+## [Unreleased] — 2026-11-23 — 跨服上报三处：时钟回拨导致完全停发、间隔不交叉校验、失败日志无限频
+
+> 三条都在同一条链路上（`SummaryPublisher` → 代理），共同点是**本机一切正常、远端才是症状**，
+> 而且三条都发生在"两个值都合法 / 系统正常运行"的前提下——
+> 没有任何一条会抛异常、没有任何一条会在本机日志里留下能直接定位的痕迹。
+
+### Fixed — P1-N：时钟回拨 → `shouldSend` 两条分支都返回 false → 一条包都不发，且全程静默
+
+**根因**：`shouldSend` 只有两条分支，而回拨让它们**同时**返回 false：
+
+```java
+boolean intervalPassed = nowMs - lastSentAtMs >= intervalMs;  // 回拨后差值为负 → 恒 false
+if (!changed && !intervalPassed) return false;                // ← 摘要没变化时命中
+return changed ? intervalPassed : true;                       // ← 摘要已变化时命中
+```
+
+于是 `nowMs < lastSentAtMs` 之后一条包都不发，直到墙钟追回原时间点。触发场景全是运维日常：
+VM 从快照恢复、容器迁移、NTP 大步校正、宿主机挂起后恢复。**回拨多久，代理面板就显示
+"数据过期"多久，全程无 WARNING、无日志、无指标**——`resetState()` 只在 reload 时清状态，
+运维不 reload 就永远不知道。
+
+**改动**：
+
+1. 新增 `isClockRollback(nowMs, lastSentAtMs)` 静态纯函数。判据是
+   `lastSentAtMs > 0 && nowMs < lastSentAtMs`——`lastSentAtMs == 0` 是"从未发送"的哨兵，
+   不是"1970 年发过一次"，不排除它会让首次发送前的每一轮都命中回拨分支
+   （行为看起来仍然对，但每轮多一条假告警并重置状态）。
+2. `shouldSend` 在回拨时**无条件返回 true**。理由：时间轴倒退之后，任何"距上次多久"的
+   判据都失去意义，唯一正确的动作是立刻发一包让远端 `collectedAt` 重新前进。
+3. `publish()` 里落地"看到回拨之后做什么"：先打一条 WARNING（按 5 分钟限频），
+   再重置 `lastSentSemantic = null` 与 `lastSentAtMs = 0`。
+   **为什么选"重置基准 + 告警"，而不是只选一样**：只重置会让一次真实的时间跳变
+   不留任何痕迹（下一次有人问"为什么那段时间面板是空的"，查不到）；只告警而不重置
+   则仍然要把剩下的回拨时长熬过去。两者必须一起做。
+4. 告警文案里给出**具体回拨了多久**（`formatDuration`，取最大的两个单位）。
+   只写"检测到时钟回拨"而不写量级，服主无法区分"NTP 校正了 3 秒"与"从一周前的快照恢复"。
+
+### Fixed — P1-O：采集周期 > 上报间隔造成慢性假 STALE（把关系式从不变量变成实现细节）
+
+**根因**：`ConfigManager` 只校验 `push-interval-seconds` 的**绝对值**（1–300），
+**从不检查它与 `general.update-interval` 的关系**。而发送只能发生在采集周期末尾，
+代理侧又按「3 × pushInterval」判过期。
+
+**实测（红队真实采集数据，push=10s 固定扫 update_interval，非合成轨迹）**：
+
+| update_interval | 假 STALE 占比 |
+|---|---|
+| 20t（1 秒，默认） | 0.0% |
+| 800t（40 秒） | 22.5% |
+| 1200t（60 秒） | **48.3%** |
+
+触发条件是"重负载服把采集周期调到 40–60 秒 + 上报保持默认 10 秒"——**两个值都在合法范围内，
+原有校验一条都不报**。后果不止是显示难看：代理侧 `contributesToAggregate()` 只认 `State.OK`，
+于是这台后端近一半时间被踢出全网 TPS 平均与玩家合计。
+
+**关系式（别凭直觉写成 `push ≥ 3 × update`）**：代理算的是 `now - collectedAt`，而**每一包都会
+刷新 `collectedAt`**，所以一包数据的最坏年龄 = 两包之间的实际间隔；发送被限制在采集周期末尾，
+实际间隔是 `ceil(push / update) × update`。判据因此是「实际间隔 ≤ 3 × push」：
+
+- `push ≥ update` → 实际间隔 ≈ push ≤ 3 × push，恒成立；
+- `push < update` → 实际间隔 ≥ update 而阈值仍是 3 × push，update 越大偏离越多
+  （push=10/update=60：阈值 30 < 实际 60 → 近一半时间假 STALE）。
+
+所以**只需要一个采集周期**，不是三个。写成 3 倍会把 60 秒采集的服推成 180 秒上报，
+白白丢掉三分之二的更新频率而没有一点收益。
+
+**改动**：加载期加交叉校验，`push-interval-seconds < 一个采集周期` 时**自动上调 + 告警**。
+
+**为什么选"自动上调 + 告警"，而不是拒绝启动或仅告警**：
+
+- **拒绝启动**不可取：现有 40–60 秒采集周期的服，升级后突然起不来，把一个显示问题
+  升级成停服事故。
+- **仅告警**不可取：服主把 `update_interval` 调到 60 秒通常就是为了省采集开销，
+  他不会因为一条 warning 就把它调回 1 秒（那正是他主动放弃的东西）。而 `push-interval`
+  才是**唯一能由后端控制**的量——代理判多慢是代理的事，改不了。真正该做的是让
+  `push-interval` 自动适配采集周期，而不是让用户去算。
+- 上调写回 `ConfigData` 但**不落盘**（`validateThresholds` 的全部副作用都在入参上）：
+  用户的 config.yml 保持原样，下次改了采集周期仍会重新算，不会把一次性调整固化成
+  一个他看不懂的数字。
+
+### Fixed — P1-P：发送失败日志 86400 条/天（外层 300 秒限频够不到）
+
+**根因**：`publish()` 内部每周期一条 WARNING，无节流。1 Hz 采集下 = **86400 条/天**。
+`MetricsCollector:785` 那条 300 秒限频**对发送失败不可达**——`publish()` 把异常在内部
+吞掉并返回 `FAILED`，外层的 `catch` 永远进不去。所以限频只能做在抛出点这一侧。
+
+**改动**：`catch` 里加 5 分钟限频（`WARN_INTERVAL_MS`，与 `resolveServerId` 的
+`lastIdWarnAtMs` 同一模式），文案带"连续第 N 次"与"同类日志每 300 秒最多一条"。
+
+**关键细节**：失败计数 `consecutiveSendFailures` 在限频判断**之前**递增。
+被吞掉的失败如果也不计数，日志里的"连续第 N 次"会永远显示 1——
+把"已经坏了一整天"说成"刚坏"。一次成功则清零。
+
+### Added — 回归测试（21 条，全部经变异验证）
+
+| 测试类 | 条数 | 锁什么 | 变异验证 |
+|---|---|---|---|
+| `PublisherClockRollbackTest` | 8 | 回拨 1 小时 / 1 天仍发送；`isClockRollback` 边界（同一毫秒不算、早 1 毫秒算）；哨兵 0 不算回拨；正常时间轴四条老行为不变；`formatDuration` 单位裁剪 | 关掉回拨分支 → 3 条红 |
+| `PushIntervalCrossCheckTest` | 10 | 40/60 秒采集必须被上调；上调结果满足代理判过期不等式（对 6 个采集周期逐一验）；默认 20t/10s 不得被改；`push == 一个周期` 的边界；越界回退后仍须满足关系；告警点名三个数；合规配置静默 | 关掉交叉校验 → 5 条红 |
+| `PublisherFailureThrottleTest` | 3 | 连续 50 次失败只 1 条 WARNING；限频吞掉的失败仍计数（第 6 次显示"连续第 6 次"）；成功清零计数 | 去掉限频 → 2 条红 |
+
+`PublisherFailureThrottleTest` 用 `Proxy` 造最小的 `Server` / `Player`（两者都是接口），
+所以**真实执行了 `publish()` 的失败分支**，而不是只断言源码文本。
+
+### Notes — 汇报口径
+
+- 假 STALE 的 22.5% / 48.3% 是**红队实测**数据（真实采集序列），不是合成轨迹。
+  本次修复的验证是"关系式 + 单测"，**未重新跑 ≥30 分钟真实回放确认占比归零**——
+  按项目规则这一条应标注为"待实测确认"。
+- 未改版本号、未 commit（按任务约束）。
+
+---
+
+
+> 三条缺陷同一个根：**"后端身份"这件事只有接收端在管，发送端完全不管**。
+> 于是一个纯配置问题（id 太长 / 填成保留字）被表现成"这台后端在面板上永久隐身"，
+> 而日志指向的是"两端版本不一致"——一个与真实原因无关的方向。
+
+### Fixed — P1-C：`server-id` 发送前校验（超长 / 保留字）
+
+**根因**：`SummaryPublisher.resolveServerId` 只做 `.trim()`，无长度、无保留字校验；
+代理侧 `SummaryPacket.parse` 对 `> 64` 字符**整包丢弃**、`PerfScopeVelocity` 对 `unknown`
+**整包丢弃**。两端判据不对称 → 服主把 `server-id` 配成长名字或 `unknown`，该后端永久隐身，
+代理日志只说"无法解析的跨服摘要"，把人引向"版本不一致"。
+
+**改动**：
+
+1. `SummaryPublisher` 新增协议常量 `MAX_SERVER_ID_LENGTH = 64` / `RESERVED_SERVER_ID = "unknown"`，
+   与代理侧 `SummaryPacket` 逐字一致（两仓库不能共享代码，靠同一个字面量对接，两侧测试各钉一遍）。
+2. 新增纯函数 `validateServerId(String) → ServerIdVerdict{OK,BLANK,RESERVED,TOO_LONG}`：
+   先判空白（BLANK 不是错误，是"回退下一级"）、再判保留字（大小写敏感，`Unknown` 合法，
+   与代理侧 `"unknown".equals(...)` 对称）、最后按**字符数**判长度（与代理 `String.length()` 同口径）。
+3. `resolveServerId` 显式配置不合格时**拒发**（`Result.REJECTED_ID`）并告警，不再悄悄回退端口派生。
+   不截断、不替换理由：截断会造出用户没写过的名字，替换成 `port-xxx` 会让那台以派生名"正常"出现，
+   而他真正配的名字一直「无数据」，成了一行查不出原因的幽灵行。
+4. 告警文案走 i18n（`config.check.network-server-id-too-long` / `-reserved`），点名"长度 / 保留字"、
+   实际字符数与上限——这是与"版本不一致"那句有害提示的唯一区别。
+5. `ConfigManager` 加载期也查一次（`checkCrossServerId`，复用同一判据）：启动那一屏就能看到，
+   不必等第一个采集周期。
+
+### Changed — `config.yml` / README
+
+- `network.server-id` 的注释补上两条硬限制与"配错即拒发"的后果。
+- README / README-EN：「必须与 velocity.toml 一致」改口为「**强烈建议，但不强制**」，
+  并说明代理侧改为"一个身份只归一条后端"的来源绑定（详见代理仓库 README）。
+
+### Notes — 未改的部分
+
+- 长度上限 64 是**协议常量**，本次未做成可配置项：两侧必须同一个值，做成可调反而会引入
+  "两边配置不同"这种新的不对称。
+- `prometheus.server-id` 与 `network.server-id` 共用同一判据。只查 `network.server-id` 会漏掉
+  "前者留空、真正生效的是后者"这一格。
 
 ---
 
@@ -420,7 +893,7 @@ MSPT 在 35–45 区间代理黄、后端绿，45–50 区间代理红、后端�
 
 ### Changed — 测试
 
-代理侧 24 → 34 个用例，重点补此前零覆盖的地方：
+代理侧 24 → 36 个用例，重点补此前零覆盖的地方：
 
 - 四种状态行的 `Level` 矩阵（此前 `level()` 断言数 = 0，把整行改成绿色也测不出）
 - `msptCell` 全套（此前零覆盖：null / 45 / 50 / 格式化）

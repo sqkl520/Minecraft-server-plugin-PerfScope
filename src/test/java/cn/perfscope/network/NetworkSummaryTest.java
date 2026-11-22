@@ -239,4 +239,105 @@ class NetworkSummaryTest {
         // 0 对 MSPT 不合法（tick 耗时不可能是 0）
         assertFalse(SummaryPublisher.fieldsAvailable("mspt", false, 0.0, 0));
     }
+
+    // ==================== P1-C：server-id 发送前校验 ====================
+
+    /**
+     * 常量必须是<b>字面量 64</b>，且与代理侧 {@code SummaryPacket.MAX_SERVER_ID_LENGTH} 同值。
+     *
+     * <p>用字面量断言而不是"互相引用常量"，是因为后者会一起漂移：把两边都改成 1 亿，
+     * "两边相等"仍然成立，而真实契约已经破了。这条把"64"这个<b>协议约定</b>钉死。</p>
+     */
+    @Test
+    @DisplayName("server-id 上限是协议常量 64，保留字是 unknown")
+    void serverIdProtocolConstantsAreFixed() {
+        assertEquals(64, SummaryPublisher.MAX_SERVER_ID_LENGTH,
+            "上限必须就是 64——代理侧 SummaryPacket.MAX_SERVER_ID_LENGTH 也是这个值，"
+                + "两端靠这个字面量对接，不靠代码共享");
+        assertEquals("unknown", SummaryPublisher.RESERVED_SERVER_ID,
+            "保留字必须就是 unknown，与代理侧事件层 \"unknown\".equals(...) 的判据逐字一致");
+    }
+
+    @Test
+    @DisplayName("校验：超过 64 字符必须被判 TOO_LONG（不是放行给代理去丢）")
+    void overlongServerIdIsRejectedAtSendTime() {
+        // 65 个字符：超限。
+        assertEquals(SummaryPublisher.ServerIdVerdict.TOO_LONG,
+            SummaryPublisher.validateServerId("a".repeat(65)),
+            "65 字符必须被发送端拒——这正是 P1-C 的核心：后端发得出去的，代理必须收得下");
+
+        // 恰好 64：合法边界。
+        assertEquals(SummaryPublisher.ServerIdVerdict.OK,
+            SummaryPublisher.validateServerId("a".repeat(64)),
+            "恰好 64 字符必须放行（上限是 > 64，不是 >= 64）");
+
+        // 63：合法。
+        assertEquals(SummaryPublisher.ServerIdVerdict.OK,
+            SummaryPublisher.validateServerId("a".repeat(63)));
+
+        // 首尾空白不算长度（trim 后才判）：60 个 a 加 10 个空格 trim 后仍是 60，合法。
+        String padded = " ".repeat(10) + "a".repeat(60) + " ".repeat(10);
+        assertEquals(SummaryPublisher.ServerIdVerdict.OK,
+            SummaryPublisher.validateServerId(padded),
+            "首尾空白只是 YAML 排版噪音，trim 后不超限就该放行");
+    }
+
+    @Test
+    @DisplayName("校验：保留字 unknown 被拒，但大小写变体 Unknown 合法")
+    void reservedWordRejectedButCaseVariantsAreFine() {
+        assertEquals(SummaryPublisher.ServerIdVerdict.RESERVED,
+            SummaryPublisher.validateServerId("unknown"),
+            "全小写 unknown 是代理侧「没有身份」的保留字，必须拒");
+
+        // 大小写敏感：代理侧判据是 "unknown".equals(...)，所以 Unknown 在那边是合法 id。
+        assertEquals(SummaryPublisher.ServerIdVerdict.OK,
+            SummaryPublisher.validateServerId("Unknown"),
+            "大写 Unknown 在代理侧是合法 id，后端若拦掉就成了「后端拒发、代理收得下」");
+        assertEquals(SummaryPublisher.ServerIdVerdict.OK,
+            SummaryPublisher.validateServerId("UNKNOWN"));
+        assertEquals(SummaryPublisher.ServerIdVerdict.OK,
+            SummaryPublisher.validateServerId("my-unknown-server"),
+            "含 unknown 子串但不是保留字本身，必须放行");
+    }
+
+    @Test
+    @DisplayName("校验：空 / 纯空白判 BLANK（不是错误，是「回退下一级」）")
+    void blankIdIsNotAnError() {
+        assertEquals(SummaryPublisher.ServerIdVerdict.BLANK, SummaryPublisher.validateServerId(null));
+        assertEquals(SummaryPublisher.ServerIdVerdict.BLANK, SummaryPublisher.validateServerId(""));
+        assertEquals(SummaryPublisher.ServerIdVerdict.BLANK, SummaryPublisher.validateServerId("   "));
+        assertEquals(SummaryPublisher.ServerIdVerdict.BLANK, SummaryPublisher.validateServerId("\t\n"));
+        // BLANK ≠ TOO_LONG：留空是 config.yml 写明的"回退"语义，不能被当成错误拒发。
+        assertTrue(SummaryPublisher.validateServerId("") != SummaryPublisher.ServerIdVerdict.TOO_LONG);
+    }
+
+    @Test
+    @DisplayName("校验：中文 id 按字符数算长度，不按字节（与代理侧 String.length 同口径）")
+    void lengthIsMeasuredInCharsNotBytes() {
+        // 40 个汉字：UTF-8 下 120 字节，但字符数只有 40 —— 必须放行。
+        // 若实现改成按字节算，这条会红，而后端会拒绝一个代理明明收得下的中文 id。
+        assertEquals(SummaryPublisher.ServerIdVerdict.OK,
+            SummaryPublisher.validateServerId("服".repeat(40)),
+            "40 个汉字只有 40 个字符，代理侧 String.length() 也是 40，必须放行");
+
+        // 65 个汉字：字符数超限。
+        assertEquals(SummaryPublisher.ServerIdVerdict.TOO_LONG,
+            SummaryPublisher.validateServerId("服".repeat(65)));
+    }
+
+    @Test
+    @DisplayName("校验：先判保留字再判长度（65 字符的 unknown 变体不能被误报成超长）")
+    void reservedWordIsCheckedBeforeLength() {
+        // 一个 65 字符、以 unknown 开头的值：应该报 TOO_LONG（它不是保留字）。
+        // 真正的保留字本身只有 7 字符，不会撞长度闸门——这条钉住判定顺序不是反的。
+        assertEquals(SummaryPublisher.ServerIdVerdict.TOO_LONG,
+            SummaryPublisher.validateServerId("unknown" + "a".repeat(58)));
+
+        // 反过来：如果实现先判长度，7 字符的 unknown 依然 RESERVED（长度不超），
+        // 所以真正能区分顺序的是"超长的保留字类值"——它必须报 TOO_LONG。
+        // 再补一条：恰好 64 字符且等于保留字前缀的，不因长度被判错。
+        assertEquals(SummaryPublisher.ServerIdVerdict.OK,
+            SummaryPublisher.validateServerId("a".repeat(63) + "k"));
+    }
 }
+

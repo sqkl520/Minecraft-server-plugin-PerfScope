@@ -10,7 +10,7 @@ One command to see the whole server; one report to say where it hurts
 ![Version](https://img.shields.io/badge/version-1.4.5--SNAPSHOT--fix4-orange?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Paper%20family-blue?style=flat-square)
 ![Java](https://img.shields.io/badge/java-17-success?style=flat-square)
-![Tests](https://img.shields.io/badge/unit%20tests-798%20passing-brightgreen?style=flat-square)
+![Tests](https://img.shields.io/badge/unit%20tests-869%20passing-brightgreen?style=flat-square)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green?style=flat-square)
 
 [![Build](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/actions/workflows/build.yml/badge.svg)](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/actions/workflows/build.yml)
@@ -64,7 +64,7 @@ A comprehensive performance monitoring plugin for Minecraft servers, focused on 
 - **History Summary** (new in v1.2) —— `/perfscope history` shows the last ~24 hours: coverage, lowest TPS with its timestamp, peak entities, peak heap — answering "when did it start getting worse"
 - **Hotspot Localization** (new in v1.2) —— `/perfscope hotspot` lists the top-3 entity-density chunks server-wide with coordinates (and dominant type share), drilling from "many entities" down to "go look at this spot"; coordinates are click-to-copy
 - **Prometheus metrics endpoint** (new in v1.4) —— a dependency-free `/metrics` text endpoint that plugs the plugin into an existing monitoring stack (Prometheus scrape → Grafana dashboards). Beyond TPS/MSPT/memory/entities/chunks it exports the plugin's own trustworthiness signals (snapshot age, collector degradation, per-module availability, per-alert state) that tell "the server died" apart from "the metrics froze". Listens on `127.0.0.1:8940` by default. See "Wiring up Prometheus / Grafana" below
-- **Whole network on one screen** (new in v1.4.5, needs a separate proxy-side plugin) —— each backend pushes a tiny summary to the Velocity proxy, where the separate [`PerfScope-Velocity`](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope-Velocity) plugin shows every backend's TPS / MSPT / player count via `/pscope network`, distinguishing "OK / stale / collector dead / no data". Off by default; see "Cross-server summary (proxy networks)" below
+- **Whole network on one screen** (new in v1.4.5, needs a separate proxy-side plugin) —— each backend pushes a tiny summary to the Velocity proxy, where the separate [`PerfScope-Velocity`](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope-Velocity) plugin shows every backend's TPS / MSPT / player count via `/pscope network`, distinguishing "OK / stale / collector dead / clock skew / no data" (the proxy learns each backend's clock offset from the packet's `sentAt`, so cross-machine clock drift no longer distorts the panel in either direction). Off by default; see "Cross-server summary (proxy networks)" below
 - **Color-Coded UI** —— Rendered via Paper Adventure API, key metrics colored by level (green/yellow/red) based on the `config.yml` alert thresholds; display and alerts **share the same config source and the same level-decision entry point**, and colors follow immediately after a config reload. The comparison operator is defined **in exactly one place** too: TPS / MSPT / entities / chunks / CPU use strict comparison (a reading exactly *at* the threshold does **not** change color; it must go past it), while memory and player capacity use closed intervals (reaching the threshold is enough). So "the color changed" always means "the alert has fired" — the two can never disagree by a tier.
 
 ## 🎯 Target platform & compatibility
@@ -368,20 +368,45 @@ network:
 - **`server-id` must be unique per backend.** It is the only field that tells them apart. When left
   empty it is derived as `port-<port>` with a console warning — in a multi-backend network **always**
   set it explicitly, or the proxy will merge several backends into one row.
-- **`server-id` should match the backend's name in `velocity.toml` verbatim.** The proxy panel shows
-  the union of "names registered in `[servers]`" and "server-ids that have sent a packet"; when the
-  two disagree you get **ghost rows** — `velocity.toml` says `survival-1` but `server-id` says
-  `survival`, so the panel shows two rows, one "no data" and one with numbers. That is the single
-  most common first-install situation mistaken for "the plugin is broken".
+- **`server-id` has two hard limits, enforced on both ends:** at most **64 characters** (counted in
+  characters, so one CJK character is 1) and it must not be the reserved word **`unknown`**
+  (case-sensitive; `Unknown` is fine). When it breaks either, this plugin **refuses to send** and
+  names the reason (length / reserved word) with the actual character count and limit — instead of
+  sending it, having the proxy silently drop it, and leaving only "cannot parse cross-server
+  summary, check your versions" (which points you at a completely unrelated direction).
+- **`server-id` strongly should match the backend's name in `velocity.toml` verbatim (but this is not
+  enforced).** The proxy panel shows the union of "names registered in `[servers]`" and "server-ids
+  that have sent a packet"; when the two disagree you get **ghost rows** — `velocity.toml` says
+  `survival-1` but `server-id` says `survival`, so the panel shows two rows, one "no data" and one
+  with numbers. That is the single most common first-install situation mistaken for "the plugin is
+  broken". The proxy does **not** reject a mismatch (that would make every existing deployment go
+  dark after an upgrade); it only binds each identity to one backend, so backend A impersonating
+  backend B's `server-id` is dropped, while a name that merely differs from the backend name is
+  still accepted. See the proxy repo's README, section "Source binding".
 - **It rides on player connections.** The summary goes over Minecraft's plugin messaging, so a
   backend with **nobody online cannot send**. During those windows the proxy shows "no data",
   not "all good".
 - **Reload after changing it** — `/perfscope reload` or a server restart (hot reload works).
 - Installing only the backend plugin does nothing: the channel has no consumer.
+- **Changing this backend's thresholds does not recolour the proxy panel.** The proxy cannot read
+  each backend's `config.yml`, so the TPS / MSPT tiers on `/pscope network` come from **four
+  constants hard-coded in the proxy plugin** (`NetworkRenderer`, seeded from the backend's shipped
+  defaults). After you retune this server's `tps.*` / `mspt.*` thresholds, the same reading may land
+  in different tiers on `/perfscope` and `/pscope network` — when the two disagree, trust the
+  **backend** panel, which reads your actual config. Removing the difference means editing those
+  proxy-side constants.
 - **Players cannot reach this plugin's subcommands through the proxy.** The proxy-side plugin
   registers `/pscope` (aliases `/perfscope`, `/ps`), and Velocity commands take precedence over
   backend ones, so a player typing `/perfscope tps` in game only gets the network panel's usage hint.
-  Use the console, or `/perfscope:tps` with the namespace, to reach the backend subcommands.
+  Use the **console**, or write `/perfscope:perfscope tps` with the plugin namespace.
+
+> **On the namespace form** (verified on a real Paper 1.21.4 server): Bukkit registers a command into
+> `knownCommands` under the key `<plugin-name>:<command-name>`, where the plugin name comes from
+> `plugin.yml`'s `name` (this plugin is `PerfScope`) and the command name from `Command.getName()`
+> (`perfscope` / `pscope` / `perf`). Only that **key** resolves: `/perfscope:perfscope tps` and
+> `/perfscope:pscope tps` both run, while `/perfscope:tps` does not — `tps` is a subcommand, not a
+> registered command name. Measured: `/perfscope:tps` returns `Unknown or incomplete command`,
+> `/perfscope:perfscope tps` prints the TPS diagnostics normally.
 
 ### Language (i18n)
 
@@ -751,6 +776,10 @@ mvn clean package -DskipTests   # build without tests
 ```
 
 Test dependencies are `test`-scoped and never enter the final JAR.
+
+For the current test count, read the `Tests run: …` line at the end of `mvn test` rather than
+counting `@Test` annotations in the source: the latter also counts conditionally skipped cases
+(e.g. OS-gated or real-socket platform tests). That is how the badge number is produced.
 
 ## ⚖️ License
 

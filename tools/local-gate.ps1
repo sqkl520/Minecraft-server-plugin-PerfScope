@@ -226,6 +226,21 @@ if ($null -ne $node) {
     Invoke-Step 'L1 proxy thresholds match the operator table' {
         & $node (Join-Path $PSScriptRoot 'check-velocity-thresholds.mjs') '--repo' $RepoRoot '--velocity' $velocityRepo
     } -Advisory:(!(Test-Path -LiteralPath $velocityRepo))
+    # Cross-repo golden fixtures: the two repos must hold the SAME BYTES.
+    #
+    # Why a gate and not just unit tests: each side's tests can only see its own copy. The
+    # backend asserts "toMap() == the bytes on disk"; the proxy asserts "the bytes on disk parse
+    # to these values". Both stay green in the state that matters most -- the backend regenerated
+    # its fixtures and nobody copied them over. The proxy is then validating a protocol that no
+    # longer exists, and every release ships with "both suites green" as cover. No in-repo test
+    # can ever see this; only something outside both builds can.
+    #
+    # Advisory for the same reason as the thresholds step: a backend-only clone has no proxy to
+    # compare against, and the script exits 2 for "cannot compare" -- that must not block a
+    # release, but it still prints red so silence is never read as PASS.
+    Invoke-Step 'L1 protocol fixtures identical in both repos' {
+        & $node (Join-Path $PSScriptRoot 'check-protocol-fixtures-sync.mjs') '--backend' $RepoRoot '--velocity' $velocityRepo
+    } -Advisory:(!(Test-Path -LiteralPath $velocityRepo))
 } else {
     Write-Step 'static gates need node -- skipped' 'WARN'
 }
