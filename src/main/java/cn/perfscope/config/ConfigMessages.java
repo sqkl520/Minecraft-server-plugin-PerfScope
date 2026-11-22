@@ -304,6 +304,34 @@ public final class ConfigMessages {
             "history.sample-interval-seconds={0} 超过 {1} 秒：30 分钟诊断窗口内样本不足，"
                 + "趋势规则（DIAG-MEM-LEAK / DIAG-TPS-PERSIST）会长期跳过；建议回到 60 秒");
 
+        // v1.5：跨服身份的发送前校验。这两条存在的唯一理由就是**说清是长度 / 是保留字**——
+        // 此前超长 id 由代理侧静默丢弃，日志写的是"无法解析的跨服摘要，请检查版本"，
+        // 把服主引向一个完全无关的方向（两端版本不一致）。所以文案里必须出现
+        // 实际字符数与上限、以及"长度/保留字"这两个词，否则等于没修。
+        //
+        // 参数口径统一为 {0}=配置键名、{1}=被拒的原值、{2}=实际字符数 / 保留字本体、{3}=长度上限。
+        // 两个调用点（ConfigManager 加载期 / SummaryPublisher 发送期）传同一组参数，
+        // 只是它们知道的键名不同（前者逐项点名，后者只知道"显式配置的那个"）。
+        put(en, zh, "config.check.network-server-id-too-long",
+            "Cross-server identity rejected: {0}=\"{1}\" is {2} characters long, but the proxy drops "
+                + "any server id longer than {3} characters. This backend would stay invisible on "
+                + "/pscope network, and the proxy log would only say \"cannot parse cross-server "
+                + "summary\" -- nothing to do with a version mismatch. Shorten it to {3} characters or "
+                + "fewer. NOTHING is sent from this backend until then.",
+            "跨服身份被拒：{0}=「{1}」有 {2} 个字符，而代理侧会丢弃超过 {3} 个字符的 server-id。"
+                + "这台后端会在 /pscope network 上永久隐身，代理日志却只会说「无法解析的跨服摘要」"
+                + "——那与版本不一致无关。请把该值缩短到 {3} 个字符以内。修好之前这台后端不发送任何数据");
+        put(en, zh, "config.check.network-server-id-reserved",
+            "Cross-server identity rejected: {0}=\"{1}\" is the reserved word the proxy uses to mean "
+                + "\"no identity\" ({2}). The proxy drops every packet carrying it, so this backend "
+                + "would stay invisible on /pscope network. Pick any other name (\"survival\", "
+                + "\"lobby\", ...); the check is case-sensitive, so \"Unknown\" is fine. NOTHING is sent "
+                + "from this backend until then.",
+            "跨服身份被拒：{0}=「{1}」是代理侧用来表示「没有身份」的保留字（{2}）。"
+                + "带这个值的包会被代理整包丢弃，这台后端会在 /pscope network 上永久隐身。"
+                + "请换一个名字（survival / lobby 之类）；判据区分大小写，所以「Unknown」是合法的。"
+                + "修好之前这台后端不发送任何数据");
+
         Messages.registerModule(en, zh);
     }
 
