@@ -108,7 +108,16 @@ public class ConfigManager {
     /** 9A-11：本轮 load() 使用的 yaml 句柄（仅 load() 内部使用，勿在其它线程读取）。 */
     private FileConfiguration yaml;
 
-    /** 9A-11：本轮缺键（key -> 采用的默认值），load() 末尾汇总成一条 INFO，避免 50 行刷屏。 */
+    /**
+     * 9A-11：本轮缺键（key -> 采用的默认值），load() 末尾汇总成一条 INFO，避免 50 行刷屏。
+     *
+     * <p><b>P0-2：三个 {@code *ThisLoad} 集合一律只在 {@code synchronized load()} 内读写。</b>
+     * 它们是普通集合（{@code LinkedHashMap} / {@code HashSet} / {@code ArrayList}），
+     * 并发 {@code clear()} + {@code put()} 会抛 {@code ConcurrentModificationException}
+     * （被 reload 的 catch 误报成"配置解析失败"），更坏的是 {@code HashSet} 并发 {@code add}
+     * 可能撕裂桶链，让后续 {@code contains} 死循环卡住 region 线程。新增读写点必须留在
+     * {@code load()} 的调用栈内，否则这条保护就破了。</p>
+     */
     private final Map<String, Object> missingKeysThisLoad = new LinkedHashMap<>();
 
     /** 9A-11：本轮已告警过的键——同一键（含 worlds 动态键）只警告一次。 */
@@ -146,8 +155,28 @@ public class ConfigManager {
      * <b>应让异常穿透以 fail-fast</b>——此时 {@link #get()} 为 {@code null}，无旧配置可退；
      * <b>reload</b> 则捕获并按旧快照继续运行。其余情况一律正常返回，状态放在
      * {@link LoadResult} 里（版本迁移、缺键、未知键、未知世界名）。</p>
+     *
+     * <p><b>P0-2：为什么整个方法要 {@code synchronized}</b>——本方法内部有三个<b>普通</b>集合
+     * （{@link #missingKeysThisLoad} / {@link #typeWarnedThisLoad} / {@link #typeWarningsThisLoad}），
+     * 每次进入先 {@code clear()}、随后在几十个 {@code readXxx()} 里 {@code put}/{@code add}。
+     * 两个线程同时 load 时有两层伤害：</p>
+     * <ol>
+     *   <li><b>可见的错误归因</b>：{@code ConcurrentModificationException} 会从 {@code load()}
+     *       抛给 {@code PerfScope.reload()} 的 catch，被当成「配置解析失败」并打印
+     *       「已按旧配置继续」——真实原因（并发重载）被日志完全掩盖，排障方向被带偏。</li>
+     *   <li><b>不可见的死循环</b>：{@code HashSet} 并发 {@code add} 可能撕裂桶链成环，
+     *       之后的 {@code contains} 会<b>永远转</b>在链上，卡死 region 线程（比异常严重得多，
+     *       因为没有任何日志）。</li>
+     * </ol>
+     * <p>{@code PerfScope.reload()} 已有实例锁，这条是<b>第二道防线</b>：{@code load()} 是
+     * {@code public}，别的调用点（命令层、将来的热重载接口）不受那把锁保护。</p>
+     *
+     * <p>为什么加在方法上而不是把三个集合换成并发容器：加锁的代价只有 reload 期间（读盘 +
+     * 解析，秒级、且本来就是低频人工操作），而 {@code synchronized} 一次覆盖了"三个集合的
+     * 重置与填充必须是一个整体"这条真正的不变量——换成 {@code ConcurrentHashMap} 只能防撕裂，
+     * 防不住 A 的 {@code clear()} 把 B 刚填进去的缺键清掉（结果变成"日志少报几条"，静默错报）。</p>
      */
-    public LoadResult load() {
+    public synchronized LoadResult load() {
         // 保存默认配置
         plugin.saveDefaultConfig();
         configFile = new File(plugin.getDataFolder(), "config.yml");
@@ -257,20 +286,32 @@ public class ConfigManager {
         fresh.alerts_cooldownSeconds = readInt("alerts.cooldown-seconds", 300);
         fresh.alerts_notifyRecovery = readBool("alerts.notify-recovery", true);
         fresh.alerts_debounceCycles = readInt("alerts.debounce-cycles", 3);
-        // 9A-14：告警决策层新增的 5 个键（此前 AlertService 用 RawConfig 直读兜底，
+        // 9A-14：告警决策层新增的 5 个键（此前由 AlertService 的 RawConfig 直读兜底，
         // 绕过了本类的 config-version / 未知键检测；现收编为正式配置项）
-        fresh.alerts_recoveryDebounceCycles = readInt("alerts.recovery-debounce-cycles", 3);
+        //
+        // 缺键默认值 = alerts.debounce-cycles 的**原始**读数，不是常量 3：旧实现是
+        // `raw.getInt("alerts.recovery-debounce-cycles", Math.max(1, cfg.alerts_debounceCycles))`，
+        // 即"没写这一项就跟防抖同值"。缺键时这里取到原始 debounce（可能是 0），
+        // 再由 validateThresholds 按已钳制的 debounce 回退——两条路径合起来与旧语义逐值相同。
+        fresh.alerts_recoveryDebounceCycles = readInt("alerts.recovery-debounce-cycles",
+            fresh.alerts_debounceCycles);
         fresh.alerts_digestMode = readBool("alerts.digest-mode", false);
         fresh.alerts_notifyMitigation = readBool("alerts.notify-mitigation", true);
-        fresh.alerts_unknownAfterMinutes = readInt("alerts.unknown-after-minutes", 5);
+        fresh.alerts_unknownAfterMinutes = readInt("alerts.unknown-after-minutes",
+            ALERTS_UNKNOWN_AFTER_MINUTES_DEFAULT);
         fresh.alerts_dailySummaryTimezone = readString("alerts.daily-summary.timezone", "");
-        // 9C-4：抖动抑制两项。实际判定由 AlertService 经 RawConfig 读取——决策层参数集中在决策层，
-        // 避免 ConfigData 再膨胀只在 AlertService 用到的字段。这里的读取**不登记已知键**
-        // （未知键集合只取自 jar 内 config.yml），它只产生两个副作用：缺键汇总 + 类型校验告警。
-        // f-s03-data-07：repush-delta 必须用 readDouble——AlertService 以 getDouble 消费，
-        // 用 readInt 时用户写 8.5 会被判"类型错误、已改用 8"，而实际生效的仍是 8.5。
-        readInt("alerts.flap-window-seconds", 180);
-        readDouble("alerts.repush-delta", 8.0);
+        // 9C-4：抖动抑制三项。此前只有 flap/repush 在这里被"读一下取副作用"（缺键汇总 + 类型校验），
+        // 真值由 AlertService 经 RawConfig 再读一遍；refire 连字段都没有。
+        // 现在三项都是正式配置项：唯一入口是 ConfigData，AlertService 不再碰原文件。
+        //
+        // f-s03-data-07：repush-delta 必须用 readDouble——旧实现 AlertService 以 getDouble 消费，
+        // 而这里曾用 readInt 读一遍只为告警，用户写 8.5 会被判"类型错误、已改用 8"，
+        // 实际生效的却仍是 8.5：同键两个读者用不同数值域，日志与行为互相矛盾。
+        fresh.alerts_flapWindowSeconds = readInt("alerts.flap-window-seconds",
+            ALERTS_FLAP_WINDOW_SEC_DEFAULT);
+        fresh.alerts_repushDelta = readDouble("alerts.repush-delta", ALERTS_REPUSH_DELTA_DEFAULT);
+        fresh.alerts_refireMinIntervalSeconds = readInt("alerts.refire-min-interval-seconds",
+            ALERTS_REFIRE_MIN_INTERVAL_SEC_DEFAULT);
         // === 每日摘要与 webhook（Wave 7D） ===
         fresh.alerts_dailySummaryEnabled = readBool("alerts.daily-summary.enabled", false);
         fresh.alerts_dailySummaryTime = readString("alerts.daily-summary.time", "08:00");
@@ -1092,6 +1133,78 @@ public class ConfigManager {
             cfg.alerts_dailySummaryTime = "08:00";
         }
 
+        // === 告警决策层数值参数（9A-14 / 9C-4 的 5 项，本次收编进 ConfigData） ===
+        //
+        // 这一段的每一处回退都**必须与 AlertService.loadOptions() 的旧行为逐值一致**：
+        // 旧实现是"RawConfig 读取 → 非法值回退到 AlertService 侧常量"，现在换成
+        // "ConfigManager 读取 → validateThresholds 回退到 ConfigManager 侧常量"，
+        // 常量值相同，且回退**只发生在校验这一处**（loadOptions 不再二次回退）。
+        // 详见 AlertService#loadOptions 的注释：那里只做单位换算，不做判定。
+
+        // alerts.recovery-debounce-cycles：≥1。非法值的回退基准是**已钳制的** debounce-cycles
+        // （旧行为：`warning + 按 debounce 处理`），而不是常量 3——用户把 debounce 调到 9 时，
+        // 恢复防抖的兜底也应跟着到 9，否则会静默变成"首次安装的 3 个周期"。
+        if (cfg.alerts_recoveryDebounceCycles < 1) {
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.alerts-recovery-debounce",
+                "alerts.recovery-debounce-cycles", cfg.alerts_recoveryDebounceCycles,
+                cfg.alerts_debounceCycles));
+            cfg.alerts_recoveryDebounceCycles = cfg.alerts_debounceCycles;
+        }
+
+        // alerts.unknown-after-minutes：≥1。0 会让"模块不可用即转 unknown"在每个周期都成立，
+        // 于是任何一次采集抖动都把活跃告警打进 unknown，恢复时还静默（不发"已恢复正常"）。
+        if (cfg.alerts_unknownAfterMinutes < 1) {
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.alerts-unknown-after",
+                "alerts.unknown-after-minutes", cfg.alerts_unknownAfterMinutes,
+                ALERTS_UNKNOWN_AFTER_MINUTES_DEFAULT));
+            cfg.alerts_unknownAfterMinutes = ALERTS_UNKNOWN_AFTER_MINUTES_DEFAULT;
+        }
+
+        // alerts.refire-min-interval-seconds：**0 合法**（= 关闭复燃识别，再次越界按普通新告警处理，
+        // 仍受 cooldown-seconds 约束），负值回退默认。这条 0 的语义是作者决策，见 config.yml 该键的注释；
+        // 旧实现对 0 也是"放行"，此处逐字保留。
+        if (cfg.alerts_refireMinIntervalSeconds < 0) {
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.alerts-refire",
+                "alerts.refire-min-interval-seconds", cfg.alerts_refireMinIntervalSeconds,
+                ALERTS_REFIRE_MIN_INTERVAL_SEC_DEFAULT));
+            cfg.alerts_refireMinIntervalSeconds = ALERTS_REFIRE_MIN_INTERVAL_SEC_DEFAULT;
+        }
+
+        // alerts.flap-window-seconds：0 合法（= 关闭抖动抑制），负值回退默认。
+        if (cfg.alerts_flapWindowSeconds < 0) {
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.alerts-flap",
+                "alerts.flap-window-seconds", cfg.alerts_flapWindowSeconds,
+                ALERTS_FLAP_WINDOW_SEC_DEFAULT));
+            cfg.alerts_flapWindowSeconds = ALERTS_FLAP_WINDOW_SEC_DEFAULT;
+        }
+
+        // alerts.repush-delta：0 合法（= 关闭"数值变化"这层抑制，退回"每冷却期重推一次"），
+        // 负值与非有限值（NaN/Infinity）回退默认。非有限值必须拦：NaN 与任何数比较恒 false，
+        // 会让 `absDelta >= repushDelta` 恒假 → 稳定告警永不重推（静默失效）。
+        if (!Double.isFinite(cfg.alerts_repushDelta) || cfg.alerts_repushDelta < 0) {
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.alerts-repush",
+                "alerts.repush-delta", cfg.alerts_repushDelta, ALERTS_REPUSH_DELTA_DEFAULT));
+            cfg.alerts_repushDelta = ALERTS_REPUSH_DELTA_DEFAULT;
+        }
+
+        // === 不合理量级（warn-only，不改值） ===
+        // 上界刻意不拦：旧实现没有上界，加上界就是静默改变既有部署的行为（见常量注释）。
+        if (cfg.alerts_refireMinIntervalSeconds > ALERTS_SUPPRESS_SECONDS_IMPLAUSIBLE) {
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.alerts-window-implausible",
+                "alerts.refire-min-interval-seconds", cfg.alerts_refireMinIntervalSeconds,
+                ALERTS_SUPPRESS_SECONDS_IMPLAUSIBLE));
+        }
+        if (cfg.alerts_flapWindowSeconds > ALERTS_SUPPRESS_SECONDS_IMPLAUSIBLE) {
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.alerts-window-implausible",
+                "alerts.flap-window-seconds", cfg.alerts_flapWindowSeconds,
+                ALERTS_SUPPRESS_SECONDS_IMPLAUSIBLE));
+        }
+        if (cfg.alerts_unknownAfterMinutes > ALERTS_UNKNOWN_AFTER_MINUTES_IMPLAUSIBLE) {
+            plugin.getLogger().warning("[PerfScope] " + Messages.get("config.check.alerts-window-implausible",
+                "alerts.unknown-after-minutes", cfg.alerts_unknownAfterMinutes,
+                ALERTS_UNKNOWN_AFTER_MINUTES_IMPLAUSIBLE));
+        }
+
         // === alerts.webhook.type：未知值按 discord 处理并 warning（Wave 7D，不静默） ===
         // v1.4：白名单从 2 值扩到 5 值。新增的三家国内平台在业务失败时也返回 HTTP 200，
         // 所以"类型写错"不会再退化成静默黑洞——只要读了响应体就一定能发现（见 WebhookResponse）。
@@ -1199,9 +1312,10 @@ public class ConfigManager {
             || cfg.network_pushIntervalSeconds > NETWORK_PUSH_INTERVAL_MAX) {
             int raw = cfg.network_pushIntervalSeconds;
             cfg.network_pushIntervalSeconds = NETWORK_PUSH_INTERVAL_DEFAULT;
-            plugin.getLogger().warning("[PerfScope] network.push-interval-seconds=" + raw
-                + " 超出 " + NETWORK_PUSH_INTERVAL_MIN + "–" + NETWORK_PUSH_INTERVAL_MAX
-                + " 秒，已回退 " + cfg.network_pushIntervalSeconds + " 秒");
+            plugin.getLogger().warning("[PerfScope] " + Messages.get(
+                "config.check.network-push-interval-out-of-range",
+                raw, NETWORK_PUSH_INTERVAL_MIN, NETWORK_PUSH_INTERVAL_MAX,
+                cfg.network_pushIntervalSeconds));
         }
 
         // === network.push-interval-seconds × general.update_interval：交叉校验（P1-O） ===
@@ -1256,14 +1370,9 @@ public class ConfigManager {
             cfg.network_pushIntervalSeconds = minPushSec;
             // 告警必须同时给出三个量（采集周期 / 原上报间隔 / 调整后的值）：服主只有知道
             // 这个调整是照着哪两个数算出来的，才不会以为插件擅自动了他的配置。
-            plugin.getLogger().warning("[PerfScope] network.push-interval-seconds=" + raw
-                + " 秒小于一个采集周期（general.update_interval=" + updateTicks + " tick ≈ "
-                + (updateMs / 1000L) + " 秒），已自动上调为 " + minPushSec + " 秒。"
-                + "上报只能发生在采集周期末尾，而代理侧按「3 × 上报间隔」判过期——"
-                + "上报间隔小于采集周期时，健康后端会周期性显示「数据过期」，"
-                + "并被排除出全网 TPS 平均与在线合计。"
-                + "本次调整不写入 config.yml；若要真正降低上报频率，请把 "
-                + "network.push-interval-seconds 显式调大。");
+            plugin.getLogger().warning("[PerfScope] " + Messages.get(
+                "config.check.network-push-interval-below-collect-period",
+                raw, updateTicks, updateMs / 1000L, minPushSec));
         }
 
         // === network.server-id：发送前校验（长度 / 保留字）===
@@ -1323,6 +1432,14 @@ public class ConfigManager {
                 plugin.getLogger().warning("[PerfScope] " + Messages.get(
                     "config.check.network-server-id-reserved", key,
                     raw.trim(), cn.perfscope.network.SummaryPublisher.RESERVED_SERVER_ID));
+                break;
+            case UNSAFE_CHARS:
+                // 与发送期那条是同一个键、同一组参数：两处说的是同一件事，措辞只能有一份。
+                // 参数是码点列表而不是原值——控制符在日志里不可见，见
+                // SummaryPublisher#describeUnsafeChars 的说明。
+                plugin.getLogger().warning("[PerfScope] " + Messages.get(
+                    "config.check.network-server-id-unsafe-chars", key,
+                    cn.perfscope.network.SummaryPublisher.describeUnsafeChars(raw)));
                 break;
             case TOO_LONG:
                 plugin.getLogger().warning("[PerfScope] " + Messages.get(
@@ -1453,6 +1570,55 @@ public class ConfigManager {
 
     /** v1.4：热点分区扫描分片数的默认值（与 {@code hotspots.sample-every-cycles: 30} 整除，约 1/10 单片成本）。 */
     private static final int HOTSPOTS_SCAN_SHARDS_DEFAULT = 10;
+
+    // ==================== 告警决策层参数的默认值与上界 ====================
+    //
+    // 这四项的默认值原先只活在 AlertService 的 `raw.getInt(path, def)` 兜底里（第二份默认值）；
+    // 收编到 ConfigData 后集中到这里，并作为**唯一**副本被 load() 的 readXxx 与
+    // validateThresholds 的回退共用——两处各写一份，正是"看起来一致、改一处就分叉"的形状。
+
+    /** 9A-14：模块不可用转 unknown 的默认分钟数（{@code alerts.unknown-after-minutes}）。 */
+    private static final int ALERTS_UNKNOWN_AFTER_MINUTES_DEFAULT = 5;
+
+    /**
+     * 9C-4：抖动窗口默认值（秒，{@code alerts.flap-window-seconds}）。
+     *
+     * <p>取值依据（真机 10 分钟波动负载实测）：恢复→再次越界的间隔落在 4–66 秒，
+     * 60 秒窗口漏掉了 66 秒那次；180 秒覆盖"阈值的呼吸"这一整类现象。
+     * 不再更长的原因：超过 5 分钟会把真实的短暂故障也吞掉。</p>
+     */
+    private static final int ALERTS_FLAP_WINDOW_SEC_DEFAULT = 180;
+
+    /**
+     * 9C-4：同级别重推的数值变化阈值默认值（{@code alerts.repush-delta}，百分点/同单位）。
+     * 与迟滞带同量级（5–8）：小于它的变化本就不会改变状态机判定，重推只是重复噪音。
+     */
+    private static final double ALERTS_REPUSH_DELTA_DEFAULT = 8.0;
+
+    /**
+     * 9C-4：复燃最短间隔默认值（秒，{@code alerts.refire-min-interval-seconds}）。
+     * 60 秒的依据：真机实测"恢复→复燃"的锯齿间隔在 2–43 秒之间摆动，60 秒覆盖整段抖动周期。
+     */
+    private static final int ALERTS_REFIRE_MIN_INTERVAL_SEC_DEFAULT = 60;
+
+    /**
+     * 告警决策层秒级参数的「不合理量级」阈值（<b>仅提示，不改值</b>）：{@code 7 天}。
+     *
+     * <p>为什么只提示、不回退：这些是抑制/转 unknown 的窗口，旧实现（AlertService 的
+     * RawConfig）对它们只有下界、没有上界。给它加上界会让"一直跑得好好的极端配置"
+     * 在升级后被静默改小——那是一条实打实的行为变更，而超出了本次"收敛读取入口"的范围。
+     * 采用与 {@code config.check.tps-near-ceiling} 相同的 warn-only 口径：把后果说出来，
+     * 值仍按用户写的生效。</p>
+     *
+     * <p>为什么 7 天是"该提示"的量级：超过一周的抑制窗口意味着"恢复了也永远不会宣布恢复"，
+     * 那条告警实际上再也没有生命周期终点。这不是调参，而是关掉功能——
+     * 想关就该显式写 0（本键族里 0 = 关闭该抑制）或改 {@code alerts.enabled}，
+     * 而不是留一个自己也算不出秒数的数字。</p>
+     */
+    private static final int ALERTS_SUPPRESS_SECONDS_IMPLAUSIBLE = 7 * 24 * 60 * 60;
+
+    /** 同上：{@code alerts.unknown-after-minutes} 的不合理量级（30 天），仅提示不改值。 */
+    private static final int ALERTS_UNKNOWN_AFTER_MINUTES_IMPLAUSIBLE = 30 * 24 * 60;
 
     /**
      * webhook 支持的通道类型（v1.4）。
@@ -1834,6 +2000,33 @@ public class ConfigManager {
          * 显式配置避免 VPS 默认 UTC 导致摘要落在服主本地凌晨。
          */
         public String alerts_dailySummaryTimezone;
+
+        /**
+         * 9C-4：复燃最短间隔（alerts.refire-min-interval-seconds，缺键默认 60 秒）。
+         *
+         * <p><b>0 是合法值</b>：= 关闭复燃识别，告警恢复后再次越界按"普通新告警"处理
+         * （仍受 {@link #alerts_cooldownSeconds} 约束，不是"无视冷却立即推送"）。负值回退默认。</p>
+         *
+         * <p>与 {@link #alerts_cooldownSeconds} 刻意分离：冷却要长（别刷屏），复燃窗口要短
+         * （几秒内又坏了确实该立即告知）。复用同一个数会让两者争抢同一个旋钮，无论调成多少都有一方受害。</p>
+         */
+        public int alerts_refireMinIntervalSeconds;
+
+        /**
+         * 9C-4：抖动窗口（alerts.flap-window-seconds，缺键默认 180 秒）。
+         * 该窗口内的"恢复 → 再次越界"视为同一次事故的中间态：不推送"已恢复正常"、
+         * 也不推送"问题再次出现"。<b>0 合法</b>（= 关闭抖动抑制，退回旧行为）；负值回退默认。
+         */
+        public int alerts_flapWindowSeconds;
+
+        /**
+         * 9C-4：同级别重推的数值变化阈值（alerts.repush-delta，缺键默认 8）。
+         *
+         * <p>变化幅度小于该值时不再周期性重推——一条长期 92% 的告警每 5 分钟重说一遍
+         * 没有任何新信息。<b>0 合法</b>（= 关闭这层抑制，退回"每冷却期重推一次"）；
+         * 负值与非有限值（NaN/Infinity）回退默认。必须用 double 域：用户写 8.5 要原样生效。</p>
+         */
+        public double alerts_repushDelta;
 
         // 每日摘要与 webhook（Wave 7D）
         /** 每日摘要开关（alerts.daily-summary.enabled，缺键默认 false）。 */

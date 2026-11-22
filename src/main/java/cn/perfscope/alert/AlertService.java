@@ -28,7 +28,6 @@ import cn.perfscope.util.Messages;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
-import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 
 import java.io.File;
@@ -90,18 +89,29 @@ public class AlertService {
     /** 接收游戏内告警的权限节点（plugin.yml 已定义，不可改名） */
     private static final String PERMISSION_ALERT = "perfscope.alert";
 
-    /** 9A-14：模块不可用转 unknown 的默认分钟数（配置 alerts.unknown-after-minutes 缺省值）。 */
+    /**
+     * 9A-14：模块不可用转 unknown 的默认分钟数。
+     *
+     * <p>只作为<b>状态机字段的初值</b>（{@code Options#unknownAfterMinutes} 的声明默认）。
+     * 真值一律由 {@link ConfigManager.ConfigData#alerts_unknownAfterMinutes} 提供——
+     * 配置层的缺键默认值在 {@code ConfigManager} 里（同一数字，但那边才是"用户没写时生效的那个"）。
+     * 刻意保留这一份：{@code loadOptions()} 没跑过时（例如极早期的一轮状态机调用）
+     * 字段必须有个能用的值，而不是 0（0 会让每次抖动都把告警打进 unknown）。</p>
+     */
     private static final int DEFAULT_UNKNOWN_AFTER_MINUTES = 5;
 
     /**
-     * 9C-4：复燃最短重新通知间隔的默认值（秒）。
+     * 9C-4：复燃最短重新通知间隔的默认值（毫秒）。
      * 60 秒的依据：真机实测中"恢复→复燃"的锯齿间隔在 2–43 秒之间摆动，
      * 60 秒能覆盖整段抖动周期，同时不会把"故障真的再次发生"压到用户无法感知。
+     *
+     * <p>这里存毫秒、配置层存秒：状态机全程按毫秒比较，换算只发生在 {@code loadOptions()}，
+     * 若本类也持有一份"秒"的常量，就会出现两种单位同名共存的读法（历史上正是这样把 1000 倍的差错埋进去过）。</p>
      */
     private static final long DEFAULT_REFIRE_MIN_INTERVAL_MS = 60_000L;
 
     /**
-     * 9C-4：抖动窗口默认值（秒）。
+     * 9C-4：抖动窗口默认值（毫秒）。
      *
      * <p>取值依据（真机 10 分钟波动负载实测）：恢复→再次越界的间隔落在 4–66 秒区间，
      * 60 秒窗口漏掉了 66 秒那次。取 180 秒可以覆盖"阈值的呼吸"这一整类现象——
@@ -280,8 +290,16 @@ public class AlertService {
     /** 9A-14：每个 key 的"所属模块开始不可用"时刻（epoch ms），用于 unknown-after-minutes 判定。 */
     private final Map<String, Long> moduleDownSince = new ConcurrentHashMap<>();
 
-    /** 周期检查任务句柄（null = 未运行） */
-    private SchedulerAdapter.TaskHandle timerHandle;
+    /**
+     * 周期检查任务句柄槽位（null = 未运行）。
+     *
+     * <p><b>P0-1：为什么不是普通 {@code TaskHandle} 字段</b>——{@code start()} 首行是 {@code stop()}，
+     * 「先停后启」只在单线程下幂等。Folia 上两个 region 线程同时 {@code /perfscope reload} 时，
+     * 非 volatile 字段的读-判-写会交错：A 装好 H_A，B 读到 null 又装 H_B 并覆盖字段，
+     * H_A 从此无人可取消 → <b>每条告警被推两次、冷却表双重推进</b>。
+     * 槽位把安装与取消各自收成单一赢家（范式同 {@code PerfScopeCommand} 的 monitor 任务）。</p>
+     */
+    private final cn.perfscope.compat.TaskHandleSlot timerSlot = new cn.perfscope.compat.TaskHandleSlot();
 
     /** Wave 7D：webhook 出口（由 PerfScope 装配；null 或未就绪时零开销跳过） */
     private WebhookNotifier webhookNotifier;
@@ -464,8 +482,16 @@ public class AlertService {
         loadState();     // 9A-14：rehydrate（每进程仅一次）——必须在 enabled 检查之后
         long interval = Math.max(1, cfg.general_updateInterval);
         // 首查延迟一个采集周期：等采集器先产出首份快照；runGlobalTimer 在主线程执行，玩家消息发送天然安全
-        timerHandle = SchedulerAdapter.runGlobalTimer(plugin, this::checkCycle, interval, interval);
-        if (!timerHandle.isActive()) {
+        //
+        // P0-1：经槽位安装。两个线程同时 reload 时只有一个真的装上定时器，另一个复用它
+        // （返回 null = 对方正在安装，对方装好的那一份同样服务本线程）。没有这道闸口，
+        // 两条告警定时器并存会让每条告警被推两次、冷却表被推进两次。
+        SchedulerAdapter.TaskHandle handle =
+            timerSlot.start(() -> SchedulerAdapter.runGlobalTimer(plugin, this::checkCycle, interval, interval));
+        if (handle == null) {
+            return; // 另一线程正在安装：它装好的定时器与本线程要装的是同一份配置
+        }
+        if (!handle.isActive()) {
             // f-s01-err-01：noop 句柄 = 任务没装上（原因已由 SchedulerAdapter 记 severe）。照旧打印
             // "已启动"就是告警永久停摆而控制台显示正常。
             // v1.3.0 -14：文案改走键表（此前是内联中英三元表达式，绕过消息层）。
@@ -522,10 +548,8 @@ public class AlertService {
      * 9A-14：停止时落盘一次告警状态（关服/重载都不丢生命周期）。
      */
     public void stop() {
-        if (timerHandle != null) {
-            timerHandle.cancel();
-            timerHandle = null;
-        }
+        // P0-1：getAndSet(null) 抢占后才有权 cancel——同一句柄只会被一个线程取消。
+        timerSlot.stop();
         persistState();
     }
 
@@ -545,7 +569,7 @@ public class AlertService {
         }
     }
 
-    // ==================== 9A-14：扩展配置（ConfigManager 尚未提供字段时自读原文件） ====================
+    // ==================== 9A-14：扩展配置（全部来自 ConfigManager 的 ConfigData） ====================
 
     /** 9A-14：运行期选项快照。 */
     private static final class Options {
@@ -561,62 +585,40 @@ public class AlertService {
         }
     }
 
+    /**
+     * 刷新运行期选项快照。
+     *
+     * <p><b>唯一读取入口是 {@link ConfigManager.ConfigData}</b>：本方法不再打开 config.yml。
+     * 此前用内部类 {@code RawConfig} 直读原文件，后果是同 8 个 {@code alerts.*} 键有两个读者、
+     * 两套默认值，且直读那一侧完全绕过 {@code ConfigManager} 的 config-version 迁移、
+     * 缺键汇总与类型校验——用户把 {@code alerts.repush-delta} 写成字符串时，只有一半的告警会报。</p>
+     *
+     * <p><b>本方法不做任何合法性判定</b>。范围校验（含"负数回退默认""0 = 关闭"这些语义）
+     * 全部在 {@link ConfigManager#validateThresholds} 里，那里是唯一执法点：
+     * 同一个值若在两处各自校验，日志会变成两条（一条说改用 A、另一条说改用 B），
+     * 而真实生效的只有最后一次赋值——那种"日志自相矛盾"比不校验更难排查。
+     * 这里只做<b>单位换算</b>（配置以秒表达，状态机以毫秒比较）与<b>可空归一</b>（时区 null → 空串）。</p>
+     */
     private void loadOptions() {
         Options o = new Options();
         // f-s01-data-05：进入时捕获旧快照，供末尾判定「时区规格是否真的变了」。
         Options previous = this.options;
         try {
-            RawConfig raw = RawConfig.load(plugin);
             ConfigManager.ConfigData cfg = configManager.get();
-            int debounce = cfg == null ? 3 : Math.max(1, cfg.alerts_debounceCycles);
-            int rec = raw.getInt("alerts.recovery-debounce-cycles", debounce);
-            if (rec < 1) {
-                plugin.getLogger().warning(logText("alert.log.bad-recovery-debounce", rec, debounce));
-                rec = debounce;
+            if (cfg != null) {
+                o.recoveryDebounceCycles = Math.max(1, cfg.alerts_recoveryDebounceCycles);
+                o.digestMode = cfg.alerts_digestMode;
+                o.notifyMitigation = cfg.alerts_notifyMitigation;
+                o.unknownAfterMinutes = Math.max(1, cfg.alerts_unknownAfterMinutes);
+                o.dailyTimezone = cfg.alerts_dailySummaryTimezone == null
+                    ? "" : cfg.alerts_dailySummaryTimezone.trim();
+                // 9C-4：秒 → 毫秒。负值已被 validateThresholds 回退；0 原样保留（= 关闭对应抑制）。
+                // 外层的 Math.max(0, ...) 兜一层，是为了"配置校验没跑"的路径（测试里的裸 ConfigData、
+                // 或将来某条重构）不会把负毫秒漏进 `now - resolved.atMs <= refireWindowMs` 的比较里。
+                this.refireMinIntervalMs = Math.max(0, cfg.alerts_refireMinIntervalSeconds) * 1000L;
+                this.flapWindowMs = Math.max(0, cfg.alerts_flapWindowSeconds) * 1000L;
+                this.repushDelta = cfg.alerts_repushDelta;
             }
-            o.recoveryDebounceCycles = rec;
-            o.digestMode = raw.getBool("alerts.digest-mode", false);
-            o.notifyMitigation = raw.getBool("alerts.notify-mitigation", true);
-            int unknown = raw.getInt("alerts.unknown-after-minutes", DEFAULT_UNKNOWN_AFTER_MINUTES);
-            if (unknown < 1) {
-                plugin.getLogger().warning(logText("alert.log.bad-unknown-after", unknown,
-                    DEFAULT_UNKNOWN_AFTER_MINUTES));
-                unknown = DEFAULT_UNKNOWN_AFTER_MINUTES;
-            }
-            o.unknownAfterMinutes = unknown;
-            String tz = raw.getString("alerts.daily-summary.timezone", "");
-            o.dailyTimezone = tz == null ? "" : tz.trim();
-            // 9C-4：复燃最短间隔与抖动窗口（秒）。0 = 关闭对应抑制，负值/非数值回退默认。
-            // f-s01-err-10：本键是 loadOptions 里唯一既不被 ConfigManager 读取、也不在 jar 内
-            // config.yml 中登记的键——写错时没有第二处校验会报，故在此补一条带原值的 WARNING。
-            String badRefire = raw.unparsableInt("alerts.refire-min-interval-seconds");
-            if (badRefire != null) {
-                plugin.getLogger().warning(logText("alert.log.refire-unparsable", badRefire,
-                    (int) (DEFAULT_REFIRE_MIN_INTERVAL_MS / 1000L)));
-            }
-            int refireSec = raw.getInt("alerts.refire-min-interval-seconds",
-                (int) (DEFAULT_REFIRE_MIN_INTERVAL_MS / 1000L));
-            if (refireSec < 0) {
-                long def = DEFAULT_REFIRE_MIN_INTERVAL_MS / 1000L;
-                plugin.getLogger().warning(logText("alert.log.bad-refire", refireSec, def));
-                refireSec = (int) def;
-            }
-            this.refireMinIntervalMs = refireSec * 1000L;
-            int flapSec = raw.getInt("alerts.flap-window-seconds",
-                (int) (DEFAULT_FLAP_WINDOW_MS / 1000L));
-            if (flapSec < 0) {
-                long def = DEFAULT_FLAP_WINDOW_MS / 1000L;
-                plugin.getLogger().warning(logText("alert.log.bad-flap", flapSec, def));
-                flapSec = (int) def;
-            }
-            this.flapWindowMs = flapSec * 1000L;
-            // 9C-4：同级别重推的数值变化阈值。0 = 关闭抑制（退回"每冷却期重推一次"）。
-            double delta = raw.getDouble("alerts.repush-delta", DEFAULT_REPUSH_DELTA);
-            if (!Double.isFinite(delta) || delta < 0) {
-                plugin.getLogger().warning(logText("alert.log.bad-repush", delta, DEFAULT_REPUSH_DELTA));
-                delta = DEFAULT_REPUSH_DELTA;
-            }
-            this.repushDelta = delta;
         } catch (Exception | LinkageError e) {
             plugin.getLogger().warning(logText("alert.log.options-failed", e.getMessage()));
         }
@@ -636,122 +638,6 @@ public class AlertService {
         String prevTz = previous == null ? "" : previous.dailyTimezone;
         if (!prevTz.equals(o.dailyTimezone)) {
             this.pushedTodayDayEpoch = currentDayEpoch();
-        }
-    }
-
-    /**
-     * 9A-14：直接读取 config.yml 的只读快照。
-     *
-     * <p>为什么绕过 ConfigManager：新增键（recovery-debounce-cycles / digest-mode /
-     * unknown-after-minutes / daily-summary.timezone）需要 ConfigManager 增加对应字段，
-     * 本类不能改那个文件；在其落地前先从原文件读，缺键一律回退默认值，行为与字段存在时一致。
-     * 读取只在 start()/reload 时发生，不在周期内做 IO。</p>
-     */
-    static final class RawConfig {
-        private final YamlConfiguration yaml;
-
-        private RawConfig(YamlConfiguration yaml) {
-            this.yaml = yaml;
-        }
-
-        static RawConfig load(PerfScope plugin) {
-            try {
-                File f = new File(plugin.getDataFolder(), "config.yml");
-                if (!f.isFile()) {
-                    return new RawConfig(null);
-                }
-                return new RawConfig(YamlConfiguration.loadConfiguration(f));
-            } catch (Exception | LinkageError e) {
-                plugin.getLogger().warning(logText("alert.log.rawconfig-failed", e.getMessage()));
-                return new RawConfig(null);
-            }
-        }
-
-        boolean getBool(String path, boolean def) {
-            if (yaml == null) {
-                return def;
-            }
-            Object v = yaml.get(path);
-            if (v instanceof Boolean b) {
-                return b;
-            }
-            if (v instanceof String s) {
-                return Boolean.parseBoolean(s.trim());
-            }
-            return def;
-        }
-
-        int getInt(String path, int def) {
-            if (yaml == null) {
-                return def;
-            }
-            Object v = yaml.get(path);
-            if (v instanceof Number n) {
-                return n.intValue();
-            }
-            if (v instanceof String s) {
-                try {
-                    return Integer.parseInt(s.trim());
-                } catch (NumberFormatException ignored) {
-                    return def;
-                }
-            }
-            return def;
-        }
-
-        /**
-         * f-s01-err-10：整数键无法被 {@link #getInt} 解析时返回原值文本，缺键/合法返回 null。
-         *
-         * <p>只给 ConfigManager 不读的键用——其余键已由 {@code ConfigManager.readInt} 的
-         * {@code warnType} 报过带原值的 WARNING，再报一次等于同一错误两条日志。当前
-         * {@code loadOptions} 的 8 个键里只有 {@code alerts.refire-min-interval-seconds} 属此类。</p>
-         */
-        String unparsableInt(String path) {
-            if (yaml == null || !yaml.contains(path)) {
-                return null;
-            }
-            Object v = yaml.get(path);
-            if (v instanceof Number n) {
-                // getInt 用 intValue() 截断：1.5 静默变 1，与 ConfigManager.coerceInt 的
-                // "非整数即类型错误" 口径分叉，故同样上报。
-                return n.intValue() == n.doubleValue() ? null : String.valueOf(v);
-            }
-            if (v instanceof String s) {
-                try {
-                    Integer.parseInt(s.trim());
-                    return null;
-                } catch (NumberFormatException e) {
-                    return s;
-                }
-            }
-            return String.valueOf(v);
-        }
-
-        String getString(String path, String def) {
-            if (yaml == null) {
-                return def;
-            }
-            Object v = yaml.get(path);
-            return v == null ? def : String.valueOf(v);
-        }
-
-        /** 9C-4：小数读取（不存在的键返回默认值；无法解析同样返回默认值）。 */
-        double getDouble(String path, double def) {
-            if (yaml == null) {
-                return def;
-            }
-            Object v = yaml.get(path);
-            if (v instanceof Number n) {
-                return n.doubleValue();
-            }
-            if (v instanceof String s) {
-                try {
-                    return Double.parseDouble(s.trim());
-                } catch (NumberFormatException ignored) {
-                    return def;
-                }
-            }
-            return def;
         }
     }
 

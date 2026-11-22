@@ -204,6 +204,33 @@ public class HistoryFileStore {
     private volatile long lastDropReported = 0L;
     private volatile long lastDropLogMs = 0L;
 
+    /**
+     * 上一次可写性探测所对应的目录 mtime（{@link Long#MIN_VALUE} = 从未探测过）。
+     *
+     * <p><b>为什么用 mtime 当缓存键</b>：{@code Files.isWritable} 在 Windows 上要走
+     * {@code GetFileSecurity} 解析整条 DACL（本机实测 3.1–3.5 ms，是
+     * {@code Files.isDirectory} 的 20 倍以上），而它被 {@code /pscope trend}、
+     * {@code reload}、{@code /pscope status} 三处<b>主线程</b>调用。目录的 mtime 在
+     * "条目增删/改名"时变化——恰好是"目录被删掉又被重建"这类真正让可写性改变的事件所伴随的
+     * 变化，所以拿它当缓存键能在不改变结论的前提下跳过绝大多数重复探测喵。</p>
+     *
+     * <p>目录 mtime <b>不会</b>因 ACL 变更而变化，所以它不是唯一刷新源：写线程每个循环
+     * （空闲时约 {@value #FLUSH_INTERVAL_MS} ms 一次）调用 {@link #refreshAvailabilityProbe()}
+     * 强制重探一次，把纯 ACL 变更的可见延迟压到秒级，且这一步在写线程上、不占主线程。</p>
+     */
+    private volatile long availabilityProbeMtimeMs = Long.MIN_VALUE;
+
+    /** 与 {@link #availabilityProbeMtimeMs} 同一次探测得到的可写结论。 */
+    private volatile boolean availabilityProbeWritable = false;
+
+    /**
+     * 昂贵可写性探测（{@code Files.isWritable}）的实际执行次数。
+     *
+     * <p>只用于让"这次优化确实把系统调用从每次调用降到每次变化"变成一条<b>可断言</b>的性质，
+     * 而不是靠"看起来快了"。与 {@link #droppedSamples()} 等诊断访问器同性质。</p>
+     */
+    private final AtomicLong availabilityProbes = new AtomicLong();
+
     /** 当前写入的文件日期（跨天检测；null = 尚未写过）；仅写线程访问。 */
     private LocalDate currentFileDate = null;
 
@@ -247,21 +274,146 @@ public class HistoryFileStore {
     // ==================== 写入路径（9A-18：主线程零 IO） ====================
 
     /**
-     * 持久化是否可用（目录存在且可写）。注意：这是<b>即时探测</b>（有系统调用），
-     * 供状态命令/读取路径使用；{@link #append} 不走它，以免主线程做 IO。
+     * 持久化是否可用（目录存在且可写）。
+     *
+     * <p><b>为什么不再每次调用都做 {@code Files.isWritable}</b>（这是本方法的历史包袱）：
+     * 它被三处<b>主线程</b>调用——{@link #loadRecentDays}（每次 {@code /pscope trend}）、
+     * {@link #runRetention}（每次 reload）、{@link #isHealthy}（每次 {@code /pscope status}）。
+     * 在 Windows 上 {@code Files.isWritable} 要走 {@code GetFileSecurity} 解析 DACL，
+     * 本机 JDK 21 实测 3.1–3.5 ms；{@code Files.isDirectory} 只有 0.15 ms。
+     * 也就是说 {@code /pscope trend} 那条命令里近一半的耗时花在<b>问一句"目录能写吗"</b>。</p>
+     *
+     * <p><b>为什么是"缓存"而不是换成 {@code File.canWrite()}</b>——这一条是查证过 JDK 源码
+     * 与实测得出的，不是保守：两者<b>不等价</b>，且在正是本方法最该答对的场景上不等价。</p>
+     *
+     * <ul>
+     *   <li>{@code File.canWrite()} 走 {@code WinNTFileSystem.checkAccess0}，Windows 上它映射到
+     *       原生 {@code access()}，后者只把 {@code W_OK} 翻成 {@code FILE_WRITE_ATTRIBUTES}
+     *       （一个只需"写属性"的较弱权限）；{@code Files.isWritable} 要求
+     *       {@code FILE_WRITE_DATA}。实测：对本机一个 ACL 显式拒绝"写"的目录，
+     *       {@code Files.isWritable=false} 而 {@code File.canWrite=true}。</li>
+     *   <li>{@code Files.isWritable} 还会额外检查"卷是否只读"和 DOS 只读属性
+     *       （只读文件实测两者都 false，一致），所以差异只出现在 ACL 这一类，但 ACL 正是
+     *       "服主把历史目录权限配错了"这个场景本方法存在的理由。</li>
+     *   <li>反过来 {@code File.canWrite()} 走的是 {@code File} 的路径字符串语义，
+     *       与 NIO 的 {@link Path} 在符号链接/junction 上并非同一个路径表示；</li>
+     *   <li>性能差也确实只有 14–17 倍（本机实测 {@code canWrite}=0.20 ms 对
+     *       {@code isWritable}=3.1 ms），换成 {@code canWrite} 后仍要 0.2 ms×2。缓存能把
+     *       稳态成本降到"一次 mtime 探测"（与 {@code isDirectory} 同量级）。</li>
+     * </ul>
+     *
+     * <p><b>语义等价性怎么保住</b>：结论仍然由 {@code Files.isDirectory && Files.isWritable}
+     * 产生——只是不再每次都产生。刷新时机有两个：</p>
+     * <ol>
+     *   <li>目录 mtime 变了（见 {@link #availabilityProbeMtimeMs}）——覆盖"目录没了/被换成文件/
+     *       被重建"这些测试与生产都真实遇到的状态迁移；</li>
+     *   <li>写线程每个循环强制重探一次（{@link #refreshAvailabilityProbe()}）——覆盖
+     *       纯 ACL 变更（不改 mtime），把它的可见延迟压到秒级。</li>
+     * </ol>
+     *
+     * <p>没有系统调用缓存的读路径（mtime 未变）只剩 1 次 {@code File.lastModified}，
+     * 与 {@code isDirectory} 同量级。</p>
      */
     public boolean available() {
-        return Files.isDirectory(dir) && Files.isWritable(dir);
+        long mtime;
+        try {
+            // 用 File.lastModified 而不是 Files.getLastModifiedTime：后者要构造
+            // FileTime 对象 + 走 provider 的属性视图，前者是单次 native 调用（实测 0.14/0.20 ms）。
+            // 这里只拿它当"变化信号"，不解析时间语义，所以 File 的 API 足够。
+            mtime = dir.toFile().lastModified();
+        } catch (SecurityException e) {
+            // 读不到 mtime（安全管理器拒绝）：无法判断是否变化 → 退回无缓存探测，
+            // 宁可慢也不能给出一个基于陈旧结论的答案。
+            return probeAvailabilityUncached();
+        }
+        if (mtime == availabilityProbeMtimeMs) {
+            // 目录时间戳没变：沿用上次结论，零系统调用级的可写性检查。
+            // 注意 mtime == 0 且从未探测过时 availabilityProbeMtimeMs 是 Long.MIN_VALUE，
+            // 两者不等，所以"从未探测"不会被误判为缓存命中。
+            return availabilityProbeWritable;
+        }
+        return probeAvailabilityUncached();
+    }
+
+    /**
+     * 真正做一次 {@code Files.isDirectory && Files.isWritable}，并把结果连同当时的目录 mtime 缓存起来。
+     *
+     * <p>结论计算在前、缓存写入在后，但两者都是 volatile 单字段，可能被并发读到"新结论 + 旧 mtime"
+     * 这种瞬时组合；那只会导致下一次调用多做一次探测（正确性不受影响），不会给出错误答案。</p>
+     */
+    private boolean probeAvailabilityUncached() {
+        availabilityProbes.incrementAndGet();
+        boolean ok;
+        try {
+            ok = Files.isDirectory(dir) && Files.isWritable(dir);
+        } catch (SecurityException e) {
+            // 与 Files.isWritable 的契约一致：权限体系拒绝时按"不可用"处理，不抛给调用方
+            // （三处调用都在主线程上，弹异常等于让命令失败而不是显示"不可用"）。
+            ok = false;
+        }
+        long mtime;
+        try {
+            mtime = dir.toFile().lastModified();
+        } catch (SecurityException e) {
+            mtime = Long.MIN_VALUE; // 读不到就让缓存永不命中下一次（见 available() 的注释）
+        }
+        availabilityProbeMtimeMs = mtime;
+        availabilityProbeWritable = ok;
+        return ok;
+    }
+
+    /**
+     * 由写线程周期调用：无条件重探一次可写性。
+     *
+     * <p><b>为什么需要这条强制刷新</b>：{@link #available()} 的缓存键是目录 mtime，而
+     * 纯 ACL 变更（服主改了权限、组策略改了目录权限）<b>不会</b>改动 mtime。若只靠 mtime，
+     * 一个被改成只读的目录会被缓存成"可写"，直到重启。写线程本来就在按
+     * {@value #FLUSH_INTERVAL_MS} ms 的节拍空转（队列空时的周期 flush），在那里顺手重探
+     * 一次不增加任何线程，也不占主线程。</p>
+     */
+    void refreshAvailabilityProbe() {
+        probeAvailabilityUncached();
+    }
+
+    /**
+     * 昂贵可写性探测（{@code Files.isWritable}）的累计执行次数。
+     *
+     * <p>把"缓存真的生效了"从"读代码觉得应该生效"变成一条可断言的性质：
+     * 同一状态下的 N 次 {@link #available()} 只应产生 1 次探测。</p>
+     */
+    public long availabilityProbeCount() {
+        return availabilityProbes.get();
     }
 
     /**
      * 追加一条样本（采集主线程调用；只入队，不阻塞、不做 IO）。
      *
-     * <p>{@code history.persist=false} 或写线程未启动时直接返回。队列满（写盘长期跟不上）
-     * 则丢弃并计入 {@link #droppedSamples()}——丢弃优于阻塞主线程。</p>
+     * <p>丢弃<b>全部</b>计入 {@link #droppedSamples()}，共三种原因：</p>
+     * <ol>
+     *   <li>{@code shutdown()} 已跑过（{@code running == false}）；</li>
+     *   <li>写线程已被 Error 击穿、重建次数用尽（{@link #writerRunning()} 为 false）；</li>
+     *   <li>队列满（写盘长期跟不上）。</li>
+     * </ol>
+     * <p>{@code history.persist=false} 与"配置尚未加载"<b>不</b>计入：那是用户主动关闭或调用
+     * 顺序问题，不是"该写的样本丢了"。</p>
+     *
+     * <p><b>P1-3：为什么 `running == false` 也必须计数</b>——旧实现在这里静默 {@code return}，
+     * 于是关服窗口内（{@code PerfScope.onDisable} 里 {@code stopCollectionTasks()} 之后
+     * 仍在飞的那个采集周期）的最后一批样本<b>无声消失且统计为 0</b>，与类注释「失败可见」
+     * 的承诺相反。{@code droppedSamples()} 是唯一对外暴露的丢弃计数，它答"0"会让
+     * /status 与报告一致地声称"一条都没丢"。</p>
      */
     public void append(HistorySample sample) {
-        if (sample == null || !running || configManager == null) {
+        if (sample == null) {
+            return;
+        }
+        if (!running) {
+            // 关停之后（或写线程放弃重建）仍有人在采：这些样本确实没落盘，必须计数
+            droppedSamples.incrementAndGet();
+            return;
+        }
+        if (configManager == null) {
+            // 配置尚未注入 = 本类还没接好线，不是"用户关掉了持久化"，不计入丢弃
             return;
         }
         ConfigManager.ConfigData cfg = configManager.get();
@@ -335,6 +487,10 @@ public class HistoryFileStore {
                         break;
                     }
                     flushWriter();
+                    // 队列空时的周期节拍：顺手把可写性结论强制重探一次。这是纯 ACL 变更
+                    // （不改目录 mtime）能被看见的唯一时机——主线程那条路径只按 mtime 判缓存。
+                    // 放在写线程上，主线程不为它付任何代价。
+                    refreshAvailabilityProbe();
                     reportDropsThrottled();
                     continue;
                 }
