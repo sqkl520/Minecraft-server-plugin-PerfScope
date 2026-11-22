@@ -10,7 +10,7 @@
 ![Version](https://img.shields.io/badge/version-1.4.5--SNAPSHOT--fix4-orange?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Paper%20family-blue?style=flat-square)
 ![Java](https://img.shields.io/badge/java-17-success?style=flat-square)
-![Tests](https://img.shields.io/badge/unit%20tests-798%20passing-brightgreen?style=flat-square)
+![Tests](https://img.shields.io/badge/unit%20tests-869%20passing-brightgreen?style=flat-square)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green?style=flat-square)
 
 [![Build](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/actions/workflows/build.yml/badge.svg)](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/actions/workflows/build.yml)
@@ -63,7 +63,7 @@
 - **历史摘要**（v1.2 新增） —— `/perfscope history` 查看近 24 小时概况：覆盖时长、最低 TPS 与发生时刻、峰值实体、峰值内存，回答"什么时候开始变差的"
 - **热点区块定位**（v1.2 新增） —— `/perfscope hotspot` 列出全服实体密度 Top3 区块与坐标（含主导类型占比），把"实体多"下钻到"去哪个坐标看看"；坐标可点击复制
 - **Prometheus 指标端点**（v1.4 新增） —— 零第三方依赖的 `/metrics` 文本端点，把指标接进已有的监控栈（Prometheus 抓取 → Grafana 看板）。除 TPS/MSPT/内存/实体/区块外，还导出本插件独有的可信度信号（快照年龄、采集降级、模块可用性、逐告警状态），用于区分"服务端死了"与"指标冻住了"。默认只听 `127.0.0.1:8940`。见下方「接入 Prometheus / Grafana」
-- **群组服一屏看全网**（v1.4.5 新增，需另装代理侧插件） —— 各后端把一份极小摘要推给 Velocity 代理，由独立的 [`PerfScope-Velocity`](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope-Velocity) 用 `/pscope network` 显示全部后端的 TPS / MSPT / 在线数，并区分「正常 / 数据过期 / 采集已停 / 无数据」四种状态。默认关闭，见下方「跨服摘要（群组服）」
+- **群组服一屏看全网**（v1.4.5 新增，需另装代理侧插件） —— 各后端把一份极小摘要推给 Velocity 代理，由独立的 [`PerfScope-Velocity`](https://github.com/sqkl520/Minecraft-server-plugin-PerfScope-Velocity) 用 `/pscope network` 显示全部后端的 TPS / MSPT / 在线数，并区分「正常 / 数据过期 / 采集已停 / 时钟异常 / 无数据」五种状态（代理侧会从包里的 `sentAt` 学习各后端的时钟偏移，因此跨机时钟不同步不会再让面板双向失真）。默认关闭，见下方「跨服摘要（群组服）」
 - **彩色 UI 面板** —— 使用 Paper Adventure API 渲染，关键指标按 `config.yml` 告警阈值分级着色（绿/黄/红）；阈值来源与告警**同配置、同判定入口**，改配置 reload 后颜色立即跟随。比较符也**只有一处定义**：TPS / MSPT / 实体 / 区块 / CPU 用严格比较（读数恰好等于阈值时**不变色**，越过才变色），内存与玩家占比用闭区间（达到阈值即变色）。因此"颜色变了"永远等于"告警已经触发"，不存在两边相差一档的情况
 
 ## 🎯 目标平台与兼容性
@@ -371,17 +371,37 @@ network:
 - **`server-id` 每台必须不同。** 这是唯一能把它们区分开的字段。留空时会自动派生为
   `port-<端口>` 并在控制台告警——多后端场景下**一定**要显式配置，否则代理侧会把几台后端的数据
   混成一条。
-- **`server-id` 应当与 `velocity.toml` 里该后端的名字逐字一致。** 代理面板的行集合是
-  「`[servers]` 里注册的名字」∪「收到过包的 `server-id`」，两者对不上时会出现**幽灵行**：
+- **`server-id` 有两条硬限制，两端同时校验：** 长度 ≤ **64 个字符**（按字符数，中文一字算 1），
+  且不能是保留字 **`unknown`**（大小写敏感，`Unknown` 合法）。配错时本插件**拒发**并在控制台
+  点名"长度 / 保留字"、给出实际字符数与上限——而不是让它发出去、被代理静默丢弃后只留一句
+  "无法解析的跨服摘要，请检查版本"（那会把你引向"两端版本不一致"这个完全无关的方向）。
+- **`server-id` 强烈建议与 `velocity.toml` 里该后端的名字逐字一致（但不强制）。** 代理面板的
+  行集合是「`[servers]` 里注册的名字」∪「收到过包的 `server-id`」，两者对不上时会出现**幽灵行**：
   `velocity.toml` 叫 `survival-1`、`server-id` 填 `survival`，面板上就是两行——一行「无数据」、
   一行有数。这是首装时最容易被误判成"插件坏了"的一种情形。
+  代理侧**不因为不一致而拒收**（那会让现有部署升级后全部隐身），只做"一个身份只归一条后端"
+  的来源绑定：A 后端冒用 B 的 `server-id` 会被丢弃，但名字与后端名不同不影响收数。
+  详见代理仓库 README 的「来源绑定」一节。
 - **它看起来像"上报"，但其实是靠玩家连接转发。** 摘要走 Minecraft 自带的 plugin messaging，
   **空服的后端发不出去**。这期间代理上面板显示的是"无数据"，不是"一切正常"。
 - **改完要 `/perfscope reload` 或重启服务器**（热重载支持，不必重启）。
 - 只装后端不装代理侧插件的话，通道没人接收，不会有任何效果。
+- **改了后端的阈值，代理面板的颜色不会跟着变。** 代理侧读不到各后端的 `config.yml`，
+  `/pscope network` 上的 TPS / MSPT 分级用的是**写死在代理插件里的四个常量**
+  （`NetworkRenderer`，取的是后端随包默认值）。你调了本服的 `tps.*` / `mspt.*` 阈值之后，
+  同一个读数在 `/perfscope` 与 `/pscope network` 上可能落在不同档位——两个面板不一致时，
+  以**后端**面板为准（它读的是你真实的配置）。要消除差异只能改代理侧那份常量。
 - **代理上会看不到本插件的子命令。** 代理侧插件注册了 `/pscope`（别名 `/perfscope`、`/ps`），
   而 Velocity 的命令优先于后端，所以玩家在游戏里敲 `/perfscope tps` 只会得到网表面板的用法提示。
-  要用后端子命令请走控制台，或用 `/perfscope:tps` 这种带命名空间的写法。
+  要用后端子命令请**走控制台**，或写成带命名空间的 `/perfscope:perfscope tps`。
+
+> **命名空间写法说明**（已在 Paper 1.21.4 实机验证）：Bukkit 把命令注册进 `knownCommands`
+> 时用的键是 `<插件名>:<命令名>`，插件名取自 `plugin.yml` 的 `name`（本插件是 `PerfScope`），
+> 命令名取自 `Command.getName()`（`perfscope` / `pscope` / `perf`）。所以只有当**键**被敲出来
+> 时才命中：`/perfscope:perfscope tps`、`/perfscope:pscope tps` 都能执行，
+> `/perfscope:tps` 不行——`tps` 是子命令，不是注册过的命令名。
+> 实测：`/perfscope:tps` 返回 `Unknown or incomplete command`，
+> `/perfscope:perfscope tps` 正常输出 TPS 诊断。
 
 ### 界面语言（i18n）
 
@@ -727,6 +747,10 @@ mvn test                    # 只跑测试
 mvn test -Dtest=CsvLayoutTest   # 跑单个测试类
 mvn clean package -DskipTests   # 跳过测试打包
 ```
+
+想要当前用例总数，读 `mvn test` 末尾那行 `Tests run: …`，而不是数源码里的 `@Test`：
+后者会把条件跳过的用例（例如 `@DisabledOnOs` / 需要真实 socket 的平台相关测试）也算进去。
+徽章上的数字是这么数出来的。
 
 测试依赖为 `test` 作用域，不会进入最终 JAR。
 
