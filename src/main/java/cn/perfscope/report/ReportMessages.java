@@ -131,6 +131,15 @@ public final class ReportMessages {
         // ---- HTML：TPS 趋势 ----
         put(en, zh, "report.html.section.tps-trend",
             "TPS Trend (last {0} samples)", "TPS 趋势 (最近{0}次采样)");
+        // 趋势图的阈值图例。这两个键代替了原先硬编码 20/15/10/5/0 的那串刻度：
+        // 刻度只回答"绝对位置"，阈值线回答"越过哪一格算黄/红"，后者必须跟着 config 走，
+        // 否则服主把 critical 改成 17 之后图上没有任何一处提到 17。
+        // {0} 由调用方格式化（%.1f），{1} 是比较符（取自 ThresholdOperator.TPS），
+        // 比较符单独占位而不是写进模板：翻译只换语序，不该碰符号。
+        put(en, zh, "report.html.chart.tps-critical",
+            "Critical: TPS {1} {0}", "严重线: TPS {1} {0}");
+        put(en, zh, "report.html.chart.tps-warn",
+            "Warning: TPS {1} {0}", "警告线: TPS {1} {0}");
 
         // ---- HTML：实体分布表 ----
         put(en, zh, "report.html.section.entities-by-world", "Entities by World", "实体按世界分布");

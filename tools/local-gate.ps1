@@ -177,6 +177,22 @@ if ($null -ne $node) {
     Invoke-Step 'L1 sentinel convention (0 vs -1)' {
         & $node (Join-Path $PSScriptRoot 'check-sentinels.mjs') '--repo' $RepoRoot
     }
+    # Threshold-operator single source of truth. The comparison symbol ('>' vs '>=') used to have
+    # FIVE copies in this repo. Four were consolidated; the fifth (/ps entities, which compared
+    # alertEntities against the entity thresholds inline) survived because its values happened to
+    # match the table exactly -- so no behaviour test could see it. It only surfaces the day
+    # someone changes the table: colours and collector alerts move, the command's warning line
+    # does not, and one screen ends up half on the new rule, half on the old one.
+    # Its own green run on a clean tree proves nothing (0 hits is the expected state), so the
+    # second step runs the matcher's positive/negative controls -- the same reasoning as
+    # negative-controls.mjs. A gate that only ever reports PASS is indistinguishable from a gate
+    # whose pattern can no longer match anything.
+    Invoke-Step 'L1 threshold comparisons go through the operator table (controls)' {
+        & $node (Join-Path $PSScriptRoot 'check-threshold-operator.mjs') '--selftest'
+    }
+    Invoke-Step 'L1 threshold comparisons go through the operator table' {
+        & $node (Join-Path $PSScriptRoot 'check-threshold-operator.mjs') '--repo' $RepoRoot
+    }
     # bStats bucket selection. bucket() itself is unit-tested, but "which bucket does
     # peak_players_bucket use" lives inside register(...) and only runs with a real
     # Metrics + MetricsCollector -- not reachable from tests. It really was wrong once
@@ -197,6 +213,19 @@ if ($null -ne $node) {
     Invoke-Step 'L1 reload rebuilds even when load fails' {
         & $node (Join-Path $PSScriptRoot 'check-reload-rebuild.mjs')
     }
+    # Cross-repo threshold consistency with the Velocity proxy. The two panels cannot share code
+    # (Paper plugin vs Velocity plugin, two repos, two JVMs), so "same operator" can only be kept
+    # by both sides being written correctly -- and that has now failed twice in a row:
+    # fix3 aligned the proxy to the backend's closed interval (which was itself the defect),
+    # fix4 fixed the backend to derive from ThresholdOperator and left the proxy saying the
+    # opposite. Each repo's own tests only assert "what I do", so nothing ever looked at both.
+    # Advisory on purpose: the proxy repo may legitimately not be checked out next to this one
+    # (a backend-only clone). check-velocity-thresholds.mjs exits 2 for "cannot compare", which
+    # must not block a release, but the step still prints red so nobody reads silence as PASS.
+    $velocityRepo = Join-Path (Split-Path $RepoRoot -Parent) 'PerfScope-Velocity'
+    Invoke-Step 'L1 proxy thresholds match the operator table' {
+        & $node (Join-Path $PSScriptRoot 'check-velocity-thresholds.mjs') '--repo' $RepoRoot '--velocity' $velocityRepo
+    } -Advisory:(!(Test-Path -LiteralPath $velocityRepo))
 } else {
     Write-Step 'static gates need node -- skipped' 'WARN'
 }

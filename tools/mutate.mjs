@@ -413,19 +413,19 @@ const MUTATIONS = [
             + 'Comparison.STRICT, Comparison.STRICT);',
         to: '        new Rule("entities:global", Direction.HIGH_IS_BAD, '
             + 'Comparison.INCLUSIVE, Comparison.STRICT);',
-        desc: '把 entities 的采集层判定从开区间改成闭区间 —— 两侧「统一」了，'
-            + '早预警语义（README 第 39 行）随之取消，读数恰好等于 30000 的一批服务器会突然开始报 critical。'
-            + '本变异用来验证「早预警语义」这条断言真的会亮（判定已收进算子表，探针跟到表里）',
+        desc: '把 entities 的采集层判定从开区间改成闭区间 —— 恰好等于 30000 的全服总数开始报 critical，'
+            + '而展示层读的是同一条规则，于是「界面变红」与「告警触发」会一起提前一格。'
+            + '本变异验证边界差值为零那条断言真的会亮（探针在表里，不在某个 collect* 方法里）',
         expect: 'ThresholdBoundaryAsymmetryTest',
     },
     {
         id: 'M40',
         file: 'src/main/java/cn/perfscope/util/ThresholdColors.java',
-        from: '                if (value >= critical) return Level.CRITICAL;',
-        to: '                if (value > critical) return Level.CRITICAL;',
-        desc: '把展示层的闭区间改成开区间 —— 恰好到线的数字不再变红，'
-            + '早预警语义的展示侧（颜色先变）被取消，'
-            + '违反 ThresholdColorsTest「30000 必须已经变红」的 UI 契约',
+        from: '        switch (rule.levelOf(value, warning, critical)) {',
+        to: '        switch (value >= critical ? 2 : value >= warning ? 1 : 0) {',
+        desc: '让展示层重新自己写比较符（对高值差指标用闭区间）—— 这正是那个 P0 的原形：'
+            + 'TPS 恰好 15.0 / MSPT 恰好 50 / 实体恰好 30000 时颜色比告警高一整档。'
+            + '本变异要杀的就是「两层各写一遍算子」这种结构，而不只是某一行写错',
         expect: 'ThresholdBoundaryAsymmetryTest',
     },
     {
@@ -771,6 +771,21 @@ const MUTATIONS = [
             + '与 M63 改的是不同层：M63 改接线（由源码断言抓住），这条改语义'
             + '（由多世界纯函数用例抓住）',
         expect: 'WorldViewTotalTest',
+    },
+    // ---------------------------------------------------------------------------------
+    // 展示层从算子表派生（ThresholdColors → ThresholdOperator）。
+    // 上面 M40 改的是「展示层重新自己写算子」这个结构，下面这条改的是 CPU 的进入线：
+    // 它是三处（告警文案 / latched / 颜色）唯一的共同出处，挪半格必须有人报错。
+    // ---------------------------------------------------------------------------------
+    {
+        id: 'M70',
+        file: 'src/main/java/cn/perfscope/metrics/ThresholdOperator.java',
+        from: '        new SingleTier("cpu:process", Direction.HIGH_IS_BAD, Comparison.STRICT);',
+        to: '        new SingleTier("cpu:process", Direction.HIGH_IS_BAD, Comparison.INCLUSIVE);',
+        desc: 'CPU 进入线从严格 `>` 改成闭区间 `>=` —— 恰好 80.0% 的服务器开始报 CPU 告警，'
+            + '而 alert.threshold.cpu 的文案仍写着 `>`；展示层读同一条规则，'
+            + '颜色会跟着一起提前一格。本条验证「文案 / latched / 颜色三处同源」这个结构确实被测试看着',
+        expect: 'ThresholdOperatorBehaviorTest',
     },
 ];
 

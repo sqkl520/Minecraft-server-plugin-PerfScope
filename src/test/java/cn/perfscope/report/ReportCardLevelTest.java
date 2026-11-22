@@ -353,8 +353,10 @@ class ReportCardLevelTest {
     @Test
     void entitiesCardTurnsCriticalAboveTheTotalThreshold(@TempDir Path temp) throws Exception {
         MetricsSnapshot snap = healthySnapshot();
-        snap.totalEntities = 30_000;          // >= entities.total_critical_threshold
-        snap.entitiesByWorld.put("world", 30_000);
+        // 比 critical 线(30000)多 1：采集层判据是严格 `>`，颜色现在与它同口径，
+        // 恰好 30000 只会是 warn（见 ThresholdBoundaryAsymmetryTest）
+        snap.totalEntities = 30_001;
+        snap.entitiesByWorld.put("world", 30_001);
 
         String html = generateHtml(temp, config(), snap);
 

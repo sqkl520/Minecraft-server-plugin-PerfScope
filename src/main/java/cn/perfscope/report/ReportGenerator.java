@@ -22,6 +22,7 @@ import cn.perfscope.compat.ServerCompat;
 import cn.perfscope.config.ConfigManager;
 import cn.perfscope.metrics.MetricsCollector;
 import cn.perfscope.metrics.MetricsSnapshot;
+import cn.perfscope.metrics.ThresholdOperator;
 import cn.perfscope.util.DurationFormat;
 import cn.perfscope.util.Messages;
 import cn.perfscope.util.ThresholdColors;
@@ -497,7 +498,10 @@ public class ReportGenerator {
             // f-s05-logic-02(C)：按真实成因选原因（配置禁用 > 平台不支持 > 采集异常），
             // 不再拿静态能力位代表 unavailable 的成员身份。裸文案交 htmlCard 单次转义。
             html.append(htmlCard(Messages.get("report.html.card.mspt"), unavailable, "unknown", msptUnavailableCause(snap)));
-        } else if (snap.msptAvg < 0) {
+        // P2-S2：判据从 `< 0` 收紧到 `<= 0`。MSPT 的 0 不可信（每 tick 至少花掉可测量时间），
+        // 旧写法会让一个 0 走 else 分支，把卡片渲染成 "0.00 ms"——绿色的"极快"，
+        // 而真相是这一维度没有有效读数。口径见 check-sentinels.mjs 的 SENTINEL_AND_ZERO_BOTH_BAD。
+        } else if (snap.msptAvg <= 0) {
             html.append(htmlCard(Messages.get("report.html.card.mspt"), unknown, "unknown",
                 Messages.get("report.html.mspt.estimate-note")));
         } else {
@@ -577,9 +581,20 @@ public class ReportGenerator {
                     Math.min(60, history.size())))
                 .append("</h2>\n");
             html.append("<div class=\"chart\">\n");
+            // 刻度含义必须写出来：柱高是 tps/上限*100，两条判定线在哪一格由 config 决定，
+            // 只画柱子和一串数字时，读者只能靠颜色猜"红的是从多少开始"。
+            html.append("<div class=\"chart-legend\">")
+                .append(tpsThresholdLegend(configManager.get()))
+                .append("</div>\n");
             html.append("<div class=\"tps-graph\">\n");
+            // 内层绘图区：柱子与参考线必须共用**同一个**盒子，否则百分比对不上尺。
+            // 外层有 5px 内边距（背景色描边感），柱高 % 是按内容盒算的，而绝对定位的参考线
+            // 是按内边距盒算的——直接混用会让 15 TPS 的柱顶比红线低 2.5px，"柱顶越过线"
+            // 这个唯一的读图依据就变成近似值。内层无内边距，两个 % 才真正同基准。
+            html.append("<div class=\"tps-plot\">\n");
+            // 两条阈值参考线：位置 = 阈值/上限*100，与柱高同一把尺（见 tpsThresholdMarkers）。
+            html.append(tpsThresholdMarkers(configManager.get()));
             int start = Math.max(0, history.size() - 60);
-            double maxTps = 20.0;
             for (int i = start; i < history.size(); i++) {
                 MetricsSnapshot h = history.get(i);
                 // A5（data-contract F2/R7）：该采样点 TPS 模块不可用时不画"红色 0 高柱"（会被读作 TPS=0 灾难），
@@ -589,7 +604,7 @@ public class ReportGenerator {
                         .append(escapeHtml(unavailable)).append("\"></div>\n");
                     continue;
                 }
-                double pct = h.tps1m / maxTps * 100;
+                double pct = h.tps1m / TPS_AXIS_CEILING * 100;
                 // v1.2 A8：改为读 config 阈值；桶 3/2 绿（区分深浅沿用原色值）、1 黄、0 红
                 String color;
                 switch (thresholdColors.tpsTrendBucket(h.tps1m)) {
@@ -611,8 +626,12 @@ public class ReportGenerator {
                     .append(String.format(java.util.Locale.ROOT, "%.2f", h.tps1m)).append("\"></div>\n");
             }
             html.append("</div>\n");
+            html.append("</div>\n");
             html.append("<div class=\"chart-labels\">\n");
-            html.append("<span>20.0</span><span>15.0</span><span>10.0</span><span>5.0</span><span>0.0</span>\n");
+            for (String tick : tpsAxisTickLabels(TPS_AXIS_CEILING, TPS_AXIS_TICK_COUNT)) {
+                html.append("<span>").append(escapeHtml(tick)).append("</span>");
+            }
+            html.append("\n");
             html.append("</div></div></div>\n");
         }
 
@@ -760,7 +779,8 @@ public class ReportGenerator {
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_MSPT)) {
             // f-s05-logic-02(C)：与 HTML 侧共用同一成因判定，杜绝两路径口径分裂
             sb.append(Messages.get("report.txt.mspt.unavailable-reason", msptUnavailableCause(snap))).append("\n");
-        } else if (snap.msptAvg < 0) {
+        // P2-S2：与 HTML 侧同一判据（`<= 0` 而非 `< 0`），否则 TXT 报告会把 0 印成 "0.00 ms"。
+        } else if (snap.msptAvg <= 0) {
             sb.append(Messages.get("report.txt.mspt.unknown")).append("\n");
         } else if (snap.msptMin <= 0 || snap.msptMax <= 0) {
             // 9A-0：极值未采集（avg-only / TPS 反推路径），不输出伪造的 min==max==avg
@@ -1344,6 +1364,126 @@ public class ReportGenerator {
         return escapeHtml(Messages.get(key, args));
     }
 
+    // ==================== TPS 趋势图的纵轴 ====================
+
+    /**
+     * 趋势图纵轴上限：<b>TPS 的物理上限 20</b>，而不是 config 里的 critical 值。
+     *
+     * <p>为什么这么取（而不是"把 20/15/10/5/0 换成 config 值"）：</p>
+     * <ul>
+     *   <li><b>柱高必须与刻度同一把尺</b>。柱高的分母就是它，读者把柱子顶端对齐到某条刻度线
+     *       才读得出"这一刻是 15 还是 18"。若分母随 critical 跑，critical=15 时一根 15 TPS 的柱子
+     *       会画到 100% 满高——<b>健康读数被画成"顶到天花板"</b>，恰好是这条缺陷原本会制造的误读。</li>
+     *   <li><b>刻度均分必须可读</b>。原实现是 20/15/10/5/0 五档均分；若直接按 critical 均分，
+     *       critical=15 会变成 15/11.25/7.5/3.75/0——四个小数、三条无意义刻度，
+     *       读者要多算一次才敢下结论。这里改为<b>固定 5 等分的整刻度 + 两条阈值线单独标注</b>：
+     *       刻度只回答"绝对位置"，阈值线回答"越过哪一格算黄/红"，两个问题各用各的表达。</li>
+     *   <li><b>阈值是被读出来的，不是被画歪的</b>。若"最大值改成 critical"，
+     *       一个把 critical 设成 5 的激进服主会得到一张永远满高的图——图变成了阈值报警器，
+     *       不再能看见真实读数。</li>
+     * </ul>
+     *
+     * <p>所以：上限固定 20（TPS 物理上限，改 config 不该改物理），刻度线由
+     * {@link #tpsAxisTickLabels} 均分，阈值（warning / critical）由
+     * {@link #tpsThresholdLegend} 以文字标出——后者才是跟着 config 走的那部分。</p>
+     */
+    static final double TPS_AXIS_CEILING = 20.0;
+
+    /** 纵轴刻度档数（含 0 与上限）：与 CSS 里 {@code .chart-labels} 的 {@code space-between} 布局对应。 */
+    static final int TPS_AXIS_TICK_COUNT = 5;
+
+    /**
+     * 纵轴刻度文案：由 {@code 0.0} 到 {@code ceiling} 均分 {@code ticks} 档，从上到下。
+     *
+     * <p>TPS 的上限是整数 20，{@code 20/5 = 4} 的等分恰好落在整数上（20/16/12/8/4/0 若取 6 档），
+     * 出厂 {@code ticks = 5} 给的是 20/15/10/5/0——与 v1.1 那张手写刻度逐位相同，
+     * 所以<b>默认配置下 CSV/HTML 的呈现零变化</b>，变的只是"它现在是算出来的"。</p>
+     *
+     * <p>刻意<b>不</b>把中间某两档替换成 critical/warning：那会让刻度间距不等（20/18/15/10/5/0），
+     * 柱子对齐刻度时就读不出线性关系。阈值由图例文字标注，见 {@link #tpsThresholdLegend}。</p>
+     *
+     * @param ceiling 上限（&gt;0，调用点传 {@link #TPS_AXIS_CEILING}）
+     * @param ticks   档数（&gt;=2；调用点传 {@link #TPS_AXIS_TICK_COUNT}）
+     */
+    static List<String> tpsAxisTickLabels(double ceiling, int ticks) {
+        List<String> out = new ArrayList<>(Math.max(0, ticks));
+        if (!(ceiling > 0) || ticks < 2) {
+            // 非法入参不抛异常：这是展示层，宁可给一档 0.0 也不要让整份报告生成失败
+            out.add(String.format(java.util.Locale.ROOT, "%.1f", 0.0));
+            return out;
+        }
+        for (int i = 0; i < ticks; i++) {
+            double value = ceiling - (ceiling / (ticks - 1)) * i;
+            out.add(String.format(java.util.Locale.ROOT, "%.1f", value));
+        }
+        return out;
+    }
+
+    /**
+     * 图例：把两条阈值线的<b>数值与比较方向</b>写在图上。
+     *
+     * <p>为什么需要它：柱子颜色（绿/黄/红）回答"这一刻是什么档"，但读者看不出"红是从多少开始"。
+     * 以前答案藏在那串硬编码的 20/15/10/5/0 里——它只是刻度，从来不是阈值；
+     * 而服主把 {@code tps.critical_threshold} 改成 17 之后，图上没有任何一处提到 17。</p>
+     *
+     * <p>比较符取自 {@link ThresholdOperator#TPS}（不是在这里再写一个 {@code "<"}）：
+     * 改算子表时这句话跟着变，不会出现"图例说小于、判定用小于等于"这种两份副本。</p>
+     *
+     * <p>返回的是<b>已转义</b>的 HTML：数字与符号不可能含标记，但文案来自
+     * {@code messages.yml}（用户可写 {@code <}），所以中文/英文两段都要过 {@link #escapeHtml}。</p>
+     */
+    static String tpsThresholdLegend(ConfigManager.ConfigData cfg) {
+        if (cfg == null) {
+            return "";
+        }
+        ThresholdOperator.Rule rule = ThresholdOperator.TPS;
+        // 文案模板：{0}=critical 值 {1}=critical 比较符 {2}=warning 值 {3}=warning 比较符。
+        // 比较符作为独立占位符传入，而不是拼进模板里——翻译只换语序，不碰符号。
+        String criticalPart = Messages.get("report.html.chart.tps-critical",
+            formatTpsThreshold(cfg.tps_criticalThreshold), rule.criticalSymbol());
+        String warnPart = Messages.get("report.html.chart.tps-warn",
+            formatTpsThreshold(cfg.tps_warningThreshold), rule.warningSymbol());
+        return "<span class=\"legend-critical\">" + escapeHtml(criticalPart) + "</span>"
+            + "<span class=\"legend-warn\">" + escapeHtml(warnPart) + "</span>";
+    }
+
+    /** 阈值文案：整数补一位小数（{@code 15} → {@code 15.0}），与纵轴刻度同一格式。 */
+    private static String formatTpsThreshold(double value) {
+        return String.format(java.util.Locale.ROOT, "%.1f", value);
+    }
+
+    /**
+     * 图上两条阈值参考线的位置（CSS {@code bottom} 百分比），由 config 阈值除以纵轴上限得到。
+     *
+     * <p>与 {@link #TPS_AXIS_CEILING} 同一把尺：柱高 {@code tps/20*100}、参考线
+     * {@code threshold/20*100}，所以 {@code critical = 15} 的线正好落在 75%，
+     * 与那根 15 TPS 的柱子顶端齐平——读者看到"柱子越过红线"就等于"这条读数红了"。</p>
+     *
+     * <p>越界的参考线（阈值 &gt; 上限，例如合法上限 20.5 的 {@code 20.2}）与非法值
+     * 一律不画：画在 100% 顶部会被读成"阈值就是 20"，而那正是这条缺陷的旧形态。
+     * 它们仍会出现在 {@link #tpsThresholdLegend} 的文字里，信息不丢。</p>
+     *
+     * @return 两段 HTML（critical 在前）；无可用阈值时返回空串
+     */
+    static String tpsThresholdMarkers(ConfigManager.ConfigData cfg) {
+        if (cfg == null) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder();
+        appendThresholdMarker(out, "critical", cfg.tps_criticalThreshold);
+        appendThresholdMarker(out, "warn", cfg.tps_warningThreshold);
+        return out.toString();
+    }
+
+    private static void appendThresholdMarker(StringBuilder out, String cssLevel, double threshold) {
+        if (!(threshold > 0) || threshold > TPS_AXIS_CEILING) {
+            return;
+        }
+        out.append("<div class=\"tps-threshold ").append(cssLevel)
+            .append("\" style=\"bottom:").append(String.format(java.util.Locale.ROOT, "%.1f", threshold / TPS_AXIS_CEILING * 100))
+            .append("%\"><span>").append(formatTpsThreshold(threshold)).append("</span></div>");
+    }
+
     private String htmlCard(String title, String value, String cssClass, String subtitle) {
         StringBuilder card = new StringBuilder();
         card.append("<div class=\"card ").append(cssClass).append("\">\n");
@@ -1517,14 +1657,37 @@ public class ReportGenerator {
             th { background: #0f3460; color: #00BCD4; }
             tr:hover { background: #1a2744; }
             .chart { margin: 15px 0; }
-            .tps-graph {
+            /* 图例：两条阈值线的数值 + 比较符。文字走 messages.yml，所以这里只管排版。
+               flex + gap 而不是往模板里塞空格/分隔符：文案是可翻译的，
+               分隔符若写进 messages.yml 会被各语言自行翻译成不同东西。 */
+            .chart-legend {
                 display: flex;
-                align-items: flex-end;
-                gap: 2px;
+                flex-wrap: wrap;
+                gap: 14px;
+                font-size: 0.75em;
+                color: #90a4ae;
+                margin-bottom: 6px;
+            }
+            .chart-legend .legend-critical { color: #FF5252; }
+            .chart-legend .legend-warn { color: #FFB300; }
+            /* 外层：只负责背景与内边距（视觉上的描边）。position: relative 仅是兜底，
+               真正给参考线定位的是内层 .tps-plot —— 见模板处的注释。 */
+            .tps-graph {
+                position: relative;
                 height: 120px;
                 padding: 5px;
                 background: #0f3460;
                 border-radius: 4px;
+            }
+            /* 绘图区：柱子与参考线**共用**这一个盒子，百分比才同基准。
+               原实现把两者都放在带 5px 内边距的 .tps-graph 里：柱高 % 按内容盒算、
+               绝对定位的参考线按内边距盒算，15 TPS 的柱顶会比 75% 的红线低约 2.5px。 */
+            .tps-plot {
+                position: relative;
+                display: flex;
+                align-items: flex-end;
+                gap: 2px;
+                height: 100%;
             }
             .bar {
                 flex: 1;
@@ -1532,6 +1695,29 @@ public class ReportGenerator {
                 border-radius: 2px 2px 0 0;
                 transition: height 0.3s;
             }
+            /* 参考线本身：绝对定位的横线，不参与 flex 布局（否则会挤掉一根柱子）。
+               虚线而不是实线：它表达"界限"，不是一根读数。 */
+            .tps-threshold {
+                position: absolute;
+                left: 0;
+                right: 0;
+                border-top: 1px dashed;
+                pointer-events: none;
+                z-index: 2;
+            }
+            .tps-threshold.critical { border-color: #FF5252; }
+            .tps-threshold.warn { border-color: #FFB300; }
+            .tps-threshold span {
+                position: absolute;
+                right: 0;
+                top: -1.2em;
+                font-size: 0.7em;
+                background: rgba(15, 52, 96, 0.85);
+                padding: 0 3px;
+                border-radius: 2px;
+            }
+            .tps-threshold.critical span { color: #FF5252; }
+            .tps-threshold.warn span { color: #FFB300; }
             .chart-labels {
                 display: flex;
                 justify-content: space-between;
