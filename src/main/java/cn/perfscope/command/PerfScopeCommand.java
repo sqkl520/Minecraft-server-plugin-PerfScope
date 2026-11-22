@@ -31,6 +31,7 @@ import cn.perfscope.history.HistoryStore;
 import cn.perfscope.metrics.ChunkHotspot;
 import cn.perfscope.metrics.MetricsCollector;
 import cn.perfscope.metrics.MetricsSnapshot;
+import cn.perfscope.metrics.ThresholdOperator;
 import cn.perfscope.report.ReportGenerator;
 import cn.perfscope.util.DurationFormat;
 import cn.perfscope.util.Messages;
@@ -316,6 +317,10 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         }
 
         // 实体总数（P0-5：模块不可用显示"不可用"）
+        // P0-T：这里**刻意不 return**——下方「服务器级诊断」段还有区块/Tile Entity/内存等
+        // 各自独立的模块，实体模块挂了不该把它们一起吞掉。真实存在过的矛盾是"上一行不可用、
+        // 下一行实体 0"，那由下面的逐世界循环按字段判模块解决（每个字段查自己所属的模块），
+        // 而不是靠提前退出整个方法。
         if (snap.unavailable.contains(MetricsSnapshot.MODULE_ENTITIES)) {
             sender.sendMessage(goldLabel(Messages.get("cmd.entities.total-label"))
                 .append(Component.text(Messages.get("cmd.state.unavailable"), GRAY)));
@@ -340,26 +345,51 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         // === 服务器级诊断 ===
         sender.sendMessage(Component.text(Messages.get("cmd.all.section.server"), GOLD, TextDecoration.BOLD));
 
+        // P0-T：逐世界段的四个字段各自判**所属模块**的可用性，模块不可用时打「不可用」而不是 0。
+        // 为什么必须逐个字段判：
+        //   1. 0 是完全合理的读数（空世界就是 0 实体），用户没有任何线索怀疑它是假数据；
+        //   2. 更糟的是上色——ENTITIES 的 0 在 ThresholdColors 里判 GOOD，会被染成**绿色**，
+        //      于是"实体模块采集失败"在屏幕上表现为"这个世界的实体数很健康"；
+        //   3. 与同屏上方的实体总计行（模块不可用已打「不可用」）口径必须一致，
+        //      否则上一行说「不可用」、下一行说「实体 0」——矛盾的那一半看起来更像数据。
+        // 字段→模块的归属与采集侧一致（MetricsCollector.collectChunks 同时填
+        // chunksByWorld 与 forceLoadedChunksByWorld，故强加载区块跟 chunks 模块走）。
         for (World world : Bukkit.getWorlds()) {
-            int entityCount = snap.entitiesByWorld.getOrDefault(world.getName(), 0);
-            int loadedChunks = snap.chunksByWorld.getOrDefault(world.getName(), 0);
-            int forceLoaded = snap.forceLoadedChunksByWorld.getOrDefault(world.getName(), 0);
-            int tileEntities = snap.tileEntitiesByWorld.getOrDefault(world.getName(), 0);
-
-            // v1.2 A8：改为读 config 阈值（含 worlds 段按世界覆盖；原硬编码 500/200）
-            TextColor eColor = thresholdColors.colorOf(
-                thresholdColors.levelOf(ThresholdColors.Metric.ENTITIES, entityCount, world.getName()));
+            String worldName = world.getName();
+            Integer entityCount = worldMetricOrUnavailable(snap.unavailable,
+                MetricsSnapshot.MODULE_ENTITIES, snap.entitiesByWorld, worldName);
+            Component entityComp;
+            if (entityCount == null) {
+                entityComp = unavailableText(snap, MetricsSnapshot.MODULE_ENTITIES);
+            } else {
+                // v1.2 A8：改为读 config 阈值（含 worlds 段按世界覆盖；原硬编码 500/200）
+                TextColor eColor = thresholdColors.colorOf(
+                    thresholdColors.levelOf(ThresholdColors.Metric.ENTITIES, entityCount, worldName));
+                entityComp = Component.text(String.valueOf(entityCount), eColor);
+            }
+            Component chunksComp = worldMetricComponent(
+                worldMetricOrUnavailable(snap.unavailable, MetricsSnapshot.MODULE_CHUNKS,
+                    snap.chunksByWorld, worldName),
+                snap, MetricsSnapshot.MODULE_CHUNKS);
+            Component forceComp = worldMetricComponent(
+                worldMetricOrUnavailable(snap.unavailable, MetricsSnapshot.MODULE_CHUNKS,
+                    snap.forceLoadedChunksByWorld, worldName),
+                snap, MetricsSnapshot.MODULE_CHUNKS);
+            Component tileComp = worldMetricComponent(
+                worldMetricOrUnavailable(snap.unavailable, MetricsSnapshot.MODULE_TILE_ENTITIES,
+                    snap.tileEntitiesByWorld, worldName),
+                snap, MetricsSnapshot.MODULE_TILE_ENTITIES);
 
             sender.sendMessage(Component.text(Messages.get("cmd.all.world-label"), GRAY)
-                .append(Component.text(world.getName(), WHITE))
+                .append(Component.text(worldName, WHITE))
                 .append(Component.text(Messages.get("cmd.all.entities-inline"), GRAY))
-                .append(Component.text(String.valueOf(entityCount), eColor))
+                .append(entityComp)
                 .append(Component.text(Messages.get("cmd.all.chunks-inline"), GRAY))
-                .append(Component.text(String.valueOf(loadedChunks), WHITE))
+                .append(chunksComp)
                 .append(Component.text(Messages.get("cmd.all.force-inline"), GRAY))
-                .append(Component.text(String.valueOf(forceLoaded), WHITE))
+                .append(forceComp)
                 .append(Component.text(Messages.get("cmd.all.tile-entities-inline"), GRAY))
-                .append(Component.text(String.valueOf(tileEntities), WHITE)));
+                .append(tileComp));
         }
 
         // 内存（P0-5：模块不可用显示"不可用"；W5-D #1：预热态改渲染"预热中"）
@@ -444,6 +474,37 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
 
     // ==================== 专项检测: TPS ====================
 
+    /**
+     * 趋势条上单个采样位的渲染（P0-S1）。
+     *
+     * <p><b>为什么抽成静态函数</b>：趋势条的字符选择本来内联在 {@code showTPS} 的循环里，
+     * 而那段循环在 v1.4.2「把 0 当缺失」那类 bug 里正是漏网的一处——
+     * 它判的是 {@code unavailable.contains(TPS) || tps <= 0}，把<b>真实冻结的 0</b> 画成了灰色问号。
+     * 抽出来后"0 该画什么"变成可直接断言的纯函数，与 {@link #worldOrTotal}、
+     * {@code computeTrendStats} 同一范式（命令层已经这么抽过三处）。</p>
+     *
+     * <p><b>口径</b>：只有 {@code MODULE_TPS} 不可用时才是"没数据"（灰 "?"）；
+     * TPS 没有 -1 哨兵，{@code 0} 是服务器完全冻结的真实读数（见
+     * {@code tools/check-sentinels.mjs} 的 {@code NO_SENTINEL_FIELDS}），必须走
+     * {@link ThresholdColors#tpsTrendBucket} 正常分档，落最差档 "!"。</p>
+     *
+     * @param unavailableModules 该采样快照的 unavailable 集合
+     * @param tps                该采样的 1 分钟 TPS
+     * @param colors             四档阈值来源
+     * @return 该位的字符 Component（"?" 灰 / "|" "." ":" "!" 青）
+     */
+    static Component tpsTrendGlyph(Set<String> unavailableModules, double tps, ThresholdColors colors) {
+        if (unavailableModules != null && unavailableModules.contains(MetricsSnapshot.MODULE_TPS)) {
+            return Component.text("?", GRAY);
+        }
+        switch (colors.tpsTrendBucket(tps)) {
+            case 3: return Component.text("|", AQUA);
+            case 2: return Component.text(".", AQUA);
+            case 1: return Component.text(":", AQUA);
+            default: return Component.text("!", AQUA);
+        }
+    }
+
     private void showTPS(CommandSender sender) {
         MetricsSnapshot snap = collector.getLatest();
         if (snap == null) { noData(sender); return; }
@@ -474,24 +535,22 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             int showCount = Math.min(60, history.size());
             sender.sendMessage(Component.text(Messages.get("cmd.tps.trend-title", showCount), GRAY));
             // A5（命令侧）：趋势位语义——"|" 满 / "." GOOD / ":" WARN / "!" CRITICAL；
-            // v1.2 A8：四档判定改读 config（阈值来源 ThresholdColors.tpsTrendBucket）；
-            // TPS 值 <=0 或该采样快照 MODULE_TPS 不可用时，该位是"数据缺失"（模块禁用/启动期写入的 0 值），
-            // 渲染为灰色 "?"，不得画成 "!"——"数据缺失"≠"TPS=0"，避免整段趋势被误读为"TPS 崩到 0"
+            // v1.2 A8：四档判定改读 config（阈值来源 ThresholdColors.tpsTrendBucket）。
+            //
+            // P0-S1：只有**模块级不可用**才画 "?"。旧实现在这里额外判了 `tps <= 0`，把真实的 TPS 0
+            // 也当成"没数据"——但 tps1m 根本没有 -1 哨兵（tools/check-sentinels.mjs 的
+            // NO_SENTINEL_FIELDS 明写 0 = 服务器冻结，是真实读数）。后果是同一屏里 TPS 行
+            // （formatTpsComponent(0) 红色 0.0）、告警层、导出报告全都判 critical，
+            // 唯独趋势条把那一个 0 画成灰色问号——服务器完全冻结时，最该被看见的读数在
+            // 趋势里变成了"没数据"，恰好把事故现场抹掉了。
+            //
+            // 现在真实 0 走 tpsTrendBucket 正常分档：levelOf(TPS, 0) → CRITICAL → 桶 0 → "!"，
+            // 与报告层 HTML 趋势柱（ReportGenerator 只在 MODULE_TPS 不可用时画灰矮柱）同口径。
             Component trend = Component.empty();
             int start = Math.max(0, history.size() - showCount);
             for (int i = start; i < history.size(); i++) {
                 MetricsSnapshot sample = history.get(i);
-                double tps = sample.tps1m;
-                if (sample.unavailable.contains(MetricsSnapshot.MODULE_TPS) || tps <= 0) {  // @sentinel-ok 不参与统计，只是判断"这条样本的 TPS 不可用"；配合 unavailable 集合使用
-                    trend = trend.append(Component.text("?", GRAY));
-                } else {
-                    switch (thresholdColors.tpsTrendBucket(tps)) {
-                        case 3: trend = trend.append(Component.text("|", AQUA)); break;
-                        case 2: trend = trend.append(Component.text(".", AQUA)); break;
-                        case 1: trend = trend.append(Component.text(":", AQUA)); break;
-                        default: trend = trend.append(Component.text("!", AQUA)); break;
-                    }
-                }
+                trend = trend.append(tpsTrendGlyph(sample.unavailable, sample.tps1m, thresholdColors));
             }
             sender.sendMessage(Component.text("  ").append(trend));
         }
@@ -555,7 +614,52 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
     // ==================== 专项检测: 实体 ====================
 
     /**
-     * 世界视图的"总计"行该取哪个数字。
+     * 逐世界读数的取值口径（P0-T）。
+     *
+     * <p><b>为什么必须有这个函数</b>：{@code showAll} 的逐世界循环与整个 {@code showWorld}
+     * 此前都是无条件 {@code getOrDefault(world, 0)}，且完全不查 {@code snap.unavailable}。
+     * 0 是完全合理的读数（空世界就是 0），用户没有任何线索怀疑它是假数据；更糟的是
+     * ENTITIES 的 0 在 {@link ThresholdColors} 里判 GOOD 会被<b>染成绿色</b>——
+     * "实体模块采集失败"在屏幕上表现为"这个世界的实体数很健康"。这就是 P0-T。</p>
+     *
+     * <p><b>返回 null 的语义</b>是"模块不可用，调用方渲染「不可用」/「预热中」，不要输出 0"，
+     * 与报告层 {@code ReportGenerator#htmlCell(unavailable, value)} 的判据同构
+     * （那边每列各自按所属模块判，这里也一样）。</p>
+     *
+     * <p>注意<b>不能</b>整屏统一判一个模块：{@code entities} / {@code chunks} /
+     * {@code tile_entities} 是三个独立模块，只关掉其中一个时另外几列必须照常出真实读数。</p>
+     *
+     * @param unavailableModules 快照的 unavailable 集合（可为 null）
+     * @param module             该字段所属模块（{@link MetricsSnapshot#MODULE_ENTITIES} 等）
+     * @param byWorld            该指标的逐世界 map（可为 null）
+     * @param worldName          世界规范名
+     * @return 该世界读数；模块不可用时为 {@code null}；世界不在 map 里时为 {@code 0}
+     *         （刚卸载/快照早于世界创建，与 {@link #worldOrTotal} 的"缺失即 0"口径一致）
+     */
+    static Integer worldMetricOrUnavailable(@Nullable Set<String> unavailableModules, String module,
+                                           @Nullable Map<String, Integer> byWorld, String worldName) {
+        if (unavailableModules != null && unavailableModules.contains(module)) {
+            return null;
+        }
+        return byWorld == null ? 0 : byWorld.getOrDefault(worldName, 0);
+    }
+
+    /**
+     * 逐世界/单世界读数 → 渲染 Component：{@code null}（模块不可用）时渲染「不可用」/「预热中」，
+     * 否则渲染数字。
+     *
+     * <p>存在的理由是把 {@link #worldMetricOrUnavailable} 的 null 语义<b>只实现一次</b>——
+     * {@code showAll} 的逐世界循环与 {@code showWorld} 一共七处读数，逐处手写三元式
+     * 就是下一处 P0-T 的温床（漏一处，屏幕上就多一个看起来很健康的 0）。</p>
+     */
+    private Component worldMetricComponent(@Nullable Integer value, MetricsSnapshot snap, String module) {
+        return value == null
+            ? unavailableText(snap, module)
+            : Component.text(String.valueOf(value), WHITE);
+    }
+
+    /**
+
      *
      * <p><b>为什么必须有这个函数</b>：{@code /perfscope entities <world>} 的标题早就切成了
      * 「实体统计 - 世界名」，紧接着的总计行却一直打印 {@code snap.totalEntities}（全服值）——
@@ -694,13 +798,21 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         // world == null（全服视图）保持原行为：全服总数 vs 全局阈值。
         // v1.4：这里的 2000/3000 只是"配置快照为 null"时的兜底（thresholdOf 的契约），
         // 实际几乎不可达；但仍改成与 jar 内 config.yml 一致的新默认，避免三处默认值漂移。
+        //
+        // 第五份副本（本次修）：下面两个 `>` 曾是自己手写的比较符，值与 ENTITIES_* 当时的
+        // STRICT 恰好相同，所以数值上从未露馅——但改算子表时它不会跟着动，
+        // "颜色变黄了"与"这里报警了"随时可能重新分裂成两套口径。
+        // 现在判定改调 ThresholdOperator 的 Rule（与 ThresholdColors / MetricsCollector 同一张表）；
+        // 本段只保留自己的那件事：**取哪个阈值**（世界覆盖 or 全局）。
         Integer alertEntities;
         int warnThreshold;
         int criticalThreshold;
+        ThresholdOperator.Rule alertRule;
         if (world == null) {
             alertEntities = snap.totalEntities;
             warnThreshold = (int) thresholdOf(cfgNow(), "entities_totalWarningThreshold", 20000.0);
             criticalThreshold = (int) thresholdOf(cfgNow(), "entities_totalCriticalThreshold", 30000.0);
+            alertRule = ThresholdOperator.ENTITIES_GLOBAL;
         } else {
             // 该世界不在 map 里 = 0 实体 → null → 不报警
             alertEntities = snap.entitiesByWorld.get(world.getName());
@@ -710,14 +822,42 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
                 : (int) thresholdOf(cfgNow(), "entities_totalWarningThreshold", 20000.0);
             criticalThreshold = ws != null ? ws.entities_totalCriticalThreshold
                 : (int) thresholdOf(cfgNow(), "entities_totalCriticalThreshold", 30000.0);
+            // 有覆盖的世界走 ENTITIES_WORLD，其余走 ENTITIES_GLOBAL：两条规则现在的算子相同，
+            // 但分开取是为了让"哪天世界口径要单独改"只动表里那一行。
+            alertRule = ws != null ? ThresholdOperator.ENTITIES_WORLD : ThresholdOperator.ENTITIES_GLOBAL;
         }
-        if (alertEntities != null) {
-            if (alertEntities > criticalThreshold) {
-                sender.sendMessage(Component.text(Messages.get("cmd.entities.critical-warning"), RED));
-            } else if (alertEntities > warnThreshold) {
-                sender.sendMessage(Component.text(Messages.get("cmd.entities.warning"), YELLOW));
+        switch (entityAlertLevel(alertEntities, alertRule, warnThreshold, criticalThreshold)) {
+            case 2 -> sender.sendMessage(Component.text(Messages.get("cmd.entities.critical-warning"), RED));
+            case 1 -> sender.sendMessage(Component.text(Messages.get("cmd.entities.warning"), YELLOW));
+            default -> {
+                // 0 = 未越界；该世界不在快照里时也是 0（视为不报警，同 worldOrTotal 的缺失口径）
             }
         }
+    }
+
+    /**
+     * {@code /ps entities} 的告警档位：{@code 2} critical / {@code 1} warning / {@code 0} 不告警。
+     *
+     * <p><b>为什么抽成包级静态方法</b>：{@code showEntities} 的其余部分要真 Bukkit
+     * （{@code CommandSender}、{@code World}），本仓库没有 MockBukkit（见
+     * {@code tools/KNOWN-TEST-LIMITS.md}），档位决策埋在方法体里就只能靠"读源码"验证。
+     * 抽出来之后 {@code EntityAlertLevelTest} 可以直接喂一条<b>合成规则</b>，
+     * 证明这里的判定真的<b>读</b>{@link ThresholdOperator} 的表，而不是又写了一遍 {@code >}——
+     * 那是本次修掉的形状，且它在全量测试下曾经完全绿（数值与当时的 STRICT 巧合相同）。</p>
+     *
+     * <p>比较符、方向、两档闭合性全部来自 {@code rule}；本方法只做两件属于命令层的事：
+     * 把 {@code null}（世界不在快照里）折算成"不告警"，以及把 0/1/2 换成三态。</p>
+     *
+     * @param alertEntities 该口径下的实体数；{@code null} = 该世界不在快照里
+     * @param rule          取哪条规则（{@code ENTITIES_WORLD} / {@code ENTITIES_GLOBAL}）
+     * @return 2 / 1 / 0；{@code alertEntities == null} 时返回 0
+     */
+    static int entityAlertLevel(@Nullable Integer alertEntities, ThresholdOperator.Rule rule,
+                                int warnThreshold, int criticalThreshold) {
+        if (alertEntities == null || rule == null) {
+            return 0;
+        }
+        return rule.levelOf(alertEntities, warnThreshold, criticalThreshold);
     }
 
     // ==================== 专项检测: 区块 ====================
@@ -928,15 +1068,33 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
         String canonicalName = world.getName();
         sender.sendMessage(Component.text(Messages.get("cmd.section.world", canonicalName), GOLD, TextDecoration.BOLD));
         sender.sendMessage(goldLabel(Messages.get("cmd.world.dimension-label")).append(Component.text(world.getEnvironment().name(), WHITE)));
-        sender.sendMessage(goldLabel(Messages.get("cmd.world.entities-label")).append(Component.text(
-            String.valueOf(snap.entitiesByWorld.getOrDefault(canonicalName, 0)), WHITE)));
-        sender.sendMessage(goldLabel(Messages.get("cmd.chunks.loaded-label")).append(Component.text(
-            String.valueOf(snap.chunksByWorld.getOrDefault(canonicalName, 0)), WHITE)));
-        sender.sendMessage(goldLabel(Messages.get("cmd.world.force-loaded-label")).append(Component.text(
-            String.valueOf(snap.forceLoadedChunksByWorld.getOrDefault(canonicalName, 0)), WHITE)));
-        sender.sendMessage(goldLabel(Messages.get("cmd.world.tile-entities-label")).append(Component.text(
-            String.valueOf(snap.tileEntitiesByWorld.getOrDefault(canonicalName, 0)), WHITE)));
 
+        // P0-T：整个方法此前**完全不查 unavailable**，四处 getOrDefault(..., 0) 无条件打 0。
+        // 这是比"显示错数"更隐蔽的一类：0 是完全合理的读数（刚生成的世界、玩家清怪后的末地），
+        // 于是服主看到「实体数: 0」只会想"世界空着挺好"，不会想到实体模块根本没跑起来。
+        // 修法与报告层 ReportGenerator:630-648 同构——每列按**所属模块**独立判 unavailable，
+        // 不可用就渲染「不可用」/「预热中」（unavailableText 会区分二者），绝不输出 0。
+        // 注意不能整屏统一判一个模块：entities/chunks/tile_entities 是三个独立模块，
+        // 只关掉其中一个时另外两列仍必须出真实读数。
+        sender.sendMessage(goldLabel(Messages.get("cmd.world.entities-label")).append(worldMetricComponent(
+            worldMetricOrUnavailable(snap.unavailable, MetricsSnapshot.MODULE_ENTITIES,
+                snap.entitiesByWorld, canonicalName),
+            snap, MetricsSnapshot.MODULE_ENTITIES)));
+        sender.sendMessage(goldLabel(Messages.get("cmd.chunks.loaded-label")).append(worldMetricComponent(
+            worldMetricOrUnavailable(snap.unavailable, MetricsSnapshot.MODULE_CHUNKS,
+                snap.chunksByWorld, canonicalName),
+            snap, MetricsSnapshot.MODULE_CHUNKS)));
+        // 强加载区块由 collectChunks 一并采集（同一模块），故与「加载区块」同判据
+        sender.sendMessage(goldLabel(Messages.get("cmd.world.force-loaded-label")).append(worldMetricComponent(
+            worldMetricOrUnavailable(snap.unavailable, MetricsSnapshot.MODULE_CHUNKS,
+                snap.forceLoadedChunksByWorld, canonicalName),
+            snap, MetricsSnapshot.MODULE_CHUNKS)));
+        sender.sendMessage(goldLabel(Messages.get("cmd.world.tile-entities-label")).append(worldMetricComponent(
+            worldMetricOrUnavailable(snap.unavailable, MetricsSnapshot.MODULE_TILE_ENTITIES,
+                snap.tileEntitiesByWorld, canonicalName),
+            snap, MetricsSnapshot.MODULE_TILE_ENTITIES)));
+
+        // 世界内玩家数是**实时查的**（不是快照字段），不存在"模块未采集"的假 0 问题，故不加判据
         int playersInWorld = (int) Bukkit.getOnlinePlayers().stream()
             .filter(p -> p.getWorld().getName().equals(canonicalName))
             .count();
@@ -1928,6 +2086,149 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             sender.sendMessage(goldLabel(Messages.get("cmd.status.scheduler-label"))
                 .append(Component.text(Messages.get("cmd.status.scheduler-unavailable"), GRAY)));
         }
+
+        showExports(sender, cfg);
+    }
+
+    /**
+     * 可选出口三态：Prometheus / 跨服摘要 / bStats（P0-F）。
+     *
+     * <p><b>为什么必须有这一段</b>：这三个出口此前在 {@code /status} 里完全隐身——
+     * 在整个 {@code PerfScopeCommand} 里 grep {@code prometheus|network} 是 0 次命中。
+     * 而它们的失败形态全是"看起来没问题"：Prometheus 端口被占 → 抓取方一直连接失败，
+     * 面板上没有曲线，服主的第一反应是"我没配"或"Prometheus 没配好"；
+     * 跨服摘要登记失败 → 代理侧把那台后端显示成"无数据"，与"空服"无法区分；
+     * bStats 初始化失败 → 本来就没人盯着看。三者唯一的痕迹都是启动那一瞬间的一条 warning，
+     * 一分钟后就滚出控制台了。</p>
+     *
+     * <p>状态来自各自模块的访问器，不在这里重新推断：{@code PrometheusEndpoint.failureReason()}
+     * 与 {@code SummaryPublisher.channelRegistered()} 的 javadoc 一直写着"给 /status 用"，
+     * 但此前<b>零调用点</b>——本次把它们真正接上。bStats 原来只有一个私有的 {@code Metrics}
+     * 句柄（null 只能回答"没在发"，回答不了"为什么"），因此新增了状态位与失败原因。</p>
+     *
+     * <p>「已配置」判定优先于「失败原因」：reload 把出口关掉后，上次失败的 reason 仍然留在对象里
+     * （{@code PrometheusEndpoint#start()} 在未启用分支直接 return）。先判 enabled 才不会把一个
+     * 已经主动关闭的出口显示成"启动失败"。</p>
+     */
+    private void showExports(CommandSender sender, ConfigManager.ConfigData cfg) {
+        sender.sendMessage(Component.text(Messages.get("cmd.status.section.exports"), GOLD, TextDecoration.BOLD));
+
+        // ---- Prometheus ----
+        var endpoint = plugin.getPrometheusEndpoint();
+        String prometheusReason = endpoint == null ? null : endpoint.failureReason();
+        boolean prometheusConfigured = cfg != null && cfg.prometheus_enabled;
+        Component prometheusState;
+        ExportHealth prometheusHealth = exportHealth(prometheusConfigured,
+            endpoint != null && endpoint.isRunning());
+        if (prometheusHealth == ExportHealth.OK) {
+            prometheusState = Component.text(Messages.get("cmd.status.export.prometheus-on",
+                String.valueOf(endpoint.boundAddress()),
+                Messages.get(endpoint.authEnabled()
+                    ? "cmd.status.export.prometheus-auth" : "cmd.status.export.prometheus-no-auth")), GREEN);
+        } else if (prometheusHealth == ExportHealth.FAILED) {
+            prometheusState = failedState("cmd.status.export.prometheus-failed",
+                "cmd.status.export.prometheus-failed-no-reason", prometheusReason);
+        } else {
+            prometheusState = Component.text(Messages.get("cmd.status.export.prometheus-off"), GRAY);
+        }
+        sender.sendMessage(goldLabel(Messages.get("cmd.status.export.prometheus-label")).append(prometheusState));
+        if (prometheusHealth == ExportHealth.FAILED) {
+            sender.sendMessage(Component.text(
+                Messages.get("cmd.status.export.prometheus-failed-hint"), YELLOW));
+        }
+
+        // ---- 跨服摘要（network）----
+        var publisher = plugin.getSummaryPublisher();
+        String networkReason = publisher == null ? null : publisher.registrationFailureReason();
+        boolean networkConfigured = cfg != null && cfg.network_enabled;
+        boolean channelUp = publisher != null && publisher.channelRegistered();
+        Component networkState;
+        ExportHealth networkHealth = exportHealth(networkConfigured, channelUp);
+        if (networkHealth == ExportHealth.OK) {
+            networkState = Component.text(Messages.get("cmd.status.export.network-on",
+                cn.perfscope.network.NetworkSummary.CHANNEL), GREEN);
+        } else if (networkHealth == ExportHealth.FAILED) {
+            networkState = failedState("cmd.status.export.network-failed",
+                "cmd.status.export.network-failed-no-reason", networkReason);
+        } else {
+            networkState = Component.text(Messages.get("cmd.status.export.network-off"), GRAY);
+        }
+        sender.sendMessage(goldLabel(Messages.get("cmd.status.export.network-label")).append(networkState));
+        if (networkHealth == ExportHealth.FAILED) {
+            // 这一行是 P0-E 在界面上的落点：配置说 enabled，实际一条都发不出去。
+            sender.sendMessage(Component.text(
+                Messages.get("cmd.status.export.network-failed-hint"), YELLOW));
+        }
+
+        // ---- bStats ----
+        PerfScope.BstatsState bstats = plugin.getBstatsState();
+        Component bstatsState;
+        if (bstats == PerfScope.BstatsState.ENABLED) {
+            bstatsState = Component.text(Messages.get("cmd.status.export.bstats-on"), GREEN);
+        } else if (bstats == PerfScope.BstatsState.FAILED) {
+            bstatsState = failedState("cmd.status.export.bstats-failed",
+                "cmd.status.export.bstats-failed-no-reason", plugin.getBstatsFailureReason());
+        } else if (bstats == PerfScope.BstatsState.DISABLED_NO_PLUGIN_ID) {
+            bstatsState = Component.text(Messages.get("cmd.status.export.bstats-no-id"), GRAY);
+        } else {
+            bstatsState = Component.text(Messages.get("cmd.status.export.bstats-off"), GRAY);
+        }
+        sender.sendMessage(goldLabel(Messages.get("cmd.status.export.bstats-label")).append(bstatsState));
+    }
+
+    /** 可选出口的三态（与文案无关，故抽成纯函数便于单测）。 */
+    enum ExportHealth {
+        /** 未启用（配置关着）。 */
+        OFF,
+        /** 正在工作。 */
+        OK,
+        /** 配置为启用，但没能起来。 */
+        FAILED
+    }
+
+    /**
+     * 出口状态判定：<b>先看实际在不在工作，再看配置要不要它</b>。
+     *
+     * <ul>
+     *   <li>在工作 → {@link ExportHealth#OK}。<b>哪怕配置已经改成关闭</b>：改文件不等于已 reload，
+     *       此刻端点仍在监听（端口开着 = 谁都能读）、通道仍登记着。把这种状态显示成"未启用"，
+     *       是在危险的方向上说谎——服主会以为端口已经关了。下次 reload 后自然会变回"未启用"。</li>
+     *   <li>没在工作但配置说启用 → {@link ExportHealth#FAILED}。<b>即使拿不到失败原因</b>
+     *       也仍是失败：这正是 P0-E 的形状——配置说 enabled、实际一条数据都发不出去，
+     *       界面却写"未启用"，读者会以为是自己没开，于是永远不会去查。</li>
+     *   <li>没在工作且配置说关闭 → {@link ExportHealth#OFF}。</li>
+     * </ul>
+     *
+     * <p>状态与原因因此是两件事：<b>状态由"在不在工作 + 配置要不要它"决定，
+     * 原因只影响后面那句话怎么写</b>（没记到原因时明说"未记录到原因，请看日志"）。</p>
+     */
+    static ExportHealth exportHealth(boolean configured, boolean running) {
+        if (running) {
+            return ExportHealth.OK;
+        }
+        return configured ? ExportHealth.FAILED : ExportHealth.OFF;
+    }
+
+    /**
+     * 失败行：有原因就用「带原因」的键渲染，没有原因就用「未记录到原因」的键。
+     *
+     * <p>两个键而不是"往同一句里塞一个兜底短语"：后者的产物是
+     * <i>「启动失败：失败（未记录到原因…）」</i>——冒号后面又出现一个"失败"，读起来像结巴，
+     * 而且用户会怀疑是不是两件事叠在一起。分开写，两句都各自成立。</p>
+     *
+     * @param withReason    带 {@code {0}} 占位符的键
+     * @param withoutReason 无占位符的备用键
+     * @param raw           原始原因（可空）
+     */
+    private static Component failedState(String withReason, String withoutReason, String raw) {
+        if (raw == null || raw.isBlank()) {
+            return Component.text(Messages.get(withoutReason), RED);
+        }
+        String s = raw.replace('\n', ' ').replace('\r', ' ').trim();
+        if (s.length() > 160) {
+            s = s.substring(0, 160) + " …";
+        }
+        return Component.text(Messages.get(withReason, s), RED);
     }
 
     /**
