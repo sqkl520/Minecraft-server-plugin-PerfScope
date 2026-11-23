@@ -151,6 +151,21 @@ function yamlScalars(text) {
 
 // --------------------------------------------------------------------------------------
 // Locate the baseline config.
+//
+// 基线必须是一个**更早的发布版本**，不能是当前版本的构建产物。
+//
+// 曾经这里取 versions/*.jar 里版本号最大的那个，注释写着 "not the current version"，
+// 但代码里根本没有这个排除——于是发布流程本身会让门禁自我失效：按项目规则把当前版本
+// 的 jar 归档进 versions/ 之后，"最高版本"就是当前工作树自己的产物，与新源码逐字相同，
+// **任何** KEY PARITY 断言都恒真。
+//
+// 实测（2026-11-24）：同一棵代码树、把 alerts.cooldown-seconds 改名，
+//   未归档时 → FAIL，点名 alerts.cooldown-seconds
+//   归档后   → PASS 9/9，"100 keys, all present in source"
+//
+// 用户配置里的键被改名丢弃，门禁却报"都在"，而触发它的是项目自己的发布流程。
+// 所以现在显式排除与 pom <version> 相同的 jar；一个都不剩时报 exit 2（"无法验证"），
+// 而不是静默降低门槛。
 // --------------------------------------------------------------------------------------
 let baselineText = null;
 let baselineLabel = '';
@@ -164,12 +179,31 @@ if (baseArg) {
   baselineText = p.endsWith('.jar') ? configFromJar(p) : fs.readFileSync(p, 'utf8');
   baselineLabel = path.basename(p);
 } else {
-  // previous release = the highest versions/*.jar that is not the current version
+  // previous release = the highest versions/*.jar that is NOT the current pom version.
   const versionsDir = path.join(REPO, 'versions');
+  // 当前版本：从 pom 读。拿不到就退化成"不排除"——但那条路会让门禁静默失效，
+  // 所以宁可报无法验证。
+  let currentVersion = null;
+  try {
+    const pom = fs.readFileSync(path.join(REPO, 'pom.xml'), 'utf8').replace(/<!--[\s\S]*?-->/g, '');
+    const body = pom.replace(/<parent>[\s\S]*?<\/parent>/g, '')
+      .replace(/<dependencies>[\s\S]*?<\/dependencies>/g, '')
+      .replace(/<build>[\s\S]*?<\/build>/g, '');
+    currentVersion = (body.match(/<version>\s*([^<]+?)\s*<\/version>/) || [])[1] || null;
+  } catch {
+    currentVersion = null;
+  }
+  /** 从文件名里取出完整版本串（含 -SNAPSHOT-fixN 后缀），例如 PerfScope-1.4.5-SNAPSHOT-fix2.jar */
+  const versionOf = (f) => {
+    const m = f.match(/^PerfScope-(.+)\.jar$/);
+    return m ? m[1] : null;
+  };
   let jars = [];
   if (fs.existsSync(versionsDir)) {
     jars = fs.readdirSync(versionsDir)
       .filter(f => f.endsWith('.jar'))
+      // 排除当前版本自己的构建产物：拿它当基线，KEY PARITY 就成了恒真断言。
+      .filter(f => currentVersion == null || versionOf(f) !== currentVersion)
       .sort((a, b) => {
         const va = (a.match(/(\d+)\.(\d+)\.(\d+)/) || []).slice(1, 4).map(Number);
         const vb = (b.match(/(\d+)\.(\d+)\.(\d+)/) || []).slice(1, 4).map(Number);
@@ -232,8 +266,19 @@ rec('PROMISED keys present (ROADMAP §4.3)', missingPromised.length === 0,
   missingPromised.length ? `missing ${missingPromised.join(', ')}` : PROMISED.join(', '));
 
 // and they must be reachable from an OLD file, i.e. the loader must tolerate their absence
+//
+// cm 为空 = 读不到 ConfigManager.java。这个形状必须判 FAIL，不能跳过整组断言：
+// 曾经这里是 `if (cm) { … }`，文件不存在时**断言直接不执行**，results 少 3 项，
+// 末尾仍打印 PASS。实测把整个 ConfigManager.java 删掉后，门禁报 "CONFIG CHECK: PASS (6/6)"
+// ——9 项变 6 项，无一 FAIL。这正是本项目反复踩的"看起来绿，其实没跑"。
 const cm = fs.existsSync(CONFIG_MANAGER) ? fs.readFileSync(CONFIG_MANAGER, 'utf8') : '';
-if (cm) {
+if (!cm) {
+  rec('CONFIG MANAGER source is readable', false,
+    `${path.relative(REPO, CONFIG_MANAGER)} could not be read. Every loader-side assertion below `
+    + `depends on it, so this is a hard failure -- skipping them would report PASS for a repo `
+    + `that no longer has a config loader at all.`);
+}
+{
   const readWithDefault = (key) => {
     // readString/readInt/... always take a default; a bare cfg.getConfigurationSection().get()
     // would not. Flag only the dangerous shape.
@@ -241,17 +286,28 @@ if (cm) {
     return new RegExp(`read\\w*\\s*\\(\\s*"${esc}"\\s*,`).test(cm);
   };
   const newWithoutDefault = added.filter(k => !readWithDefault(k));
-  rec('NEW KEYS have a reader default', true,
-    newWithoutDefault.length
-      ? `${newWithoutDefault.length} new key(s) have no read*("...", default) call -- verify each is `
-        + `tolerated when absent (some are read via getInt(key, default) elsewhere): `
-        + newWithoutDefault.slice(0, 8).join(', ')
-      : 'every new key is read with an explicit default');
-  if (newWithoutDefault.length) {
-    // downgrade: informational, because several keys are read through helpers this scan misses
-    results[results.length - 1].ok = true;
-    results[results.length - 1].detail += ' [informational: not a failure]';
-  }
+  // 这条曾经是 `rec(..., true, ...)` —— ok 是字面量 true，然后下面再把 ok 强制写回 true，
+  // 于是"新增 key 却没有 reader"这条规则**永远 PASS**。实测：往 config.yml 加一个任意的
+  // 新键、不写任何 reader，门禁报 PASS 9/9。
+  //
+  // 不能简单判 FAIL：这个扫描只找 read*("key", default) 这一种形状，而代码里有若干键
+  // 是通过 helper（如 getInt(key, default) 包一层）读的，直接判红会误伤。
+  //
+  // 折中：按"这个键在 ConfigManager 里到底出现过没有"分层。
+  //   - 连键名都搜不到  -> 真的没人读，判 FAIL（这就是"加了个死键"）
+  //   - 出现过但形状不匹配 -> 降级为 INFO（可能是 helper 读取，扫描器看不出来）
+  const totallyAbsent = newWithoutDefault.filter(k => !cm.includes(`"${k}"`));
+  const shapeOnly = newWithoutDefault.filter(k => cm.includes(`"${k}"`));
+  rec('NEW KEYS have a reader default', totallyAbsent.length === 0,
+    totallyAbsent.length
+      ? `${totallyAbsent.length} new key(s) appear nowhere in ConfigManager -- nothing reads them: `
+        + totallyAbsent.slice(0, 8).join(', ')
+        + (shapeOnly.length ? `; ${shapeOnly.length} more are read through a shape this scan does not`
+          + ` recognise (informational, not a failure): ${shapeOnly.slice(0, 8).join(', ')}` : '')
+      : shapeOnly.length
+        ? `every new key is read; ${shapeOnly.length} via a helper shape this scan does not`
+          + ` recognise (informational, not a failure): ${shapeOnly.slice(0, 8).join(', ')}`
+        : 'every new key is read with an explicit default');
 }
 
 // --------------------------------------------------------------------------------------
@@ -312,7 +368,9 @@ if (hyst == null) {
 // --------------------------------------------------------------------------------------
 // [4] the loader must tolerate the KEY SET being older than the source
 // --------------------------------------------------------------------------------------
-if (cm) {
+// 同样不能 `if (cm)`：源文件读不到时这两条断言也必须被评估（并因此判 FAIL），
+// 否则删掉 ConfigManager.java 反而让门禁更绿。
+{
   const hasVersionMigration = /CONFIG_VERSION_KEY|config-version/.test(cm);
   rec('LOADER supports older config versions', hasVersionMigration,
     hasVersionMigration
