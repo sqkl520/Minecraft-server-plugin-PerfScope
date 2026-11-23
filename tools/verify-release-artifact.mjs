@@ -693,6 +693,13 @@ if (fresh) {
 // ======================================================================================
 // 4. SHA256
 // ======================================================================================
+//
+// 这一项在 CONTENT 之前跑，但它<b>不能独立下结论</b>：整包 sha 不同有多种成因，
+// 其中一种是"仅 CRLF/LF 差异"（Maven 用平台行分隔符写 pom.properties，Linux CI
+// 构建的归档与 Windows 重建必然整包 sha 不同）。CONTENT 那一步才能分辨。
+//
+// 所以这里只记录"整包是否逐字节相同"，结论留给 CONTENT 之后的 [4b] 段。
+let shaByteIdentical = null;
 if (!fresh) {
   skip('SHA256 archive == fresh build',
     `no fresh build of ${BASELINE_LABEL} (${SKIP_BUILD ? '--skip-fresh-build was passed' : 'the build failed'});`
@@ -703,13 +710,11 @@ if (!fresh) {
     + ` Class-file bytes are JDK-dependent, so a sha mismatch here proves nothing. Pass`
     + ` --jdk <the JDK CI uses (17)> to compare for real.`);
 } else if (archived.sha256 === fresh.sha256) {
+  shaByteIdentical = true;
   pass('SHA256 archive == fresh build', `${archived.sha256.slice(0, 16)}... (${archived.bytes} B) [${BASELINE_LABEL}]`);
 } else {
-  fail('SHA256 archive == fresh build',
-    `archive ${archived.sha256.slice(0, 12)} != fresh ${fresh.sha256.slice(0, 12)} `
-    + `(${archived.bytes} B vs ${fresh.bytes} B) [${BASELINE_LABEL}]. Either the archive is from an older `
-    + `build, or the build is not byte-reproducible here -- see the CONTENT check below, which can `
-    + `distinguish the two.`);
+  shaByteIdentical = false;
+  // 先不下结论——见下面 [4b]。
 }
 
 // ======================================================================================
@@ -717,6 +722,13 @@ if (!fresh) {
 // ======================================================================================
 const isFunc = (n) => n.endsWith('.class') || n.endsWith('.yml') || n.endsWith('.yaml')
   || n.endsWith('.json') || n.endsWith('.properties') || n.endsWith('.txt');
+// 这几个容器在外层声明：CONTENT 填，[4b] 段（把整包 sha 的结论落到内容上）要读。
+const onlyInArchive = [];
+const onlyInFresh = [];
+const differs = [];
+// 只有换行符不同、其余字节相同的条目。分开记，因为它们证明的东西不一样：
+// 内容一致（归档确实来自这份源码），只是构建平台不同。
+const lineEndingOnly = [];
 if (!fresh) {
   skip('CONTENT archive entries == fresh entries',
     `no fresh build of ${BASELINE_LABEL} to compare entries against; per-entry identity is UNVERIFIED`);
@@ -730,24 +742,33 @@ if (!fresh) {
     + ` ${[...archived.zip.keys()].filter(isFunc).length} functional entries cannot be compared`
     + ` across JDKs (class-file bytes differ). Pass --jdk <the JDK CI uses (17)> to compare for real.`);
 } else {
-  const onlyInArchive = [];
-  const onlyInFresh = [];
-  const differs = [];
   for (const [name, e] of archived.zip) {
     if (!isFunc(name)) continue;
     const f = fresh.zip.get(name);
     if (!f) { onlyInArchive.push(name); continue; }
     const a = sha256(e.data());
     const b = sha256(f.data());
-    if (a !== b) differs.push(name);
+    if (a === b) continue;
+    if (sameIgnoringLineEndings(e.data(), f.data())) { lineEndingOnly.push(name); continue; }
+    differs.push(name);
   }
   for (const name of fresh.zip.keys()) {
     if (isFunc(name) && !archived.zip.has(name)) onlyInFresh.push(name);
   }
 
-  if (onlyInArchive.length === 0 && onlyInFresh.length === 0 && differs.length === 0) {
+  if (onlyInArchive.length === 0 && onlyInFresh.length === 0 && differs.length === 0
+      && lineEndingOnly.length === 0) {
     pass('CONTENT archive entries == fresh entries',
       `${[...archived.zip.keys()].filter(isFunc).length} functional entries byte-identical to a build of ${BASELINE_LABEL}`);
+  } else if (onlyInArchive.length === 0 && onlyInFresh.length === 0 && differs.length === 0) {
+    // 归档来自 Linux CI 构建、本机是 Windows 时，Maven 生成的 pom.properties 用 LF，
+    // 本地重建用 CRLF。字节不同、内容相同——判 FAIL 会让人去查一个不存在的归档错，
+    // 判 PASS 又必须把"为什么不是逐字节"说清楚。所以单列一条，措辞里写明原因。
+    pass('CONTENT archive entries == fresh entries (modulo line endings)',
+      `${[...archived.zip.keys()].filter(isFunc).length - lineEndingOnly.length} entries byte-identical; `
+      + `${lineEndingOnly.length} differ only in CRLF/LF (${lineEndingOnly.slice(0, 4).join(', ')}) `
+      + `-- Maven writes pom.properties with the platform line separator, so an archive built on `
+      + `Linux CI can never be byte-identical to a Windows rebuild. Content is identical.`);
   } else {
     const detail = [
       differs.length ? `${differs.length} entries differ (e.g. ${differs.slice(0, 4).join(', ')})` : '',
@@ -755,6 +776,52 @@ if (!fresh) {
       onlyInArchive.length ? `${onlyInArchive.length} entries exist only in archive (e.g. ${onlyInArchive.slice(0, 4).join(', ')})` : '',
     ].filter(Boolean).join('; ');
     fail('CONTENT archive entries == fresh entries', `${detail} -- the archive is NOT built from ${BASELINE_LABEL}`);
+  }
+}
+
+/**
+ * 两个字节串是否只差换行符（CRLF ↔ LF）。
+ *
+ * <p>只用于资源类条目。class 文件是二进制，换行归一化不会误判（二进制里恰好形成
+ * 0x0D 0x0A 序列时，归一化两边都会去掉同一个 0x0D，结果仍然不等——除非整个文件除了
+ * 换行外确实相同，那时判"仅换行差异"也是对的）。</p>
+ */
+function sameIgnoringLineEndings(a, b) {
+  const norm = (buf) => {
+    // 二进制（含 NUL）不参与归一化：class 文件的字节差异从来不是换行问题。
+    if (buf.includes(0)) return null;
+    return buf.toString('utf8').replace(/\r\n/g, '\n');
+  };
+  const na = norm(a);
+  const nb = norm(b);
+  return na !== null && nb !== null && na === nb;
+}
+
+// ======================================================================================
+// 4b. 整包 sha 不一致时，把结论落到"内容是否相同"上
+// ======================================================================================
+//
+// 整包 sha 是<strong>最强</strong>的判据，但它有一个已知的假红形态：构建平台不同。
+// CI 在 Linux 上构建，Maven 用 LF 写 pom.properties；本机在 Windows 上重建，同一个
+// 文件用 CRLF。于是整包 sha 必不相同，而<b>内容逐字节等价</b>。
+//
+// 这条假红必须被区分出来，否则归档校验在"CI 构建归档 + 本地校验"这个最常见的组合下
+// 永远红，人会开始无视它——比不检查更糟。
+if (shaByteIdentical === false) {
+  if (differs.length === 0 && onlyInArchive.length === 0 && onlyInFresh.length === 0) {
+    pass('SHA256 archive == fresh build (modulo line endings)',
+      `whole-jar sha differs (${archived.sha256.slice(0, 12)} vs ${fresh.sha256.slice(0, 12)}, `
+      + `${archived.bytes} B vs ${fresh.bytes} B) but every functional entry is either byte-identical `
+      + `or differs only in CRLF/LF (${lineEndingOnly.length} such entries). `
+      + `This is a build-OS difference (Maven writes pom.properties with the platform separator), `
+      + `not an archive mismatch.`);
+  } else {
+    fail('SHA256 archive == fresh build',
+      `archive ${archived.sha256.slice(0, 12)} != fresh ${fresh.sha256.slice(0, 12)} `
+      + `(${archived.bytes} B vs ${fresh.bytes} B) [${BASELINE_LABEL}], and the difference is `
+      + `NOT explained by line endings: ${differs.length} entries changed in content`
+      + (differs.length ? ` (e.g. ${differs.slice(0, 4).join(', ')})` : '')
+      + `, ${onlyInFresh.length} missing, ${onlyInArchive.length} extra.`);
   }
 }
 
@@ -966,7 +1033,28 @@ if (pluginYml == null) {
 // ======================================================================================
 // 9. GIT: baseline vs tag, plus the working-tree facts
 // ======================================================================================
-const tag = `v${VERSION}`;
+//
+// 发布 tag 的名字不一定等于 `v${VERSION}`。
+//
+// 本项目的 tag 命名在 2026-11-18 变过一次：`1.4.4` 的 tag 是 `v1.4.4-SNAPSHOT`，
+// `1.4.5-SNAPSHOT-fix4` 的 tag 是 `v1.4.5-SNAPSHOT-fix4`。也就是说**版本字符串与 tag 后缀
+// 之间没有可推导的关系**，硬写 `v${VERSION}` 会让每一版都报「tag 不存在」——那是判据错了，
+// 不是归档错了，但输出看起来与真的缺 tag 一模一样。
+//
+// 所以按优先级解析：
+//   1. --tag <name>            显式指定（最可靠）
+//   2. --ref <name> 恰好是个 tag 且指向我们要验的版本 -> 就用它
+//   3. v<VERSION>              旧约定，兜底
+const tag = resolveReleaseTag();
+function resolveReleaseTag() {
+  const explicit = argOf('--tag', null);
+  if (explicit) return explicit;
+  if (MODE === 'ref' && REF && REF.spec) {
+    const asTag = git(['rev-parse', '--verify', '--quiet', `refs/tags/${REF.spec}^{commit}`]);
+    if (asTag) return REF.spec;
+  }
+  return `v${VERSION}`;
+}
 const tagCommit = git(['rev-parse', '--verify', '--quiet', `refs/tags/${tag}^{commit}`]);
 
 if (headShort == null) {
