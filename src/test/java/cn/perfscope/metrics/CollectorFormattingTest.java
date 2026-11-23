@@ -10,6 +10,8 @@ import cn.perfscope.support.TestObjects;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.logging.Logger;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -51,16 +53,22 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class CollectorFormattingTest {
 
     /**
-     * 文案层：{@code describeThrowable(null)} 走 {@code Messages.get("run.collector.unknown-error")}，
-     * 未初始化时只会拿到键名。
+     * 文案层：{@code describeThrowable(null)} 走 {@code Messages.get("run.collector.unknown-error")}。
+     *
+     * <p>三步都是必要的，但<b>第三步必须用带 plugin 的 {@code load}</b>，不能用
+     * {@code load(null)}：{@code load(null)} 是"无插件"分支，它是否合并模块表取决于该分支
+     * 的实现（那条 P1 修复仍在评审，两个分支上行为不同）。{@code run.*} 键由
+     * {@code RuntimeMessages} 在 {@code init()} 时登记，只有 {@code touchModules() +
+     * mergeModules()} 跑过才会进入快照——带 plugin 的 {@code load} 一定会跑这两步，
+     * 所以它对"修复是否已合入"免疫。</p>
      */
     @BeforeAll
     static void initMessages() throws Exception {
         AlertFixtures.initMessages();
         Class.forName("cn.perfscope.RuntimeMessages").getMethod("init").invoke(null);
-        Class.forName("cn.perfscope.util.Messages")
-            .getMethod("load", Class.forName("cn.perfscope.PerfScope"))
-            .invoke(null, (Object) null);
+        // 为了 trigger touchModules + mergeModules 把 run.* 并进快照，再走一次带 plugin 的 load。
+        cn.perfscope.util.Messages.load(
+            AlertFixtures.barePlugin(Logger.getLogger("pscope-collector-formatting")));
     }
 
     /** {@code round2} / {@code round4} 是实例方法（非 static），所以要一个壳。 */
@@ -242,17 +250,28 @@ class CollectorFormattingTest {
      * 若这里 NPE，采集失败的日志就变成"记日志时又抛了一个异常"——
      * 原本要报告的错误被掩盖。</p>
      *
-     * <p><b>为什么不断言渲染后的文案</b>：{@code run.*} 族键由 {@code RuntimeMessages} 注册，
-     * 而合并在 {@code Messages.load(plugin)} 的带 plugin 分支里发生；测试只能传 {@code null}
-     * （没有 Bukkit 服务端），实测确认即使手动 {@code init()} + {@code touchModules()} +
-     * {@code load(null)}，{@code Messages.get} 仍返回键名。这是消息层在无插件环境下的预期降级。
-     * 文案本身由 {@code check-i18n.mjs} 的键完整性检查负责。</p>
+     * <p><b>这里断言渲染后的文案，而不是只断言"非空"</b>：{@code run.*} 族键由
+     * {@code RuntimeMessages} 注册，合并发生在 {@code Messages.load} 的
+     * {@code touchModules() + mergeModules()} 里——**包括 {@code load(null)} 那条路径**
+     * （它曾被改成直接发布只有 85 个基础键的 {@code EN_DEFAULTS}，导致模块键整批丢失；
+     * 修复后 null 与带 plugin 两条路径发布的是同一张合并表）。
+     * 所以本类 {@code @BeforeAll} 的 {@code AlertFixtures.initMessages() + RuntimeMessages.init()
+     * + load(null)} 三步走完之后，{@code Messages.get} 必须返回真实文案。
+     * 若这里又退回键名，说明消息层没加载好——那种"函数能跑但日志正文是内部键名"的降级
+     * 会一路静默到服主的控制台上，正是本条要拦的东西。</p>
      */
     @Test
     void describeThrowableHandlesNullThrowable() {
         String s = describe(null);
         assertFalse(s.isEmpty(),
             "null 异常必须有可读输出，不能返回空串——否则日志里那一条会变成空白");
+
+        // 期望值由消息层自己渲染同一模板得到，不硬编码语言，也不拿键名当期望值。
+        String expected = cn.perfscope.util.Messages.get("run.collector.unknown-error");
+        assertNotEquals("run.collector.unknown-error", expected,
+            "前置条件：该键必须解析成真实文案，否则下面的比对退化成「键名 == 键名」");
+        assertEquals(expected, s,
+            "describeThrowable(null) 必须走文案层拿到同一句话；got: " + s);
     }
 
     /** 嵌套异常只描述最外层——本方法不做 cause 展开链。 */

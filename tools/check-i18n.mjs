@@ -125,10 +125,19 @@ for (const file of files) {
 // --------------------------------------------------------------------------------------
 // 2. Key-set parity + placeholder parity + duplicate/empty checks.
 // --------------------------------------------------------------------------------------
+// Placeholder extraction must agree with the runtime.
+//
+// Messages.PLACEHOLDER is `\{(0|[1-9]\d*)\}` -- it deliberately REJECTS leading zeros, so
+// "{01}" stays a literal in the rendered text instead of silently meaning {1}. If this gate
+// kept using `\{(\d+)\}` the two sides would disagree: the gate would count {00} and {0} as
+// two different slots (a bogus E-PLACEHOLDER), and would accept "{01}" in the en table and
+// "{1}" in the zh table as a mismatch even though neither renders. Keeping the same regex
+// here is what makes "gate green implies runtime sane" true instead of a coincidence.
+const LEADING_ZERO = /\{0\d+\}/g;
 const placeholderSet = (s) => {
   if (s == null) return null;
   const set = new Set();
-  for (const m of s.matchAll(/\{(\d+)\}/g)) set.add(m[1]);
+  for (const m of s.matchAll(/\{(0|[1-9]\d*)\}/g)) set.add(m[1]);
   return set;
 };
 const fmtSet = (s) => (s == null ? '(null)' : `{${[...s].sort((a, b) => a - b).join(',')}}`);
@@ -165,6 +174,24 @@ for (const [key, e] of [...table.entries()].sort((a, b) => a[0].localeCompare(b[
 
   const enPH = placeholderSet(e.en[0]?.value ?? null);
   const zhPH = placeholderSet(e.zh[0]?.value ?? null);
+
+  // Leading-zero placeholders ("{00}", "{01}") are NOT placeholders at runtime -- see the
+  // comment above placeholderSet(). They render as literal text, i.e. the user sees "{01}"
+  // on screen and the argument is never substituted. That is always a typo, so it is an
+  // error here rather than something the gate silently normalises away.
+  for (const [lang, defs] of [['en', e.en], ['zh', e.zh]]) {
+    for (const d of defs) {
+      if (d.value == null) continue;
+      const hits = [...d.value.matchAll(LEADING_ZERO)];
+      if (hits.length > 0) {
+        err('E-PLACEHOLDER-LEADING-ZERO',
+          `key "${key}" ${lang} has ${hits.length} leading-zero placeholder(s) `
+          + `(${hits.map(h => h[0]).join(', ')} at ${d.file}:${d.line}) -- the runtime treats `
+          + `these as literal text, so the value is never substituted. Write {0} / {1} instead`);
+      }
+    }
+  }
+
   if (enPH && zhPH && e.en[0]?.value != null && e.zh[0]?.value != null) {
     placeholderChecked++;
     if (fmtSet(enPH) !== fmtSet(zhPH)) {

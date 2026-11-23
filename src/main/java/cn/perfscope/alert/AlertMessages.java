@@ -141,19 +141,19 @@ public final class AlertMessages {
         // 这不是笔误，是第五份副本必然发生的漂移；符号跟随算子表之后，改算子文案自动跟随。
         // CPU 不在算子表里（迟滞状态机），{2}/{3} 传的是 ThresholdOperator.CPU_ENTRY_SYMBOL。
         put(en, zh, "alert.threshold.tps",
-            "warning {2} {0} / critical {3} {1}", "warning {2} {0} / critical {3} {1}");
+            "warning {2} {0} / critical {3} {1}", "警告 {2} {0} / 严重 {3} {1}");
         put(en, zh, "alert.threshold.mspt",
-            "warning {2} {0}ms / critical {3} {1}ms", "warning {2} {0}ms / critical {3} {1}ms");
+            "warning {2} {0}ms / critical {3} {1}ms", "警告 {2} {0}ms / 严重 {3} {1}ms");
         put(en, zh, "alert.threshold.players",
-            "warning {2} {0} / critical {3} {1}", "warning {2} {0} / critical {3} {1}");
+            "warning {2} {0} / critical {3} {1}", "警告 {2} {0} / 严重 {3} {1}");
         put(en, zh, "alert.threshold.entities",
-            "warning {2} {0} / critical {3} {1}", "warning {2} {0} / critical {3} {1}");
+            "warning {2} {0} / critical {3} {1}", "警告 {2} {0} / 严重 {3} {1}");
         put(en, zh, "alert.threshold.entities.world",
             "see the worlds section for per-world thresholds", "世界阈值见 worlds 段");
         put(en, zh, "alert.threshold.chunks",
-            "warning {2} {0} / critical {3} {1}", "warning {2} {0} / critical {3} {1}");
+            "warning {2} {0} / critical {3} {1}", "警告 {2} {0} / 严重 {3} {1}");
         put(en, zh, "alert.threshold.memory",
-            "warning {2} {0}% / critical {3} {1}%", "warning {2} {0}% / critical {3} {1}%");
+            "warning {2} {0}% / critical {3} {1}%", "警告 {2} {0}% / 严重 {3} {1}%");
         // CPU 两个指标共用一个 metric 前缀，二者阈值同时给出。
         // 符号只有一个：两侧进入判据都是严格 `>`（MetricsCollector.latched 的未闩锁分支），
         // 退出线由 alert.msg.hysteresis 单独说明。
@@ -213,39 +213,14 @@ public final class AlertMessages {
                 + "and history but are not replayed; TPS alerts push normally again)",
             "启动抑制窗口已结束（窗口内的 TPS 告警已计入状态与历史，"
                 + "不补发；后续 TPS 告警恢复正常推送）");
-        put(en, zh, "alert.log.bad-recovery-debounce",
-            "alerts.recovery-debounce-cycles={0} is invalid (must be ≥1); using the debounce cycle count {1}",
-            "alerts.recovery-debounce-cycles={0} 非法（需 ≥1），已按防抖周期数 {1} 处理");
-        put(en, zh, "alert.log.bad-unknown-after",
-            "alerts.unknown-after-minutes={0} is invalid (must be ≥1); using {1} minutes",
-            "alerts.unknown-after-minutes={0} 非法（需 ≥1），已按 {1} 分钟处理");
-        put(en, zh, "alert.log.bad-refire",
-            "alerts.refire-min-interval-seconds={0} is invalid (must be ≥0); using the default {1}s",
-            "alerts.refire-min-interval-seconds={0} 非法（需 ≥0），已按默认值 {1} 秒处理");
-        // f-s01-err-10：非数值 / 非整数的写法（如 "1m"、"abc"、1.5）。与上方 bad-refire 分开成键：
-        // 那条讲"值越界"，这条讲"根本解析不出来"，成因不同、修法也不同（改格式 vs 改大小）。
-        put(en, zh, "alert.log.refire-unparsable",
-            "alerts.refire-min-interval-seconds=\"{0}\" cannot be read as a whole number of seconds; "
-                + "using the default {1}s — fix the value and run /perfscope reload",
-            "alerts.refire-min-interval-seconds=\"{0}\" 无法解析为整数秒，已按默认值 {1} 秒处理；"
-                + "请修正该值后执行 /perfscope reload");
         // f-s01-err-08：部分玩家投递失败。{0}=失败人数，{1}=首个失败者「玩家名: 异常类型 消息」。
         put(en, zh, "alert.log.game-partial",
             "in-game alert delivery failed for {0} player(s); first failure: {1} "
                 + "(the remaining players still received it)",
             "游戏内告警投递失败 {0} 名玩家；首个失败: {1}（其余玩家仍已收到）");
-        put(en, zh, "alert.log.bad-flap",
-            "alerts.flap-window-seconds={0} is invalid (must be ≥0); using the default {1}s",
-            "alerts.flap-window-seconds={0} 非法（需 ≥0），已按默认值 {1} 秒处理");
-        put(en, zh, "alert.log.bad-repush",
-            "alerts.repush-delta={0} is invalid (must be ≥0); using the default {1}",
-            "alerts.repush-delta={0} 非法（需 ≥0），已按默认值 {1} 处理");
         put(en, zh, "alert.log.options-failed",
             "failed to read the extended alert options (running on defaults): {0}",
             "告警扩展配置读取失败（按默认值运行）: {0}");
-        put(en, zh, "alert.log.rawconfig-failed",
-            "failed to read the extended configuration (all defaults in use): {0}",
-            "扩展配置读取失败（全部使用默认值）: {0}");
         put(en, zh, "alert.log.cycle-failed", "check cycle failed: {0}", "本轮检查失败: {0}");
 
         // ==================== 控制台状态机诊断日志 ====================
@@ -504,9 +479,10 @@ public final class AlertMessages {
         put(en, zh, "daily.zone.differs",
             " (the system timezone is {0}; the two differ)",
             "（系统时区为 {0}，二者不同）");
-        put(en, zh, "daily.log.zone-read-failed",
-            "failed to read the timezone setting (falling back to the system timezone): {0}",
-            "时区配置读取失败（改用系统时区）: {0}");
+        // 注：此处原有 daily.log.zone-read-failed（"读盘失败→改用系统时区"）。时区改为从
+        // ConfigManager 的配置快照读取后，这条读盘路径不复存在——快照读取不会抛出，
+        // 真正需要点名的只剩"值不是合法 IANA 名"（下面的 daily.log.zone-bad）。
+        // 留着一条永远不会被触发的键，只会让下一个人以为还有一条 IO 失败路径要处理。
         put(en, zh, "daily.log.zone-bad",
             "alerts.daily-summary.timezone=\"{0}\" is not recognized "
                 + "(an IANA name such as Asia/Shanghai is required); using the system timezone {1}",

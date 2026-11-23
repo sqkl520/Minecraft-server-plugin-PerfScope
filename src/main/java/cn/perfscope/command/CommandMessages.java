@@ -188,7 +188,7 @@ public final class CommandMessages {
         put(en, zh, "cmd.world.dimension-label", "Dimension: ", "维度: ");
         put(en, zh, "cmd.world.entities-label", "Entities: ", "实体数: ");
         put(en, zh, "cmd.world.force-loaded-label", "Force-loaded chunks: ", "强加载区块: ");
-        put(en, zh, "cmd.world.tile-entities-label", "Tile entities: ", "Tile Entity: ");
+        put(en, zh, "cmd.world.tile-entities-label", "Tile entities: ", "方块实体: ");
         put(en, zh, "cmd.world.players-label", "Players in world: ", "世界内玩家: ");
         put(en, zh, "cmd.world.threshold-label", "Entity alert thresholds: ", "实体告警阈值: ");
         put(en, zh, "cmd.world.thresholds-value", "Warn={0} Crit={1}", "Warn={0} Crit={1}");
@@ -197,7 +197,7 @@ public final class CommandMessages {
         put(en, zh, "cmd.redstone.offline",
             "Redstone tracking was retired in v1.1 (it had been an empty implementation)",
             "红石追踪在 v1.1 已下线（此前为空实现）");
-        put(en, zh, "cmd.tileentities.total-label", "Total tile entities: ", "总 Tile Entity: ");
+        put(en, zh, "cmd.tileentities.total-label", "Total tile entities: ", "方块实体总数: ");
 
         // ==================== 运行时间 ====================
         put(en, zh, "cmd.uptime.label", "Uptime: ", "运行时间: ");
@@ -625,7 +625,7 @@ public final class CommandMessages {
         put(en, zh, "cmd.help.redstone.display", "/perfscope redstone", "/perfscope redstone");
         put(en, zh, "cmd.help.redstone.desc", "Redstone activity (retired)", "红石活动（已下线）");
         put(en, zh, "cmd.help.tileentities.display", "/perfscope tileentities [world]", "/perfscope tileentities [世界]");
-        put(en, zh, "cmd.help.tileentities.desc", "Tile entity statistics", "Tile Entity 统计");
+        put(en, zh, "cmd.help.tileentities.desc", "Tile entity statistics", "方块实体统计");
         put(en, zh, "cmd.help.uptime.display", "/perfscope uptime", "/perfscope uptime");
         put(en, zh, "cmd.help.uptime.desc", "Server runtime", "运行时间");
         put(en, zh, "cmd.help.history.display", "/perfscope history", "/perfscope history");

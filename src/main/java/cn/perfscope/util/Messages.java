@@ -115,8 +115,28 @@ public final class Messages {
      */
     private static final String LANGUAGE_KEY = "language";
 
-    /** 占位符：只认 {@code {数字}}，其余花括号一律按字面量处理。 */
-    private static final Pattern PLACEHOLDER = Pattern.compile("\\{(\\d+)\\}");
+    /**
+     * 占位符：只认 {@code {数字}}，其余花括号一律按字面量处理。
+     *
+     * <p>{@code (?:0|[1-9]\d*)} 而不是 {@code \d+}：<b>拒绝前导零</b>。{@code {01}} 这种形态
+     * 一律按字面量原样保留，不被当成 {@code {1}}。</p>
+     *
+     * <p><b>为什么选"拒绝"而不是"容忍并归一化"</b>（P3 的决定）：</p>
+     * <ol>
+     *   <li><b>两种写法的语义不可能都成立</b>。若运行时把 {@code {01}} 当 {@code {1}}，
+     *       那么同一段文案里 {@code {0}} 与 {@code {00}} 就是同一个槽位——而一个写得出
+     *       {@code {00}} 的人，本意几乎总是"第 0 个参数"，不是"特意写两位数字"。
+     *       容忍它等于把一个笔误静默变成一次成功的替换，用户永远看不到自己写错了。</li>
+     *   <li><b>门禁的职责是"报告"，不是"猜测"</b>。{@code check-i18n.mjs} 的
+     *       {@code placeholderSet()} 用 {@code /\{(\d+)\}/} 抽占位符，它<b>分不清</b>
+     *       {@code {00}} 与 {@code {0}} 是不是同一个槽位。归一化只会把这个歧义埋进门禁内部；
+     *       拒绝则让"两种写法不同"这件事实在运行时也成立，门禁与实现从此同口径。</li>
+     *   <li><b>保留原样比抛异常更有用</b>。消息层的设计目标是"永不抛异常"，所以这里不抛：
+     *       {@code {01}} 会像 {@code {not-a-placeholder}} 一样原样出现在界面上——
+     *       一眼看得见的笔误，比一个"看起来对"的渲染结果容易修得多。</li>
+     * </ol>
+     */
+    private static final Pattern PLACEHOLDER = Pattern.compile("\\{(0|[1-9]\\d*)\\}");
 
     /** 无参调用的共享空数组（避免每次 {@link #get(String)} 都分配）。 */
     private static final Object[] NO_ARGS = new Object[0];
@@ -271,8 +291,8 @@ public final class Messages {
         zh.put("cmd.section.worlds", "=== 世界列表 ===");
         zh.put("cmd.section.world", "=== 世界详情 - {0} ===");
         zh.put("cmd.section.redstone", "=== 红石活动 ===");
-        zh.put("cmd.section.tileentities", "=== Tile Entity 统计 ===");
-        zh.put("cmd.section.tileentities.world", "=== Tile Entity 统计 - {0} ===");
+        zh.put("cmd.section.tileentities", "=== 方块实体统计 ===");
+        zh.put("cmd.section.tileentities.world", "=== 方块实体统计 - {0} ===");
         zh.put("cmd.section.uptime", "=== 服务器运行信息 ===");
         zh.put("cmd.section.history", "=== 历史摘要 ===");
         zh.put("cmd.section.diagnose", "=== 智能诊断 ===");
@@ -498,7 +518,23 @@ public final class Messages {
      */
     public static synchronized void load(PerfScope plugin) {
         if (plugin == null) {
-            snapshot = new Snapshot(DEFAULT_LOCALE, EN_DEFAULTS, Map.of());
+            // 无插件环境（单测 / 早期初始化）只意味着"读不到配置与覆盖文件"，不意味着"退回基础表"。
+            //
+            // 修（P1）：这里原本发布的是 EN_DEFAULTS —— 那是静态块里手写的 85 个基础键；
+            // 模块表（cmd.* / alert.* / report.* / diag.* / config.* / run.*）要等
+            // mergeModules() 才并进 BUILTIN_MUTABLE。于是 load(null) 把 730 个模块键整批丢掉，
+            // 任何 Messages.get() 都退化成返回键名本身。
+            //
+            // 为什么不能以"真实启动路径不会传 null"放过：这条分支正是无 Bukkit 环境下
+            // 初始化消息层的唯一入口（AlertFixtures.initMessages / TaskHandleContractTest 都写着
+            // "只能传 null"）。85 vs 815 的差距大到足以让"注册了模块键 → load 之后仍能取到值"
+            // 这件本应成立的事在测试里永远不成立，于是依赖渲染文案的断言只能退成"断言键名"。
+            //
+            // touchModules()/mergeModules() 必须一起跑：只换表引用而不合并，结果与改之前一样。
+            // 这两个方法内部各自幂等（modulesLoaded 标记 + 已合并时直接返回），重复调用无副作用。
+            touchModules();
+            mergeModules();
+            snapshot = new Snapshot(DEFAULT_LOCALE, defaultsOf(DEFAULT_LOCALE), Map.of());
             return;
         }
         // 9D Phase 1：先把各模块的文案表合并进来，再决定语言快照——
@@ -1130,6 +1166,30 @@ public final class Messages {
      */
     public static Set<String> keys() {
         return snapshot.defaults().keySet();
+    }
+
+    /**
+     * 取某语言的<b>内置默认</b>值（不经用户覆盖，与当前生效语言无关）。
+     *
+     * <p><b>为什么需要这个口子</b>：{@link #get} 只回答"当前语言下显示什么"。而校验"两种语言的
+     * 文案是否各自合格"（术语一致性、中文值里有没有夹英文标识符、占位符是否两边对称）
+     * 必须能分别取到 en 与 zh 两份原文——先把语言切到中文再断言，会因 surefire 复用同一 JVM
+     * 而污染后续测试，且一次只能看一种语言。</p>
+     *
+     * <p>它是公开 API 而不是测试用的私有反射：{@code check-i18n.mjs} 与未来的诊断工具
+     * （例如 {@code /perfscope status} 里"哪条键只有一种语言"的自检）都可以用同一个入口，
+     * 避免各自复制一份"从 BUILTIN_MUTABLE 里挖表"的逻辑。</p>
+     *
+     * @param locale {@code en} / {@code zh}（其它值按默认语言处理）
+     * @param key    文案键
+     * @return 该语言的内置值；键不存在时返回 {@code null}（与 {@link #get} 的"回退到键名"不同：
+     *         这里必须能区分"没有这个键"与"值就是键名"）
+     */
+    public static String builtin(String locale, String key) {
+        if (key == null) {
+            return null;
+        }
+        return defaultsOf(normalizeLocale(locale)).get(key);
     }
 
     /** 两级回退 + 占位符替换。所有异常都被收敛为"返回可读文本"。 */

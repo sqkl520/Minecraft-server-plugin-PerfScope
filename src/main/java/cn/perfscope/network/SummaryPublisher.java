@@ -5,6 +5,7 @@ import cn.perfscope.compat.SchedulerAdapter;
 import cn.perfscope.config.ConfigManager;
 import cn.perfscope.metrics.MetricsCollector;
 import cn.perfscope.metrics.MetricsSnapshot;
+import cn.perfscope.util.DurationFormat;
 import cn.perfscope.util.Messages;
 import com.google.gson.Gson;
 import org.bukkit.Bukkit;
@@ -156,7 +157,31 @@ public final class SummaryPublisher {
         /** 是保留字 {@link #RESERVED_SERVER_ID}。 */
         RESERVED,
         /** 去掉首尾空白后仍超过 {@link #MAX_SERVER_ID_LENGTH}。 */
-        TOO_LONG
+        TOO_LONG,
+        /**
+         * 含控制符（C0 / C1 / DEL）或 {@code §}（U+00A7）。
+         *
+         * <p><b>为什么必须是"拒发"而不是"剔除后照发"</b>：代理侧 {@code SummaryPacket.sanitize}
+         * 会把这类字符<b>剔除</b>，于是 {@code "survival\u0007"} 在面板上变成 {@code "survival"}——
+         * 与另一台真正叫 {@code survival} 的后端撞在同一个 key 上。那不只是显示问题：
+         *
+         * <ol>
+         *   <li><b>伪造包可以先抢注。</b>{@code NetworkView} 按 serverId 存包，后到者覆盖先到者。
+         *       {@code SourceBinder} 又把 id 钉在第一条来源上。于是先到的 {@code "survival\u0007"}
+         *       与真正的 {@code "survival"} 塌成同一个 id，真后端随后被判 {@code REJECT_SQUAT}
+         *       而<b>永久丢包</b>——一台合法后端被一条畸形配置顶掉。</li>
+         *   <li><b>配的名字在面板上不存在。</b>{@code "§csurvival"} 显示成 {@code "csurvival"}，
+         *       服主对着 config.yml 找不到对应行。</li>
+         *   <li><b>两个不同的配置塌成一个 key</b>：{@code "ab"} 与 {@code "a\u0007b"} 同 id，
+         *       后到者覆盖先到者的数据。</li>
+         * </ol>
+         *
+         * <p>剔除在代理侧仍然保留（防的是<b>外来包</b>：别的插件塞进同一通道的垃圾、
+         * 被入侵的后端）。两端不是"做同一件事"，而是<b>同一条判据</b>：
+         * 代理把不合格的输入拿掉后继续用，后端拒绝发送不合格的配置并点名原因。
+         * 后者唯一多做的事是"说清楚"，因为配错是服主能修的问题，而伪造包不是。</p>
+         */
+        UNSAFE_CHARS
     }
 
     /**
@@ -286,8 +311,8 @@ public final class SummaryPublisher {
             // 留档给 /perfscope status：警告只在启动那一瞬间可见，翻过去就查不到了。
             registrationFailureReason = e.getClass().getSimpleName()
                 + (e.getMessage() == null ? "" : ": " + e.getMessage());
-            plugin.getLogger().warning("[PerfScope] 登记跨服通道失败，network 功能不可用："
-                + registrationFailureReason);
+            plugin.getLogger().warning(Messages.get("network.log.register-failed",
+                registrationFailureReason));
             return false;
         }
     }
@@ -368,11 +393,10 @@ public final class SummaryPublisher {
             long warnNow = System.currentTimeMillis();
             if (warnNow - lastClockRollbackWarnAtMs > WARN_INTERVAL_MS) {
                 lastClockRollbackWarnAtMs = warnNow;
-                plugin.getLogger().warning("[PerfScope] 检测到系统时钟回拨 "
-                    + formatDuration(backwardsMs) + "（上次上报时刻晚于当前时间）。"
-                    + "已重置上报节流基准并继续发送。常见原因：虚拟机从快照恢复、容器迁移、"
-                    + "NTP 大步校正、宿主机挂起后恢复。若不重置，跨服摘要会一直停发到墙钟"
-                    + "追回原时间点为止，而代理侧只会显示「数据过期」。");
+                // 时长片段走 DurationFormat（中英双表），本句骨架走消息表——
+                // 片段拼接会让英文语序散架，所以时长也作为参数传入。
+                plugin.getLogger().warning(Messages.get("network.log.clock-rollback",
+                    formatDuration(backwardsMs)));
             }
             // 同时重置语义串：回拨后 collectedAt 也跟着倒退，若不重发，接收方算出的
             // 数据年龄会是负值（被 clamp 成 0，看着"很新"），掩盖真实情况。
@@ -423,54 +447,33 @@ public final class SummaryPublisher {
             long failNow = System.currentTimeMillis();
             if (failNow - lastSendFailWarnAtMs > WARN_INTERVAL_MS) {
                 lastSendFailWarnAtMs = failNow;
-                plugin.getLogger().warning("[PerfScope] 跨服摘要发送失败（连续第 "
-                    + consecutiveSendFailures + " 次；同类日志每 "
-                    + (WARN_INTERVAL_MS / 1000L) + " 秒最多一条）："
-                    + e.getClass().getSimpleName() + ": " + e.getMessage());
+                plugin.getLogger().warning(Messages.get("network.log.send-failed",
+                    consecutiveSendFailures, WARN_INTERVAL_MS / 1000L,
+                    e.getClass().getSimpleName() + (e.getMessage() == null ? "" : ": " + e.getMessage())));
             }
             return Result.FAILED;
         }
     }
 
     /**
-     * 把毫秒差渲染成"1 天 2 小时 3 分"这种可读形式，用于时钟回拨告警。
+     * 把毫秒差渲染成"1 天 2 时"这种可读形式，用于时钟回拨告警。
      *
      * <p>裸毫秒数（{@code 3600000}）在告警里等于没说——服主无法一眼判断揪出的是 1 小时还是 1 天。
-     * 只取最大的两个单位：回拨 1 天 23 分 11 秒时，"1 天 23 分钟"足够定位，再精确也没有行动价值。</p>
+     * 只取最大的两个非零单位：回拨 1 天 23 分 11 秒时，"1 天 23 分"足够定位，再精确也没有行动价值。</p>
      *
-     * <p>不做 i18n：这是 Duration 的渲染，与 {@code DurationFormat} 的既有口径同源；
-     * 调用点只有一处，且它产出的片段嵌在一条已经本地化的句子中间。</p>
+     * <p><b>为什么不再自带一份单位表</b>：这里原有一份 {@code {" 天"," 小时"," 分"," 秒"}} 的
+     * 中文字面量，注释写着"不做 i18n：与 DurationFormat 的既有口径同源"。但这段片段会被拼进
+     * 一条<b>已经本地化</b>的句子（见 {@code network.log.clock-rollback}），英文界面下必然混排：
+     * 整句英文里夹着"1 小时"。单位的唯一出口是 {@link DurationFormat}——它有中英双表并按
+     * {@code Messages.activeLocale()} 切换，本类只负责给出毫秒数与精度窗口。</p>
+     *
+     * <p>保留这个方法（而不是让调用点直接写 {@code DurationFormat.elapsed}）：调用点在同一行
+     * 里还要拼其它参数，一个语义化的名字比"elapsed(ms, 2)"更容易读懂；同时这条是
+     * {@code PublisherClockRollbackTest} 的既有观测点。</p>
      */
     static String formatDuration(long ms) {
-        long totalSeconds = Math.max(0L, ms) / 1000L;
-        long days = totalSeconds / 86_400L;
-        long hours = (totalSeconds % 86_400L) / 3_600L;
-        long minutes = (totalSeconds % 3_600L) / 60L;
-        long seconds = totalSeconds % 60L;
-
-        long[] values = {days, hours, minutes, seconds};
-        String[] units = {" 天", " 小时", " 分", " 秒"};
-        StringBuilder sb = new StringBuilder();
-        // 只取**前两个非零**单位：回拨 1 天 23 分 11 秒时 "1 天 23 分" 足够定位，
-        // 再精确也没有行动价值；而写成 "1 天 0 小时 0 分 3 秒" 这种尾部噪音会让人
-        // 误以为精度很重要。用"前两个非零"而不是"前两级"是因为后者会输出 "1 天 0 小时"。
-        int taken = 0;
-        for (int i = 0; i < values.length && taken < 2; i++) {
-            if (values[i] == 0L) {
-                continue;
-            }
-            if (taken > 0) {
-                sb.append(' ');
-            }
-            sb.append(values[i]).append(units[i]);
-            taken++;
-        }
-        // 全零（或不足 1 秒）：必须给一个数，不能返回空串——告警里出现"检测到时钟回拨 （上次…）"
-        // 这种空洞比不写还难读。
-        if (sb.length() == 0) {
-            return "0 秒";
-        }
-        return sb.toString();
+        // 窗口 2：回拨 1 天 23 分 11 秒 → "1 天 23 分"，再精确没有行动价值
+        return DurationFormat.elapsed(ms, 2);
     }
 
     /**
@@ -670,9 +673,7 @@ public final class SummaryPublisher {
         long now = System.currentTimeMillis();
         if (now - lastIdWarnAtMs > WARN_INTERVAL_MS) {
             lastIdWarnAtMs = now;
-            plugin.getLogger().warning("[PerfScope] network.server-id 未配置，已自动派生为 \""
-                + derived + "\"。多后端环境下每台必须显式配一个不同的值，"
-                + "否则代理侧会把它们的数据混成一条。");
+            plugin.getLogger().warning(Messages.get("network.log.server-id-derived", derived));
         }
         return derived;
     }
@@ -681,18 +682,28 @@ public final class SummaryPublisher {
      * 判定一条 {@code server-id} 能不能发出去。
      *
      * <p><b>纯函数、不依赖 Bukkit</b>：这是本类唯一值得逐条单测的判据，也是与代理侧
-     * {@code SummaryPacket.parse} 必须逐字对称的那一半。做成静态是因为测试只需要它，
+     * {@code SummaryPacket.sanitize} 必须逐字对称的那一半。做成静态是因为测试只需要它，
      * 不需要构造一个 {@link PerfScope}。</p>
      *
-     * <p>顺序有讲究：先判空白（调用方本来就会降级，不告警），再判保留字，最后判长度。
-     * 反过来先判长度的话，一个 70 字符的保留字会被报成"超长"——服主改成 60 字符的
-     * {@code unknown} 还是发不出去，白跑一轮。</p>
+     * <p>顺序有讲究：先判空白（调用方本来就会降级，不告警），再判控制符，再判保留字，
+     * 最后判长度。理由分别是：</p>
+     * <ul>
+     *   <li>空白先判：{@code null} / 纯空白是"留空 = 回退"，不是错误。</li>
+     *   <li>控制符先于保留字：{@code "unknown\u0007"} 剔除后<b>就是</b>保留字，先报"含非法字符"
+     *       才能让服主直接看到那个不可见字符；报成"是保留字"他会盯着 {@code unknown} 发愣。</li>
+     *   <li>保留字先于长度：反过来一个 70 字符的保留字会被报成"超长"，服主改成 60 字符的
+     *       {@code unknown} 还是发不出去，白跑一轮。</li>
+     * </ul>
      *
      * @param raw 配置原值（可为 {@code null}）
      */
     public static ServerIdVerdict validateServerId(String raw) {
         if (raw == null || raw.isBlank()) {
             return ServerIdVerdict.BLANK;
+        }
+        String cleaned = stripUnsafeChars(raw);
+        if (cleaned.length() != raw.length()) {
+            return ServerIdVerdict.UNSAFE_CHARS;
         }
         String trimmed = raw.trim();
         // 保留字必须区分大小写地判：代理侧那条判据是 "unknown".equals(...)，
@@ -706,6 +717,53 @@ public final class SummaryPublisher {
             return ServerIdVerdict.TOO_LONG;
         }
         return ServerIdVerdict.OK;
+    }
+
+    /**
+     * 按代理侧 {@code SummaryPacket.sanitize} 的**同一判据**剔除危险字符。
+     *
+     * <p>判据本身：{@link Character#isISOControl(char)}（覆盖 C0 0x00–0x1F 与 C1 0x80–0x9F，
+     * <b>DEL 0x7F 也在其中</b>，JDK 实测）+ {@code §}（U+00A7，legacy 格式码前缀）。</p>
+     *
+     * <p><b>为什么这里"剔除"而不是"只判与否"</b>：{@link #validateServerId} 需要知道
+     * "剔除后长度有没有变"来判断是否含非法字符，直接用 {@code cleaned.length() != raw.length()}
+     * 比再写一遍 {@code isUnsafeChar} 更不可能漂移——判据只有一份，两种用法共用。
+     * 代理侧 {@code sanitize} 是同一个算法（那边保留剔除后的串继续用，这边用来判拒）。</p>
+     *
+     * <p>刻意<b>不</b>剔除其它不可见/易混淆字符（零宽空格、RTL override、同形字）：
+     * 代理侧也没删它们，两端判据必须逐字一致，单边加严会造成"后端拒发、代理收得下"——
+     * 那正是 P1-C 修掉的那类分裂。加严要两边一起做，属于单独的协议变更。</p>
+     */
+    static String stripUnsafeChars(String raw) {
+        if (raw == null || raw.isEmpty()) {
+            return raw;
+        }
+        StringBuilder sb = new StringBuilder(raw.length());
+        for (int i = 0; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            if (!isUnsafeChar(c)) {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 这个字符该不该出现在 {@code server-id} 里。
+     *
+     * <p><b>必须与代理侧 {@code SummaryPacket.isUnsafeChar} 逐字一致</b>：那边是
+     * {@code Character.isISOControl(c) || c == '\u007F' || c == '§'}。这里写一样的三条
+     * （DEL 那条在 JDK 里其实已被 {@code isISOControl} 覆盖，见 {@link #stripUnsafeChars}
+     * 的实测说明；保留显式的第二条是为了在有人改写第一行时不至于静默放宽）。</p>
+     */
+    private static boolean isUnsafeChar(char c) {
+        if (Character.isISOControl(c)) {
+            return true;
+        }
+        if (c == '\u007F') {
+            return true;
+        }
+        return c == '§';
     }
 
     /**
@@ -732,13 +790,65 @@ public final class SummaryPublisher {
         lastIdWarnAtMs = now;
         // 长度类告警要报出真实字符数：只写"超长"时，服主不知道要砍掉多少。
         int actualLen = value == null ? 0 : value.trim().length();
-        String text = verdict == ServerIdVerdict.RESERVED
-            ? Messages.get("config.check.network-server-id-reserved",
-                key, value == null ? "" : value.trim(), RESERVED_SERVER_ID)
-            : Messages.get("config.check.network-server-id-too-long",
-                key, value == null ? "" : value.trim(), String.valueOf(actualLen),
-                String.valueOf(MAX_SERVER_ID_LENGTH));
+        String shownValue = value == null ? "" : value.trim();
+        String text;
+        switch (verdict) {
+            case RESERVED:
+                text = Messages.get("config.check.network-server-id-reserved",
+                    key, shownValue, RESERVED_SERVER_ID);
+                break;
+            case UNSAFE_CHARS:
+                // 控制符本身在日志里是不可见的（BEL 会响铃、ESC 会吞字符），所以文案里
+                // 必须给出**码点**而不是原样拼接——否则这条告警看起来像"配了一个普通名字
+                // 却被拒"，服主完全无从下手。原因见 ServerIdVerdict#UNSAFE_CHARS。
+                text = Messages.get("config.check.network-server-id-unsafe-chars",
+                    key, describeUnsafeChars(shownValue));
+                break;
+            default:
+                text = Messages.get("config.check.network-server-id-too-long",
+                    key, shownValue, String.valueOf(actualLen),
+                    String.valueOf(MAX_SERVER_ID_LENGTH));
+                break;
+        }
         plugin.getLogger().warning("[PerfScope] " + text);
+    }
+
+    /**
+     * 把 {@code server-id} 里的不可见/危险字符列成码点，供告警使用。
+     *
+     * <p>为什么必须换成码点：{@code \u0007}（BEL）在控制台里不可见且会让终端响铃，
+     * {@code \u001B}（ESC）会吞掉后续字符。把原值直接拼进日志，服主看到的是
+     * "配置了一个看起来完全正常的名字却被拒"——这是最没法自查的一种告警。</p>
+     *
+     * <p>去重后按出现顺序列出（{@code "survival\u0007\u0007"} 只报一次 U+0007），
+     * 最多列 8 个：一个配了几十个控制符的值不需要全列，让服主知道"有这类字符"就够，
+     * 他改的是名字本身而不是逐个字符。</p>
+     */
+    public static String describeUnsafeChars(String value) {
+        if (value == null || value.isEmpty()) {
+            // 必须给一个明确的占位而不是空串：空串会让告警变成
+            // "含 server-id 不允许的字符（）"——读者会以为渲染坏了。
+            return "（无）";
+        }
+        StringBuilder sb = new StringBuilder();
+        java.util.Set<Integer> seen = new java.util.LinkedHashSet<>();
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (!isUnsafeChar(c) || !seen.add((int) c)) {
+                continue;
+            }
+            if (sb.length() > 0) {
+                sb.append("、");
+            }
+            sb.append(String.format("U+%04X", (int) c));
+            if (seen.size() >= 8) {
+                // 达到上限就停：一个配了几十个控制符的值不需要全列，
+                // 让服主知道"有这类字符"就够，他改的是名字本身而不是逐个字符。
+                sb.append(" 等");
+                break;
+            }
+        }
+        return sb.length() == 0 ? "（无）" : sb.toString();
     }
 
     /**
