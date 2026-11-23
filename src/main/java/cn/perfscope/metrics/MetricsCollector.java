@@ -1907,11 +1907,11 @@ public class MetricsCollector {
             snap.msptAvg = stats.avgMs();
             snap.msptMin = stats.minMs();
             snap.msptMax = stats.maxMs();
-            if (stats.hasSamples()) {
+            if (tickTimesCollectedSamples(stats)) {
                 snap.msptSource = MetricsSnapshot.MSPT_SOURCE_TICK_TIMES;
             } else {
-                // 方法在、调用成功、但一个有效 tick 都没采到 —— 这是"采集失败"，不是"读数为 0"。
-                // msptSource 保持 UNKNOWN，使展示层不会把它当成任何"精确/估算"路径。
+                // 判据抽在 tickTimesCollectedSamples 里，因为本方法第一行就要 Bukkit，
+                // 测试进不来；留在内联 if 里的话，删掉或写反这一行没有任何测试会红。
                 markMsptCollectFailed(snap);
             }
         } catch (Exception e) {
@@ -2019,7 +2019,7 @@ public class MetricsCollector {
             snap.msptMax = -1;
             snap.msptSource = MetricsSnapshot.MSPT_SOURCE_AVG_TICK;  // 路径确实是二级，坏的是数据
             snap.msptAvg = sanitizeAvgTick(mspt);
-            if (snap.msptAvg <= 0) {
+            if (!avgTickIsUsable(snap.msptAvg)) {
                 markMsptCollectFailed(snap);
             }
         } catch (Exception e) {
@@ -2106,6 +2106,37 @@ public class MetricsCollector {
         if (System.currentTimeMillis() - startedAtMs <= WARMUP_WINDOW_MS) {
             snap.warmingUp.add(MetricsSnapshot.MODULE_MSPT);
         }
+    }
+
+    /**
+     * 一级路径（{@code getTickTimes}）本轮采到的样本算不算“采集成功”。
+     *
+     * <p><b>为什么把它抽出来</b>：真正的 bug 修复在 {@code collectMSPT_Paper} 里的那个
+     * {@code if}，而那个方法的**第一行**就是 {@code Bukkit.getServer()}——测试 JVM 进不去
+     * （见 {@code tools/KNOWN-TEST-LIMITS.md}）。于是“调用 {@code markMsptCollectFailed}”
+     * 这个动作本身没有任何测试：把那一行删掉、或把判据写反，994 个用例全绿，P1-S3 原样回来。
+     *
+     * <p>抽成纯函数之后，判据本身可测；调用点剩下的只有“把结果交给
+     * {@link #markMsptCollectFailed}”这一句。</p>
+     *
+     * @param stats {@link #reduceTickTimes} 的结果；{@code null} 视为没有样本
+     * @return {@code true} = 有有效样本，走正常路径；{@code false} = 采集失败
+     */
+    static boolean tickTimesCollectedSamples(MsptStats stats) {
+        // 方法在、调用成功、但一个有效 tick 都没采到 —— 这是“采集失败”，不是“读数为 0”。
+        return stats != null && stats.hasSamples();
+    }
+
+    /**
+     * 二级路径（{@code getAverageTickTime}）拿到的平均值算不算可用读数。
+     *
+     * <p>判据是 {@code > 0} 而不是 {@code >= 0}：0 与负数都是 {@link #sanitizeAvgTick}
+     * 拒收的形状（未填充、除零、NaN 转换的结果）。用 {@code <= -999} 之类的宽判据会
+     * 让“恰好 0”漏过去，于是 {@code /ps} 说“未知”而 {@code /ps status} 说“正常”——
+     * 正是 P1-S3 本身。</p>
+     */
+    static boolean avgTickIsUsable(double mspt) {
+        return mspt > 0 && !Double.isNaN(mspt) && !Double.isInfinite(mspt);
     }
 
     // ==================== 玩家 ====================
