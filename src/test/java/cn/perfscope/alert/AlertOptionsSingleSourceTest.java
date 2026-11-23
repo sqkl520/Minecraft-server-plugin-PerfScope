@@ -336,7 +336,7 @@ class AlertOptionsSingleSourceTest {
         assertEquals("UTC", optionsString(svc, "dailyTimezone"));
 
         // DailySummaryService 侧（构造器会调 refreshZone）
-        DailySummaryService daily = dailyServiceWith(cm);
+        DailySummaryService daily = dailyServiceWith(cm, dir);
         assertEquals(java.time.ZoneId.of("UTC"), TestObjects.getField(
             DailySummaryService.class, daily, "cachedZone"),
             "the daily summary must resolve its zone from ConfigData, not from config.yml");
@@ -384,11 +384,17 @@ class AlertOptionsSingleSourceTest {
         return svc;
     }
 
-    /** {@link DailySummaryService} 的构造器只赋字段（不启动任务），可以直接 new。 */
-    private static DailySummaryService dailyServiceWith(ConfigManager cm) throws Exception {
+    /**
+     * {@link DailySummaryService} 的构造器只赋字段（不启动任务），可以直接 new。
+     *
+     * <p>{@code dataDir} 由调用方传入（用例的 {@code @TempDir}），本方法只在其下开子目录。
+     * 原实现自己 {@code Files.createTempDirectory("pscope-daily-zone")}，那个目录永远不会被删除；
+     * 交给 JUnit 之后，删除失败会以 ERROR 的形式暴露，而不是静默留在 {@code %TEMP%} 里。</p>
+     */
+    private static DailySummaryService dailyServiceWith(ConfigManager cm, Path dataDir) throws Exception {
         PerfScope p = pluginOf(cm);
         TestObjects.setField(PerfScope.class, p, "dataFolder",
-            Files.createTempDirectory("pscope-daily-zone").toFile());
+            Files.createTempDirectory(dataDir, "pscope-daily-zone").toFile());
         return new DailySummaryService(p, null, null);
     }
 

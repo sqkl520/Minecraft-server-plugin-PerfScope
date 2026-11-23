@@ -7,9 +7,13 @@ package cn.perfscope.alert;
 
 import cn.perfscope.metrics.MetricsSnapshot;
 import cn.perfscope.support.TestObjects;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -59,19 +63,43 @@ class MissingLevelKeyIsNotRecoveryTest {
     private static final String KEY = "mspt:global";
     private static final String MODULE = MetricsSnapshot.MODULE_MSPT;
 
+    /**
+     * 本用例创建的夹具。<b>用例级</b>：每个用例从空表开始，看不到上一个用例的残留。
+     */
+    private final List<AlertServiceStateMachineFixture> fixtures = new ArrayList<>();
+
     @BeforeAll
     static void initMessages() throws Exception {
         AlertServiceStateMachineFixture.initMessages();
     }
 
-    private static AlertServiceStateMachineFixture fixture() throws Exception {
-        return AlertServiceStateMachineFixture.builder()
+    /** 先查上一个测试类有没有留下"建了却没关"的夹具（漏写 @AfterEach 的唯一发现点）。 */
+    @BeforeEach
+    void checkNoLeftoverFromPreviousClass() {
+        AlertServiceStateMachineFixture.assertNoLeaks("MissingLevelKeyIsNotRecoveryTest");
+    }
+
+    /**
+     * 用例结束（无论通过/失败/抛异常）统一删除本用例建过的临时数据目录。
+     *
+     * <p>删除失败不吞掉：夹具把这些失败汇总成一条 {@link AssertionError}，
+     * 本用例随即报红并带上路径。</p>
+     */
+    @AfterEach
+    void deleteTempDataDirs() {
+        AlertServiceStateMachineFixture.closeAll(fixtures);
+    }
+
+    private AlertServiceStateMachineFixture fixture() throws Exception {
+        AlertServiceStateMachineFixture f = AlertServiceStateMachineFixture.builder()
             .cooldownSeconds(0)        // 冷却与被测行为无关，关掉免得干扰推送计数
             .debounceCycles(1)
             .flapWindowSeconds(0)
             .refireSeconds(0)
             .recoveryCycles(RECOVERY_CYCLES)
             .build();
+        fixtures.add(f);
+        return f;
     }
 
     /** 造一份"本周期什么都没判定"的快照：{@code alertLevels} 空、{@code unavailable} 可为空。 */

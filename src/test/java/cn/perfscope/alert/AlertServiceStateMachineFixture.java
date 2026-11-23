@@ -12,12 +12,20 @@ import cn.perfscope.support.AlertFixtures;
 import cn.perfscope.support.TestObjects;
 
 import java.io.File;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.LocalDate;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.AbstractExecutorService;
@@ -61,9 +69,31 @@ import java.util.logging.Logger;
  * <p><b>绝不调用 {@code loadState()}</b>：保持 {@code stateLoaded=false}，
  * 这样 {@code persistState()} 直接早退，测试不会碰磁盘状态文件、也不会读到旧快照。</p>
  *
+ * <p><b>这个前提与 {@link #close()} 不冲突</b>：本夹具仍不读、不写状态文件；
+ * {@code close()} 只删除构造时创建的那个数据目录，不触碰 {@code stateLoaded}
+ * 也不调用 {@code loadState()}／{@code persistState()}。</p>
+ *
  * <p>{@code serverTag} 预置为字面量，{@code serverTag()} 因此永不触达 {@code Bukkit}。</p>
+ *
+ * <h2>临时目录的所有权：谁创建谁清理</h2>
+ *
+ * <p>构造器会 {@code Files.createTempDirectory("pscope-alert-fixture…")} 建一个数据目录
+ * （{@code AlertService} 的 {@code persistState()} / {@code alerts.jsonl} 都挂在它下面）。
+ * 此前没有任何人删除它——每次全量测试留下几十个目录。</p>
+ *
+ * <p>本夹具选择<b>自己删自己建的</b>（而不是"使用者负责"）：</p>
+ * <ul>
+ *   <li>目录是本类的构造器建的，创建点与删除点关在同一个类里，不存在"忘了配对"的可能；</li>
+ *   <li>使用者无从知道该删什么——{@code plugin.getDataFolder()} 是反射注入进去的，
+ *       调用方拿到的 {@code plugin()} 才看得到那个路径，要求每个调用方都记住去删，
+ *       就等于把这条不变量复制成 3 份（当前 3 个类会实例化本夹具、共 24 处 {@code build()}）。</li>
+ * </ul>
+ *
+ * <p>代价是调用方必须让清理真的发生。为此本类实现 {@link AutoCloseable}：把夹具放进
+ * try-with-resources 或由自身的 {@code @AfterEach} 关闭。<b>刻意不注册 JVM shutdown hook</b>——
+ * 那会在整个测试进程结束时才跑，无法归因到具体用例，而"哪个用例泄漏了"正是需要知道的信息。</p>
  */
-public final class AlertServiceStateMachineFixture {
+public final class AlertServiceStateMachineFixture implements AutoCloseable {
 
     /** 夹具默认数据目录前缀（临时目录，避免污染仓库工作区）。 */
     private static final String TEMP_PREFIX = "pscope-alert-fixture";
@@ -72,6 +102,25 @@ public final class AlertServiceStateMachineFixture {
     private final PerfScope plugin;
     private final ConfigManager configManager;
     private final ConfigManager.ConfigData config;
+
+    /** 构造时创建的数据目录。{@link #close()} 是它唯一的删除点（谁创建谁清理）。 */
+    private final Path dataDir;
+
+    /**
+     * 所有<b>已创建但还没关闭</b>的夹具。用于在用例结束时发现"忘记登记清理"的测试类。
+     *
+     * <p><b>为什么需要这一层，而不只是 {@link #close()} 抛异常</b>：{@code close()} 只能发现
+     * "删除失败"，发现不了"根本没调用"。如果某个测试类忘了写 {@code @AfterEach} 调
+     * {@link #closeAll}，每个夹具都清清白白地建完就跑，{@code close()} 一次也不会执行——
+     * 目录照漏，测试照绿。变异验证确认过这个形态：把 {@code close()} 改成立刻 return，
+     * 7 个用例全绿、7 个目录留在 {@code %TEMP%}。</p>
+     *
+     * <p>所以登记放在<b>构造器</b>里（创建与登记不可分离），关闭时移除。
+     * 用法：测试类在自己的 {@code @AfterEach} 里先调 {@link #closeAll}，再调
+     * {@link #assertNoLeaks}——后者在没有 {@code @TempDir} 的类里也能用。</p>
+     */
+    private static final Set<AlertServiceStateMachineFixture> OPEN =
+        java.util.Collections.newSetFromMap(new ConcurrentHashMap<>());
 
     /** 注入进 {@link AlertService} 的同一份容器引用——种子写这边，状态机读那边。 */
     private final Map<String, Long> cooldowns;
@@ -84,7 +133,12 @@ public final class AlertServiceStateMachineFixture {
     // ==================== 构造 ====================
 
     private AlertServiceStateMachineFixture(Builder b) throws Exception {
-        File dataDir = Files.createTempDirectory(TEMP_PREFIX).toFile();
+        Path created = Files.createTempDirectory(TEMP_PREFIX);
+        this.dataDir = created;
+        File dataDir = created.toFile();
+        // 创建即登记：这样"忘了关"能被发现。登记处与创建处必须是同一行附近，
+        // 否则又会出现"造了却没记"的缝隙。
+        OPEN.add(this);
 
         PerfScope p = TestObjects.allocate(PerfScope.class);
         TestObjects.setField(PerfScope.class, p, "logger", Logger.getLogger("perfscope-alert-fixture"));
@@ -179,6 +233,123 @@ public final class AlertServiceStateMachineFixture {
 
     public AlertService service() {
         return service;
+    }
+
+    /**
+     * 关闭一批夹具，<b>并把每一条失败都汇总抛出</b>——供测试类的 {@code @AfterEach} 调用。
+     *
+     * <p><b>为什么不是简单的 {@code for (f : fixtures) f.close();}</b>：那样第一个失败就会
+     * 中断循环，剩下的夹具全都得不到清理，于是一次失败被放大成 N 个泄漏目录。
+     * 本方法对每个夹具<b>都尝试</b>关闭，收集全部失败后再一起抛。</p>
+     *
+     * <p><b>为什么抛 {@link AssertionError} 而不是打日志</b>：日志在 surefire 的
+     * {@code *-output.txt} 里，全量 994 例的输出中没人会去看；而抛异常会让
+     * <b>对应用例直接变红</b>，并在报告里带上路径。代价是"清理失败 = 用例失败"——
+     * 这个取舍是刻意的：留下垃圾本身就是需要修的问题，不是可以降级成告警的家务事。</p>
+     *
+     * <p>关闭后清空传入的列表，避免重复关闭。</p>
+     */
+    public static void closeAll(List<AlertServiceStateMachineFixture> fixtures) {
+        if (fixtures == null || fixtures.isEmpty()) {
+            return;
+        }
+        List<Throwable> failures = new ArrayList<>();
+        for (AlertServiceStateMachineFixture f : fixtures) {
+            try {
+                f.close();
+            } catch (RuntimeException | Error e) {
+                failures.add(e);
+            }
+        }
+        fixtures.clear();
+        if (failures.isEmpty()) {
+            return;
+        }
+        AssertionError aggregate = new AssertionError(
+            failures.size() + " of the temp data dirs created by this test could not be deleted"
+                + " (see the suppressed exceptions for each path)");
+        for (Throwable t : failures) {
+            aggregate.addSuppressed(t);
+        }
+        throw aggregate;
+    }
+
+    /**
+     * 断言此刻没有"建了却没关"的夹具残留。
+     *
+     * <p><b>这是上一个测试类忘记清理的唯一可靠发现点</b>。{@code closeAll} 只能在被调用时
+     * 起作用，而漏写 {@code @AfterEach} 的类根本不会调用它——那些夹具会一直留在 {@link #OPEN}
+     * 里，被<b>下一个</b>跑到本方法的测试类看到。</p>
+     *
+     * <p>因此每个建夹具的测试类都应在 {@code @BeforeEach} 里调一次本方法：它看到的是"上一个
+     * 测试类留下的账"。JUnit 同一个 JVM 里顺序执行测试类，这条链因此是连续的。</p>
+     *
+     * <p>为什么不让 {@code close()} 自己兜底报错：那个形态已经验证过——把 {@code close()}
+     * 改成立刻 return，7 个用例全绿、7 个目录留在 {@code %TEMP%}，因为压根没人调用它。
+     * 报错机制必须挂在"一定会被执行"的路径上。</p>
+     */
+    public static void assertNoLeaks(String where) {
+        if (OPEN.isEmpty()) {
+            return;
+        }
+        StringBuilder sb = new StringBuilder()
+            .append(OPEN.size())
+            .append(" AlertServiceStateMachineFixture instance(s) were created but never closed")
+            .append(" by a previously run test class (checked at ").append(where).append(").")
+            .append(" Every test that builds one must call closeAll(...) in @AfterEach;")
+            .append(" otherwise these temp data dirs leak into %TEMP%:");
+        for (AlertServiceStateMachineFixture f : OPEN) {
+            sb.append("\n  ").append(f.dataDir);
+        }
+        throw new AssertionError(sb.toString());
+    }
+
+    /**
+     * 删除构造器创建的数据目录（递归）。
+     *
+     * <p><b>为什么不吞异常</b>：删不掉意味着真的留下了垃圾，而 Windows 上「文件被占用」
+     * 是会发生的事（写线程尚未释放句柄、杀毒软件正在扫）。若在这里 {@code catch (IOException ignored)}，
+     * 泄漏会重新变回静默——正是本次要消灭的形态。所以本方法把失败包成
+     * {@link UncheckedIOException} 抛出，让它在用例层面变成一条 <b>ERROR</b>：
+     * 哪个用例、哪个路径、哪个文件删不掉，全部出现在 surefire 报告里。</p>
+     *
+     * <p>本夹具的 {@code stateWriter} 是同步执行的 {@code InlineExecutor}，写盘在上一次
+     * {@code onSnapshot} 返回时就已经关闭了文件句柄，因此正常情况下不会出现占用。
+     * 一旦出现，说明那是需要被看见的真实问题，而不是可以重试的家务事。</p>
+     *
+     * <p>幂等：重复调用时目录已不存在，直接成功。</p>
+     */
+    @Override
+    public void close() {
+        // 先出登记表：即便下面的删除失败，也已经不再是"忘了关"那种形态，
+        // 失败会由 close() 自己抛出去，不会重复报告。
+        OPEN.remove(this);
+        if (dataDir == null || !Files.exists(dataDir)) {
+            return;
+        }
+        try {
+            Files.walkFileTree(dataDir, new SimpleFileVisitor<Path>() {
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                    Files.deleteIfExists(file);
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
+                    if (exc != null) {
+                        throw exc;
+                    }
+                    Files.deleteIfExists(dir);
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+        } catch (IOException e) {
+            throw new UncheckedIOException(
+                "leaked temp data dir of " + AlertServiceStateMachineFixture.class.getSimpleName()
+                    + " could not be deleted: " + dataDir
+                    + " (a deleted-count of 0 in %TEMP% is a contract of this test suite)", e);
+        }
     }
 
     public PerfScope plugin() {

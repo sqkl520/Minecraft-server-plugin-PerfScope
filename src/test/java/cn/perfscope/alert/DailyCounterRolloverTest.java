@@ -11,10 +11,12 @@ import cn.perfscope.support.AlertFixtures;
 import cn.perfscope.support.TestObjects;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.logging.Logger;
@@ -34,6 +36,16 @@ class DailyCounterRolloverTest {
 
     private static final ZoneId SYS = ZoneId.systemDefault();
 
+    /**
+     * 本类用例的数据目录父节点。
+     *
+     * <p>原实现直接 {@code Files.createTempDirectory("pscope-rollover")}，4 个用例各留一个
+     * 永不删除的目录。改为 {@code @TempDir} 之后由 JUnit 按用例创建并递归删除；
+     * <b>删不掉会让用例报 ERROR</b>，不会静默留垃圾。</p>
+     */
+    @TempDir
+    Path temp;
+
     @BeforeAll
     static void initMessages() throws Exception {
         Class.forName("cn.perfscope.alert.AlertMessages").getMethod("init").invoke(null);
@@ -44,9 +56,14 @@ class DailyCounterRolloverTest {
             .invoke(null, (Object) null);
     }
 
-    /** 造一个 AlertService：昨天已推 7 条，时间已跨到今天，尚未发生任何 rollDay。 */
-    private static AlertService serviceWithYesterdayCounters() throws Exception {
-        File df = Files.createTempDirectory("pscope-rollover").toFile();
+    /**
+     * 造一个 AlertService：昨天已推 7 条，时间已跨到今天，尚未发生任何 rollDay。
+     *
+     * <p>从 {@code static} 改为实例方法，只为能读到用例级的 {@link #temp}——
+     * 目录归 JUnit 管，本方法不再自己造永不删除的临时目录。</p>
+     */
+    private AlertService serviceWithYesterdayCounters() throws Exception {
+        File df = Files.createTempDirectory(temp, "pscope-rollover").toFile();
         Files.write(new File(df, "config.yml").toPath(),
             "alerts:\n  daily-summary:\n    timezone: \"\"\n".getBytes(StandardCharsets.UTF_8));
 

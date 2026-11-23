@@ -25,10 +25,14 @@ import cn.perfscope.support.AlertFixtures;
 import cn.perfscope.support.TestObjects;
 import cn.perfscope.util.Messages;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -70,9 +74,32 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class ThresholdTextMatchesOperatorTest {
 
+    /**
+     * 本用例创建的夹具。<b>用例级</b>：每个用例从空表开始，看不到上一个用例的残留。
+     */
+    private final List<AlertServiceStateMachineFixture> fixtures = new ArrayList<>();
+
     @BeforeAll
     static void initMessages() {
         AlertFixtures.initMessages();
+    }
+
+    /** 先查上一个测试类有没有留下"建了却没关"的夹具（漏写 @AfterEach 的唯一发现点）。 */
+    @BeforeEach
+    void checkNoLeftoverFromPreviousClass() {
+        AlertServiceStateMachineFixture.assertNoLeaks("ThresholdTextMatchesOperatorTest");
+    }
+
+    /**
+     * 用例结束（无论通过/失败/抛异常）统一删除本用例建过的临时数据目录。
+     *
+     * <p>执行顺序在用例自身的 {@code finally}（还原语言）之后、{@link #restoreEnglish()} 之前，
+     * 与语言相关的断言因此不受影响。删除失败不吞掉：汇总成一条 {@link AssertionError}
+     * 使本用例报红并带上路径。</p>
+     */
+    @AfterEach
+    void deleteTempDataDirs() {
+        AlertServiceStateMachineFixture.closeAll(fixtures);
     }
 
     @AfterAll
@@ -305,8 +332,9 @@ class ThresholdTextMatchesOperatorTest {
     // ====================================================================================
 
     /** 七个指标都填上"与默认值一致"的阈值，让渲染结果可以逐字断言。 */
-    private static AlertServiceStateMachineFixture fixtureWithAllThresholds() throws Exception {
+    private AlertServiceStateMachineFixture fixtureWithAllThresholds() throws Exception {
         AlertServiceStateMachineFixture f = AlertServiceStateMachineFixture.builder().build();
+        fixtures.add(f);
         ConfigManager.ConfigData cfg = f.config();
         cfg.tps_warningThreshold = 18.0;
         cfg.tps_criticalThreshold = 15.0;
