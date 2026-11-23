@@ -15,6 +15,58 @@
 ---
 
 
+## [Unreleased] — 2026-11-24 — 测试套件不再往 `%TEMP%` 里堆垃圾
+
+> 这一类问题不会让任何测试变红，只会慢慢吃掉磁盘和 inode——所以它活了很久。
+> 量化基线：2026-11-23 实测 `%TEMP%` 下累积 **6311** 个 `pscope-*` 目录、42MB，
+> 按日期 11-21=108 / 11-22=2576 / 11-23=3627，每次全量测试新增几十个。
+
+### Fixed — 全部 15 处 `Files.createTempDirectory` 都不删除
+
+分两种形态，根因不同：
+
+| 位置 | 形态 | 修法 |
+|---|---|---|
+| `CsvLayoutTest`（12 处） | 每次用例各建一个，从不删 | 类字段 `@TempDir Path temp`，用例内用 `createTempDirectory(temp, prefix)` 在它下面开子目录 |
+| `AlertOptionsSingleSourceTest`、`DailyCounterRolloverTest` | 同上 | 同上 |
+| `AlertServiceStateMachineFixture` | 共用夹具，构造时建、**没有 `close()`**，12 个测试类用它 | 实现 `AutoCloseable`；用例级 `List` 登记，`@AfterEach` 调 `closeAll` |
+
+**为什么用 `@TempDir` 而不是自己 `delete`**：JUnit 在用例结束后递归删除，**删除失败会让该用例
+直接报 ERROR**。自己写的 `delete` 很容易写成 `catch (IOException ignored)`，那就等于换了个地方藏问题。
+
+**夹具为什么不能用 `@TempDir`**：它要在构造器里把目录塞进 `PerfScope.dataFolder`，而构造器
+拿不到测试方法的注入参数。所以它自建自清，并配一层 `assertNoLeaks` 兜底。
+
+### Fixed — 「清理失败要可见」补上了真正会响的那一环
+
+`close()` 抛 `UncheckedIOException` 只能发现「删除失败」，发现不了**「根本没调用」**。
+变异验证抓到了这个缺口：把 `close()` 改成立刻 `return`，7 个用例**全绿**、7 个目录留在
+`%TEMP%`——因为压根没人调用它，异常路径永远走不到。
+
+补的机制：构造函数里把实例登记进静态 `OPEN` 集合，`close()` 时移除；
+每个建夹具的测试类在自己的 `@BeforeEach` 调 `assertNoLeaks(...)`，它看到的是**上一个测试类**
+留下的账。漏写 `@AfterEach` 的类一定会被下一个类撞见。
+
+**负向验证**：删掉 `AlertServiceCooldownTest` 的 `@AfterEach` 后跑该用例——
+修复前是「7 例全绿 + 静默漏 7 个目录」，现在是「**6 例红**」并列出泄漏路径。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| 全量测试 | 994 例 / 0 失败 / 8 跳过 |
+| `%TEMP%\pscope-*` 前后计数差 | 新跑一次全量后 **delta = 0**（修复前每次几十） |
+| 变异：`close()` 立即 return | 994 例全绿（**证明这个形态抓不住**，故补 `assertNoLeaks`） |
+| 变异：删掉 `@AfterEach` | 该用例 **6/7 红** |
+
+### Changed — `versions/README.md` 的版本指引改成实际可用的
+
+原表头写「推荐使用 `1.4.5-SNAPSHOT-fix1`」，但 `versions/` 里从来没有过任何
+`1.4.5-SNAPSHOT-fixN`（最新是 `PerfScope-1.4.4.jar`）。照那张表去找会找不到文件。
+改成指向 fix4 并明确写出「fix1～fix4 未归档到本目录，请从 Release 附件下载」。
+
+---
+
 ## [Unreleased] — 2026-11-23 — 修 `available()` 缓存的正确性 bug：mtime 精度碰撞把"已修好的目录"永久报成不可用
 
 > 分支 `fix/audit-round2-batch`。这是上一段"`available()` 改 mtime 缓存"引入的**真 bug**，

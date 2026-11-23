@@ -23,8 +23,9 @@
 
 | 版本 | 文件 | 说明 |
 |---|---|---|
-| **1.4.5-SNAPSHOT-fix1** | `PerfScope-1.4.5-SNAPSHOT-fix1.jar` | **推荐使用**（当前构建）。版本号启用 `-SNAPSHOT-fixN` 方案，本版 `fix1`。功能与行为同 1.4.4，只有版本号与发布形态变化。<br>
+| **1.4.5-SNAPSHOT-fix4** | `PerfScope-1.4.5-SNAPSHOT-fix4.jar` | **推荐使用**（最新发布）。从 fix1 起版本号采用 `-SNAPSHOT-fixN` 方案，`N` 是该补丁线的序号；`fix4` 是这条线上最新的一版。<br>
 `pom.xml` 是唯一版本源，`plugin.yml` 与 JAR 文件名都由它派生。<br>
+**注意：fix1～fix4 未归档到本目录**（下表里也没有它们），请从对应的 GitHub Release 附件下载。<br>
 GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases> |
 | **1.4.4** | `PerfScope-1.4.4.jar` | **补丁版**，两个修复：
 
@@ -87,7 +88,7 @@ node tools/verify-release-artifact.mjs --ref v<版本> --version <版本>
 注意 `--version` 现在要传**完整**版本字符串，例如：
 
 ```bash
-node tools/verify-release-artifact.mjs --ref v1.4.5-SNAPSHOT-fix1 --version 1.4.5-SNAPSHOT-fix1
+node tools/verify-release-artifact.mjs --ref v1.4.5-SNAPSHOT-fix4 --version 1.4.5-SNAPSHOT-fix4
 ```
 
 各版本的关键差异：
@@ -126,11 +127,11 @@ This directory holds **local** build artifacts; JARs are not tracked by git (exc
 `.gitignore`, with this `README.md` as the only exception). Use GitHub Releases for official
 downloads.
 
-**Latest build: 1.4.5-SNAPSHOT-fix1** (`PerfScope-1.4.5-SNAPSHOT-fix1.jar`).
+**Latest build: 1.4.5-SNAPSHOT-fix4** (`PerfScope-1.4.5-SNAPSHOT-fix4.jar`).
 
-From this version on, version numbers use the form `base-SNAPSHOT-fixN`, where `N` is the patch
-number along that line. Behaviour is identical to 1.4.4; only the version string and the release
-format changed. All GitHub Releases are flagged Pre-release, so `/releases/latest` no longer
+From fix1 on, version numbers use the form `base-SNAPSHOT-fixN`, where `N` is the patch number
+along that line; `fix4` is the newest on this line. **fix1 through fix4 are not archived in this
+directory** — download them from the corresponding GitHub Release attachments. All GitHub Releases are flagged Pre-release, so `/releases/latest` no longer
 resolves — take the topmost entry on the Releases page.
 
 **Historical releases were republished under the new scheme.** The nine tags `v1.1.0` … `v1.4.4`

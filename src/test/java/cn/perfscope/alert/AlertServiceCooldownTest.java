@@ -6,8 +6,13 @@
 package cn.perfscope.alert;
 
 import cn.perfscope.metrics.MetricsSnapshot;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -26,19 +31,54 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class AlertServiceCooldownTest {
 
+    /**
+     * 本用例创建的夹具。<b>用例级</b>，不是类级：每个用例都从空表开始，
+     * 看不到上一个用例的残留，因此不产生顺序依赖。
+     */
+    private final List<AlertServiceStateMachineFixture> fixtures = new ArrayList<>();
+
     @BeforeAll
     static void initMessages() throws Exception {
         AlertServiceStateMachineFixture.initMessages();
     }
 
+    /**
+     * 先查上一个测试类有没有留下"建了却没关"的夹具。
+     *
+     * <p>这条是漏写 {@code @AfterEach} 的唯一可靠发现点：漏写的类不会调用 closeAll，
+     * 它的夹具只能被下一个跑到这里的类看见。</p>
+     */
+    @BeforeEach
+    void checkNoLeftoverFromPreviousClass() {
+        AlertServiceStateMachineFixture.assertNoLeaks("AlertServiceCooldownTest");
+    }
+
+    /**
+     * 用例结束（无论通过、失败还是抛异常）统一删除本用例建过的临时数据目录。
+     *
+     * <p>夹具自己删自己建的目录（谁创建谁清理），本方法只负责"让删除真的发生"。
+     * 删除失败不会被吞掉：{@link AlertServiceStateMachineFixture#closeAll} 会把它们
+     * 汇总成一条 {@link AssertionError}，本用例随即报红并带上路径。</p>
+     */
+    @AfterEach
+    void deleteTempDataDirs() {
+        AlertServiceStateMachineFixture.closeAll(fixtures);
+    }
+
     /** 冷却 = 300 秒、防抖 = 1、无抖动窗口、无复燃窗口：唯一变量只剩冷却。 */
-    private static AlertServiceStateMachineFixture fixture() throws Exception {
-        return AlertServiceStateMachineFixture.builder()
+    private AlertServiceStateMachineFixture fixture() throws Exception {
+        return register(AlertServiceStateMachineFixture.builder()
             .cooldownSeconds(300)
             .debounceCycles(1)
             .flapWindowSeconds(0)
             .refireSeconds(0)
-            .build();
+            .build());
+    }
+
+    /** 登记夹具，交给 {@link #deleteTempDataDirs()} 在用例结束时关闭。 */
+    private AlertServiceStateMachineFixture register(AlertServiceStateMachineFixture f) {
+        fixtures.add(f);
+        return f;
     }
 
     /**
@@ -92,12 +132,12 @@ class AlertServiceCooldownTest {
     /** 冷却为 0 = 关闭冷却：紧接着的第二次同 key 告警必须立即重推。 */
     @Test
     void zeroCooldownDisablesTheGate() throws Exception {
-        AlertServiceStateMachineFixture f = AlertServiceStateMachineFixture.builder()
+        AlertServiceStateMachineFixture f = register(AlertServiceStateMachineFixture.builder()
             .cooldownSeconds(0)
             .debounceCycles(1)
             .flapWindowSeconds(0)
             .refireSeconds(0)
-            .build();
+            .build());
 
         f.feed("memory:global", Alert.LEVEL_WARNING, 90.0);
         f.feed("memory:global", Alert.LEVEL_WARNING, 90.0);

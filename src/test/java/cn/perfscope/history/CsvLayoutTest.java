@@ -6,6 +6,7 @@
 package cn.perfscope.history;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
@@ -32,6 +33,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * </ul>
  */
 class CsvLayoutTest {
+
+    /**
+     * 本类所有用例的临时目录父节点。
+     *
+     * <p><b>为什么是 JUnit 的 {@code @TempDir} 而不是 {@code Files.createTempDirectory(prefix)}</b>：
+     * 裸调用会在 {@code %TEMP%} 下留下一个永不删除的 {@code pscope-csv-*} 目录（每次全量测试新增
+     * 十几个，实测累积到 6311 个 / 42MB）。{@code @TempDir} 按用例创建、用例结束后递归删除，
+     * <b>删除失败会让该用例直接报 ERROR</b>（JUnit 5.10.1 实测行为），而不是静默留垃圾。</p>
+     *
+     * <p>各用例仍然用 {@code Files.createTempDirectory(temp, prefix)} 在自己的父节点下开子目录：
+     * 保留原有 prefix 的可读性（排障时一眼看出是哪个用例），同时保证<b>用例之间不共享目录</b>——
+     * 每个用例拿到的是全新的 {@code temp}，不会看到彼此的残留。</p>
+     */
+    @TempDir
+    Path temp;
 
     private static HistorySample sample() {
         return new HistorySample(1_700_000_000_000L, 19.5, 8.25, 42, 3, 120, 4567);
@@ -93,7 +109,7 @@ class CsvLayoutTest {
 
     @Test
     void writtenFileRoundTripsThroughReader() throws Exception {
-        Path dir = Files.createTempDirectory("pscope-csv");
+        Path dir = Files.createTempDirectory(temp, "pscope-csv");
         HistoryFileStore store = storeIn(dir);
         Path file = dir.resolve("history-2023-11-14.csv");
         Files.write(file, ((header() + "\n" + format(sample()) + "\n").getBytes(StandardCharsets.UTF_8)));
@@ -110,7 +126,7 @@ class CsvLayoutTest {
 
     @Test
     void malformedRowIsCountedAsSkipped() throws Exception {
-        Path dir = Files.createTempDirectory("pscope-csv-bad");
+        Path dir = Files.createTempDirectory(temp, "pscope-csv-bad");
         HistoryFileStore store = storeIn(dir);
         Path file = dir.resolve("history-2023-11-15.csv");
         Files.write(file, ((header() + "\nnot,a,valid,row\n").getBytes(StandardCharsets.UTF_8)));
@@ -128,7 +144,7 @@ class CsvLayoutTest {
 
     @Test
     void legacySevenColumnFileStillParses() throws Exception {
-        Path dir = Files.createTempDirectory("pscope-csv-v13");
+        Path dir = Files.createTempDirectory(temp, "pscope-csv-v13");
         HistoryFileStore store = storeIn(dir);
         Path file = dir.resolve("history-2026-01-01.csv");
         Files.write(file, ((V13_HEADER + "\n"
@@ -159,7 +175,7 @@ class CsvLayoutTest {
     void headerlessLegacyFileAlsoParses() throws Exception {
         // 9A-18 之前的文件连表头都没有（首行直接是数据）；位置口径必须覆盖全部 12 列，
         // 否则 12 列的"新数据写进无头文件"会有一部分读不回来。
-        Path dir = Files.createTempDirectory("pscope-csv-noheader");
+        Path dir = Files.createTempDirectory(temp, "pscope-csv-noheader");
         HistoryFileStore store = storeIn(dir);
         Path file = dir.resolve("history-2026-01-02.csv");
         Files.write(file, ("1700000000000,19.5,8.25,42,3,120,4567\n").getBytes(StandardCharsets.UTF_8));
@@ -173,7 +189,7 @@ class CsvLayoutTest {
 
     @Test
     void newTwelveColumnFileParsesEveryField() throws Exception {
-        Path dir = Files.createTempDirectory("pscope-csv-v14");
+        Path dir = Files.createTempDirectory(temp, "pscope-csv-v14");
         HistoryFileStore store = storeIn(dir);
         Path file = dir.resolve("history-2026-01-03.csv");
         Files.write(file, ((header() + "\n" + format(fullSample()) + "\n").getBytes(StandardCharsets.UTF_8)));
@@ -200,7 +216,7 @@ class CsvLayoutTest {
     void mixedLegacyAndNewRowsInOneFileBothParse() throws Exception {
         // 升级当天的真实形态：既有文件保留 v2 表头，新样本按 v3 的 12 列追加在其后。
         // 两个读取端都不能因此错位：旧行 7 列、新行 12 列，同一个文件里共存。
-        Path dir = Files.createTempDirectory("pscope-csv-mixed");
+        Path dir = Files.createTempDirectory(temp, "pscope-csv-mixed");
         HistoryFileStore store = storeIn(dir);
         Path file = dir.resolve("history-2026-01-04.csv");
         Files.write(file, ((V13_HEADER + "\n"
@@ -223,7 +239,7 @@ class CsvLayoutTest {
         // 尾部列脏（人工编辑/版本混写）只应让那 1 个单元格变 -1，
         // 同一行里完好的 TPS/内存/实体不该陪葬——那才是真正的数据损失。
         // 文件里随后那行干净样本也必须照常读出：坏行不得污染整份文件。
-        Path dir = Files.createTempDirectory("pscope-csv-garbage");
+        Path dir = Files.createTempDirectory(temp, "pscope-csv-garbage");
         HistoryFileStore store = storeIn(dir);
         Path file = dir.resolve("history-2026-01-05.csv");
         Files.write(file, ((header() + "\n"
@@ -246,7 +262,7 @@ class CsvLayoutTest {
     @Test
     void extraUnknownColumnAtTailIsIgnored() throws Exception {
         // 未来版本再追加第 13 列时，本版本按前 12 列读、忽略尾巴。
-        Path dir = Files.createTempDirectory("pscope-csv-extra");
+        Path dir = Files.createTempDirectory(temp, "pscope-csv-extra");
         HistoryFileStore store = storeIn(dir);
         Path file = dir.resolve("history-2026-01-06.csv");
         Files.write(file, ((header() + "\n"
@@ -263,7 +279,7 @@ class CsvLayoutTest {
     @Test
     void corruptAnchorCellStillSkipsOnlyThatRow() throws Exception {
         // 锚列（前 7 列）损坏 = 该行没有骨架，跳过并计数；但文件里其余行必须照常读出。
-        Path dir = Files.createTempDirectory("pscope-csv-anchor");
+        Path dir = Files.createTempDirectory(temp, "pscope-csv-anchor");
         HistoryFileStore store = storeIn(dir);
         Path file = dir.resolve("history-2026-01-07.csv");
         Files.write(file, ((header() + "\n"
@@ -279,7 +295,7 @@ class CsvLayoutTest {
 
     @Test
     void shortRowMissingNewColumnsIsToleratedButShortAnchorRowIsNot() throws Exception {
-        Path dir = Files.createTempDirectory("pscope-csv-short");
+        Path dir = Files.createTempDirectory(temp, "pscope-csv-short");
         HistoryFileStore store = storeIn(dir);
         Path file = dir.resolve("history-2026-01-08.csv");
         Files.write(file, ((header() + "\n"
@@ -301,7 +317,7 @@ class CsvLayoutTest {
     void sentinelRoundTripsInsteadOfBecomingZero() throws Exception {
         // -1 必须是"能写出去、也能读回来"的一等值。若 format 或 parseLine 任一侧把 -1 变成 0，
         // 趋势就会显示"CPU 一直是 0%"——一个从未发生过的、看起来健康的假象。
-        Path dir = Files.createTempDirectory("pscope-csv-sentinel");
+        Path dir = Files.createTempDirectory(temp, "pscope-csv-sentinel");
         HistoryFileStore store = storeIn(dir);
         Path file = dir.resolve("history-2026-01-09.csv");
         Files.write(file, ((header() + "\n" + format(sample()) + "\n").getBytes(StandardCharsets.UTF_8)));
@@ -321,7 +337,7 @@ class CsvLayoutTest {
     @Test
     void zeroCpuIsPreservedAsARealReading() throws Exception {
         // 与上一条互补：0.0 是合法读数（空闲的服），必须与 -1 区分开。
-        Path dir = Files.createTempDirectory("pscope-csv-zerocpu");
+        Path dir = Files.createTempDirectory(temp, "pscope-csv-zerocpu");
         HistoryFileStore store = storeIn(dir);
         Path file = dir.resolve("history-2026-01-10.csv");
         HistorySample idle = new HistorySample(1_700_000_000_000L, 20.0, 5.0, 30, 0, 0, 0,
