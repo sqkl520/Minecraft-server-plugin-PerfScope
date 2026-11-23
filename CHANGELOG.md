@@ -15,6 +15,74 @@
 ---
 
 
+## [Unreleased] — 2026-11-24 — `check-config-compat` 的三处恒真断言
+
+> 由门禁有效性审计发现（21 个变异，10 个存活）。这一批只修最严重的三门——
+> 它们各自都对应"门禁报了 PASS，而它想拦的事故照样发生"。
+
+### Fixed — 归档自己的 jar 会让 `KEY PARITY` 恒真（最严重）
+
+`--base` 缺省时脚本取 `versions/*.jar` 里**版本号最大**的那个，注释写着
+"not the current version"，但**代码里根本没有这个排除**。
+
+于是发布流程本身让门禁自我失效：
+
+| 步骤 | 基线 | 结果 |
+|---|---|---|
+| 改名 `alerts.cooldown-seconds`，未归档 | `PerfScope-1.4.5-SNAPSHOT-fix4.jar` | **FAIL**，点名该键 |
+| 同一棵树，按项目规则把 jar 归档为 fix5 | `PerfScope-1.4.5-SNAPSHOT-fix5.jar` | **PASS 9/9**，"100 keys, all present" |
+
+同一处改动、同一棵代码树，只因为多做了一次"归档 JAR"，门禁从红变绿——
+而用户配置里的键被改名丢弃。触发它的是项目自己的发布流程，不是疏忽。
+
+现在显式排除与 `pom.xml` 当前 `<version>` 同名的 jar；一个都不剩时报 exit 2（"无法验证"），
+而不是静默降低门槛。实测归档 fix1～fix4 之后，基线正确落到 `fix3`，改名仍报红。
+
+### Fixed — 删掉整个 `ConfigManager.java`，门禁反而报 PASS
+
+`if (cm)` 用「源文件读得到吗」决定**是否评估**那三条 loader 断言。文件不存在时
+`cm = ''`，三条断言直接不执行，`results` 从 9 项变 6 项，末尾仍打印 `PASS`。
+
+实测（修复前）：删掉 `ConfigManager.java` → `CONFIG CHECK: PASS (6/6)`。
+实测（修复后）：同一变异 → `FAIL (7/10)`，exit 1，并额外点出"没有 config loader"。
+
+依赖缺失 = 断言消失，这正是本项目反复踩的"看起来绿，其实没跑"。
+
+### Fixed — 「新增键没有 reader」这条规则永远是 PASS
+
+`rec('NEW KEYS have a reader default', true, …)` 的 `ok` 是**字面量 `true`**，
+之后还有一段 `results[…].ok = true` 再强制写回一次。实测：往 `config.yml` 加一个任意新键、
+不写任何 reader，门禁报 `PASS 9/9`。
+
+不能简单判 FAIL——这个扫描只认 `read*("key", default)` 一种形状，代码里有若干键是通过
+helper 读的，直接判红会误伤。改成按"这个键在 `ConfigManager` 里到底出现过没有"分层：
+
+| 情况 | 判定 |
+|---|---|
+| 连键名都搜不到 | **FAIL**（这就是"加了个死键"）|
+| 出现过但形状不匹配 | INFO（可能是 helper 读取，扫描器看不出来）|
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| 删掉 `ConfigManager.java` | 修复前 `PASS (6/6)` → 修复后 **`FAIL (7/10)`** |
+| 改名一个 key + 已归档 4 个 fix jar | 修复前 `PASS 9/9` → 修复后 **`FAIL`**，点名该键 |
+| 基线选择 | `fix4`（自己）→ **`fix3`**（上一个发布） |
+| 八门门禁回归 | 全 PASS |
+
+### 仍未修（审计报告里已记录，按影响排序）
+
+见 `.GATE-AUDIT.md` 第六部分。其中最值得下一轮处理的三条：
+1. `check-sentinels` 的 `SENTINEL_FIELDS` / `NO_SENTINEL_FIELDS` 两类字段**只认两个运算符**，
+   `>=` / `<` / `==` / `!=` 与"0 写左边"的镜像形式全部放行（实测 10 个变异存活）。
+   上一轮的序关系修复只覆盖了 `SENTINEL_AND_ZERO_BOTH_BAD` 这一类。
+2. `check-docs` 的白名单按**整行** `includes` 豁免，同一行再叠加泄漏不被发现；
+   且只扫 md，`plugin.yml` 的 `description`（随 jar 发出去）与 `config.yml` 注释完全不管。
+3. `check-velocity-thresholds` 只检查 `CRITICAL` 档，`WARN` 档的任何改动永久放行
+   （`readCellSymbol` 取方法体内**第一个**比较就返回）。
+
+
 ## [Unreleased] — 2026-11-24 — 归档补齐 fix1～fix4，并让归档校验认得「CI 构建 vs 本地重建」
 
 > 两件事其实是同一条链：归档缺口要靠工具发现，而工具本身对 CI 构建的产物必然假红——
