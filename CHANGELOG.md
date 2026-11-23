@@ -15,6 +15,201 @@
 ---
 
 
+## [Unreleased] — 2026-11-24 — `check-sentinels` 的「0 写在左边」半边：不是判对了，是没看见
+
+> 上一轮的序关系修复只覆盖了「字段在左」那一半。36 格判定表实测 **12 格判错**，
+> 全部集中在镜像形式，而所有测试都是绿的——因为没有任何东西覆盖这张表。
+
+### Fixed — 镜像形式 `0 <op> 字段` 压根没被正则匹配到
+
+三类字段的正确写法各不相同（见 `CORRECT_OPS`），但都吃同一个坑：正则的左侧**硬编码**成
+`FIELD_EXPR`，右侧才允许字面量 `0`。于是：
+
+| 写法 | 等价形式 | 期望 | 修复前 |
+|---|---|---|---|
+| `0 < x` | `x > 0` | 红 | **绿** |
+| `0 >= x` | `x <= 0` | 红 | **绿** |
+| `0 == x` | `x == 0` | 红 | **绿** |
+| `0 != x` | `x != 0` | 红 | **绿** |
+
+关键区别：这**不是「判对了」而是「没匹配到」**。`0 <= x`（≡ `x >= 0`，正确写法）也同样是绿的，
+看上去"没问题"，实际是同一个漏检。
+
+### Fixed — 三处实现陷阱（都实测过）
+
+1. **捕获组错位**：`FIELD_EXPR` 自带一对捕获组，嵌进外层捕获组后组号变成
+   `1=外层左 2=内层左 3=运算符 4=右`，`m[3]` 拿到 `undefined`。
+   改动是把它改成非捕获再嵌，捕获组恰好保持 `1=左 2=运算符 3=右`。
+2. **方法调用形式完全不被看见**：`s.tps1m() <= 0` 里「带前缀的字段名」分支先吃掉 `s.tps1m`，
+   正则随后要求运算符却遇到 `()`，整个匹配失败。而 `HistoryStore.java:333` 正是这个形状
+   （带 `@sentinel-ok` 豁免，所以没暴露成违规，但**覆盖计数从 7 个文件掉到 6 个**）。
+   修法：调用分支排在前面，且自己带可选前缀（否则 `tps1m` 前面的 `.` 会被后顾断言挡掉）。
+3. **数字中间匹配 `0`**：两侧都为 `ZERO` 之后，`10 < snap.tps1m` 会把 `10` 尾部的 `0`
+   当成字面量 0，产生假违规。加 `(?<![\w.])` / `(?![\w.])` 数字边界后消失（实测）。
+
+### Added — `--selftest`：36 格判定表，每次正常调用静默执行
+
+三类字段 × 12 种写法。**期望值是写死的字面量，不从 `CORRECT_OPS` 推导**——
+
+第一版写成 `expectRed = !CORRECT_OPS[kind].has(eff)`，看着简洁，实际是自指：
+把 `CORRECT_OPS.SENTINEL` 改坏成 `['<']` 之后，`>=` 的期望值跟着变成"该红"，
+自检仍报 **36/36 PASS**。实测确认过这个形态。
+
+改成字面量表后，同一变异 → **FAIL 34/36**。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| 36 格矩阵 | **36/36 符合期望** |
+| 变异：`CORRECT_OPS.SENTINEL` 去掉 `>=` | selftest **FAIL 34/36** |
+| 变异：`check-sentinels` 干净树 | 7 个文件、49 处比较，PASS |
+| 假阳性：`10 < snap.tps1m` | 不误报（数字边界生效） |
+| 全量测试 | **997 例 / 0 失败** |
+| 七门门禁 | 全 PASS |
+
+
+## [Unreleased] — 2026-11-24 — 两个门禁红在同一条检查上：样本方向错了，判据还各存一份
+
+> `check-scenarios.mjs`（exit 1）、`negative-controls.mjs`（exit 1）、`local-gate.ps1 -L1`
+> （2/13 failed）三个红，红的是同一条 harness 检查 `perfscope-alertv2 / up02-no-old-recovery-on-upgrade`。
+> 修完三个全绿（L1 13/13）。
+
+### Fixed — `up02` 的 `negativeSamples` 方向反了（不是 pattern 错）
+
+该检查是**合取计数**：`^(?=…(level escalated))(?![…][Alert][Recovery][… key=memory:global)` 配
+`minMatches:1 / maxMatches:1`，语义是「窗口里有升级行、且没有 recovery 行」。
+
+原 `negativeSamples` 是一条**裸 recovery 行**（从 `alert05` 抄来的，在那个检查里这串是**正确**样本）。
+实测这条字符串确实会让检查变红 —— 但不是因为「多了一条 forbidden recovery」，而是因为**升级行根本不存在**。
+即：样本证明的是「缺少必需的一半」，与实际守护的失败模式（升级后仍吐了 recovery）无关。
+这种样本即使 negative 那一半彻底失效也照样"通过"正控，等于没控。
+
+正确形状是一对：`cleanSamples` = 健康窗口（只有升级行，检查 PASS）+ `negativeSamples` = **同一份健康窗口再追加一条
+`key=memory:global` 的 recovery 行**（检查 FAIL）。有这一对才证明 negative 那一半是判别器。
+
+> 审计报告给的备选「升级行 + recovery 行」这个说法本身没错，**但它和原报告的另一个备选
+> 「只留升级行」结论相反**：实测「只留升级行」计数 = 1（在 1..1 内）→ 检查**绿**，
+> 拿它当 `negativeSamples` 就是个永不触发的样本。所以两者不能混为一谈，也不是"改哪个都行"。
+
+### Added — 判据单一来源 `tools/lib/scenario-model.mjs`
+
+`negative-controls.mjs` 原先自带一份**手抄的样本表**，与 scenario 的 `negativeSamples`
+**逐字不同**（`…| lasted 5m` vs `…| lasted 5m, no breach for 3 consecutive check cycles`），
+两份各自漂移，于是同一条检查两个门禁给出**相反结论**。
+
+现在：**scenario JSON 是唯一来源，两个门禁都是读者**，判定规则（变体展开 / 计数语义 /
+正控成立条件）收在 `tools/lib/scenario-model.mjs`，两边 `import` 同一份实现。
+方向这么选的理由：harness 必须能在没有本仓库的机器上跑（CI 里它就是独立的），
+所以 scenario 文件永远不能反过来依赖 `tools/`；而样本放在 pattern 旁边，review 时两样一起看得见。
+
+### Added — S2 的两条新规则（只对合取计数检查生效，不误伤普通 notPresent）
+
+`S2-NO-CLEAN-SAMPLE`（计数契约检查必须有 `cleanSamples`，否则单个样本无法说明是哪一半翻的）
+与 `S2-NO-DISCRIMINATOR`（必须有一个失败样本 = 某个 clean 样本 + forbidden 内容）。
+另加 `S2-CLEAN-SAMPLE-TRIPS`（`cleanSamples` 自己把检查弄红）。普通 `notPresent` /
+`expectNot` 判据不变，17 条正控全绿、6 条未声明样本仍只 skip。
+
+### Fixed — `negative-controls.mjs` 的三个结构缺陷
+
+1. **路径硬编码** `D:/…/testharness/tests/scenarios` → 现支持 `--harness` / `--repo`，
+   默认与 `check-scenarios.mjs` 同一套「从仓库根向上找 4 层」逻辑（`findHarness`）。
+   顺带从「手写 7 个 scenario 文件名」改成扫全部 `perfscope-*.json`：第 8 个文件里新加的负向断言
+   原先完全不受控。
+2. **缺 harness 时 `ENOENT` 崩 + exit 1** → 现在与 `check-scenarios.mjs` 一致：exit **2** + 明确说明
+   缺的是哪个目录、怎么指。错误路径（2）与失败路径（1）不再同码。同理修了 `--json` 模式下
+   人类可读行混进 stdout 导致 JSON 解析失败的问题。
+3. **`--strict` 语义**：确认原先**确实**不一致（`check-scenarios.mjs` / `check-i18n.mjs` 都是
+   「WARN 也失败」，而 `negative-controls.mjs` 根本没有 `--strict`，WARN/skip 一律不影响退出码）。
+   现统一为「未声明正控的检查在 `--strict` 下也算失败」，与另两个门禁同口径。
+
+### Fixed — `add-negative-samples.cjs` 会把手改的控制冲掉
+
+那个一次性迁移脚本无条件覆写 `negativeSamples`，重跑一次就把 `up02` 打回旧形状。
+现改为「已有 `negativeSamples` / `cleanSamples` 就跳过」，实测重跑后文件字节不变。
+
+### Verification
+
+- 双向验证（改回旧样本 → 必须再红）：7 个变异全部在两个门禁上**同时**红/同时绿，含
+  「regex 的 negative 半边被删空」这一例（证明不是把门禁改恒真）。
+- 缺 harness：重命名 `tests/scenarios` 后两个门禁均 exit 2（显式传不存在的 `--harness` 亦 exit 2）。
+- harness 侧只改 `perfscope-alertv2.json` 的 `up02` 一条检查（新增 `cleanSamples`、重写
+  `negativeSamples` 与 description），原文件备份于 `%TEMP%/ps-baseline/`。
+- 遗留（未在本次范围内）：harness 自己的 `check-assertions.mjs` 对 `up02` 的中文分支报 R1
+  ERROR，**改动前后完全一致**（同为 ERROR 1），是该 linter 把 `\\[` 当字符类的老问题，非本次引入。
+
+
+## [Unreleased] — 2026-11-24 — 门禁 `check-docs` 的六处覆盖空洞补齐（原来它能被一句话绕过）
+
+> 由 `.GATE-AUDIT.md` 的 D3–D8 发现，逐条复现后修复。共同形状：**门禁判 PASS，但根本没看那个文件**。
+> 最刺眼的是 D8 —— `--repo /nonexistent` 打印 `DOCS CHECK: PASS` 并 exit 0：路径不存在，于是
+> 每个文件"缺失"、每个文件"跳过"、零违规。删掉一个目录就能把门禁变成绿灯。
+
+### Fixed — 白名单从「整行豁免」收紧到「只豁免那一句」（D3）
+
+旧实现取语气词**所在整行**再判 `line.includes(整句)`，等于把整行一起放行。实测：在 README 那句
+自述后面再补一句「另外别忘了看看文档喵」仍是 PASS。现在改为**位置判定**：语气词必须落在
+某次白名单整句出现的 `[start, end)` 区间之内。同一行里第二个语气词不在区间内，照样红。
+
+### Added — 随 jar 发出去的文件纳入扫描（D4 / D5）
+
+`src/main/resources/**` 下的全部文本文件（`plugin.yml` 的 `description` / `usage` /
+`permission-message`、`config.yml` 的注释与默认值、`META-INF/NOTICE`）现在都在范围内；
+二进制资源按 NUL 字节判据跳过。判据是「用户会看到吗」，不是「文件在哪个目录」。
+`pom.xml` 的 `name` / `description` / `url` / 许可名同样纳入——它们会进 jar 内的
+`META-INF/maven/**/pom.xml` 与仓库页面。
+
+### Added — 文档默认被扫描，改用目录排除（D6）
+
+旧实现是文件名白名单（9 个固定文件），新建 `INSTALL.md` 完全不被看到（实测 D6 = PASS）。
+现在递归扫全部 `*.md`，只按**目录**排除开发过程产物：`tools/` `docs/` `ralph/` `ralph-plugin/`
+`logs/` `target/` `node_modules/` 等。理由与当年放宽 CHANGELOG 相同——那些文件需要引用历史产品文案，
+删掉会伪造记录。新写一份产品文档不再需要登记脚本。
+
+### Added — Java 字符串字面量纳入扫描（D7）
+
+`util/Messages.java`、`config/ConfigMessages.java`、`command/CommandMessages.java` 等消息表
+（以及内联拼接的玩家可见文案）现在逐字面量检查。注释**不在**范围内：注释里讨论这条规则是允许的，
+而且 `Messages` 的类注释本身就写着这个词（自检用例 R1 锁住这一点）。
+
+### Fixed — 缺文件 / 空目录改为「无法运行」（D8）
+
+退出码语义现在与 `check-scenarios.mjs` 一致：0 = PASS，1 = 发现违规，**2 = 缺输入**。
+`--repo` 不是目录、必需文件（README.md / CHANGELOG.md / plugin.yml / config.yml）缺失、
+或四类扫描目标中任何一类为空，都 exit 2 并说明缺什么。
+
+### Added — 每次运行都跑自检（12 个用例）
+
+六处空洞的共同点是「改坏了也全绿」，靠「在当前仓库上跑一次 PASS」永远发现不了。因此把六条变异
+做成 `--selftest` 的用例（外加 6 条反向用例：注释豁免、CHANGELOG 引述豁免、CHANGELOG 句末必须红、
+开发过程目录不扫、删 README 必须 exit 2、清空所有 md 必须 exit 2），并在**正常调用时**静默执行：
+自检红 → exit 2，不会因为当前工作树恰好干净就读作 PASS。`--no-selftest` 可跳过。
+
+### 验证（修复前 → 修复后）
+
+| # | 变异 | 修复前 | 修复后 |
+|---|---|---|---|
+| D3 | 白名单那句所在行再叠加一处泄漏 | PASS | **RED**（`README.md:27`）|
+| D4 | `plugin.yml` 的 `description` 带语气词 | PASS | **RED**（`[JAR_RESOURCE] plugin.yml:6`）|
+| D5 | `config.yml` 追加一条带语气词的注释 | PASS | **RED**（`[JAR_RESOURCE] config.yml:496`）|
+| D6 | 新建 `INSTALL.md` 写一句带语气词的话 | PASS | **RED**（`INSTALL.md:3`）|
+| D7 | `CommandMessages` 的 `"未采集"` 改成 `"未采集喵"` | PASS | **RED**（`[JAVA_MESSAGE] CommandMessages.java:67`）|
+| D8 | `--repo /nonexistent` | PASS / exit 0 | **exit 2**，报「path does not exist」|
+
+反向验证：现有 `CHANGELOG.md`（14 处引述）、全部 README、`config.yml`、`plugin.yml`、
+三个 Messages 类、`pom.xml` 修复后仍全部 PASS；`mvn test` 997 例全绿（8 skip）。
+
+### Notes — 仍未修
+
+- `check-docs` 只按字面量判 Java，注释里若写出一条**真的会推给玩家**的文案不会被发现（这是
+  设计取舍：注释不是输出）。要覆盖「文案从注释复制到 `put(...)`」这种形态得做数据流分析。
+- `tools/KNOWN-TEST-LIMITS.md` / `tools/VERIFY-RELEASE-ARTIFACT.md` 按目录规则整目录不扫，
+  因此它们若哪天变成面向用户的文档（比如被搬进 README 链接链），需要把它们从 `tools/` 移出
+  或改成逐文件例外。
+- `pom.xml` 的扫描只认 `name` / `description` / `url` / license `name` 四个标签，`<properties>`
+  里的自定义字段若将来参与 `plugin.yml` 过滤替换，不会被覆盖。
+
+
 ## [Unreleased] — 2026-11-24 — P1-S3 的修复本体补上护栏（它此前一行都没被守住）
 
 > 由 `.P1-VERIFICATION.md` 发现：`markMsptCollectFailed` 自己有 11 个用例测得很扎实，

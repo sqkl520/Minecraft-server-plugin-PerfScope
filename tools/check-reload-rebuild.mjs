@@ -44,6 +44,22 @@
  *
  * <p>与 {@code check-bstats-buckets.mjs} / {@code check-sentinels.mjs} 同一范式：
  * <b>当行为只能在特定运行环境里显现时，把约束上升到源码层。</b>
+ *
+ * <h2>为什么必须先剥注释（这条门禁曾经可以被一行注释骗过去）</h2>
+ *
+ * 旧实现是 {@code bodyText.indexOf("startDailySummary()")} —— 纯文本搜索。于是
+ * {@code // startDailySummary();} 与 {@code /* startDailySummary(); *\/} 都算"调用还在"，
+ * 而它们在行为上与删除完全等价：任务从此不再重建，方法体里却仍留着那个名字。
+ * 实测：把真调用改成注释，门禁 PASS。一个只会让门禁闭嘴的"删除"，正是这类门禁最该红的形态。
+ *
+ * <p>所以先把注释换成等长空白再搜索。<b>但不能只剥注释</b>：{@code getLogger().info("startDailySummary")}
+ * 这种日志里的同名文本不是调用，算"存在"同样是假绿。因此字符串/字符字面量的内容也一并抹成空白
+ * （引号保留、长度保留、换行保留），于是"代码里真的有这个调用"才唯一成为命中条件。
+ * 两个字面量形态都要处理：普通 {@code "..."}（含 {@code \"} 转义）与 Java 15 的
+ * {@code """} 文本块——后者里的换行必须保留，否则行号会整体错位。
+ *
+ * <p>剥完的文本同时用于结构判断（定位方法体、花括号配平、找外层 if）：
+ * 注释里的花括号与 {@code if (} 同样会污染结构分析。
  */
 
 import fs from 'node:fs';
@@ -78,13 +94,85 @@ const UNCONDITIONAL_CALLS = [
 const errors = [];
 const ok = [];
 
+/**
+ * 把注释与字面量内容替换成等长空白，保留换行与引号。
+ *
+ * <p>等长是刻意的：替换后的每个字符都还在原位，所以后续的行号、行内偏移与原文一致，
+ * 报错能指到人真正要改的那一行。换行保留是必需的——把整段注释压成空格会让行号错位。
+ * 字符串内容抹掉是为了不把日志里的同名文本当成调用（见文件头）。</p>
+ *
+ * 状态机：code / line-comment / block-comment / string / char / text-block。
+ * 不是 Java 词法器，只求"别被注释和字符串骗"；解析不了的形态（比如非法源码）会退化成
+ * code 状态，方向上只会漏报，不会误报。
+ */
+function maskCommentsAndLiterals(src) {
+    const out = src.split('');
+    let i = 0;
+    const n = src.length;
+    // 把 [from, to) 之间除换行外的字符抹成空格
+    const blank = (from, to) => {
+        for (let k = from; k < to && k < n; k++) {
+            if (out[k] !== '\n') out[k] = ' ';
+        }
+    };
+    while (i < n) {
+        const c = src[i];
+        const d = src[i + 1];
+        const e = src[i + 2];
+
+        if (c === '/' && d === '/') {
+            let j = i;
+            while (j < n && src[j] !== '\n') j++;
+            blank(i, j);
+            i = j;
+            continue;
+        }
+        if (c === '/' && d === '*') {
+            let j = i + 2;
+            while (j < n && !(src[j] === '*' && src[j + 1] === '/')) j++;
+            blank(i, Math.min(j + 2, n));
+            i = Math.min(j + 2, n);
+            continue;
+        }
+        if (c === '"' && d === '"' && e === '"') {
+            // Java 15 文本块：到下一个 """ 为止，内容抹空白但保留换行
+            let j = i + 3;
+            while (j < n && !(src[j] === '"' && src[j + 1] === '"' && src[j + 2] === '"')) {
+                if (src[j] === '\\') j += 2;
+                else j++;
+            }
+            blank(i + 3, j);
+            i = Math.min(j + 3, n);
+            continue;
+        }
+        if (c === '"' || c === "'") {
+            const quote = c;
+            let j = i + 1;
+            while (j < n) {
+                if (src[j] === '\\') { j += 2; continue; }
+                if (src[j] === quote) { j++; break; }
+                if (src[j] === '\n') break;   // 未闭合：别把整个文件吃掉
+                j++;
+            }
+            blank(i + 1, j - 1);
+            i = j;
+            continue;
+        }
+        i++;
+    }
+    return out.join('');
+}
+
 function main() {
     if (!fs.existsSync(TARGET)) {
         console.error(`source not found: ${TARGET}`);
         process.exit(2);
     }
     const source = fs.readFileSync(TARGET, 'utf8');
-    const lines = source.split('\n');
+    // 先抹掉注释与字面量内容：之后所有搜索/结构判断都在这份文本上做。
+    // 抹的是等长空白，所以行号与列号与原文一一对应。
+    const code = maskCommentsAndLiterals(source);
+    const lines = code.split('\n');
     const rel = path.relative(REPO, TARGET).replace(/\\/g, '/');
 
     // 1. 定位 reload() 方法体

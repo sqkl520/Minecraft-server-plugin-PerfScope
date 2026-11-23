@@ -29,11 +29,21 @@
  * `new Rule(...)`（`tps:global` / `mspt:global`），它对每个指标给出 `Direction` 与
  * `Comparison`。本脚本：
  *
- *   1. 解析后端算子表，取出 `tps` / `mspt` 两条规则的 Direction 与 Comparison；
- *   2. 解析代理 `NetworkRenderer.java` 的 `tpsCell` / `msptCell` 里**实际写的比较符**
+ *   1. 解析后端算子表，取出 `tps` / `mspt` 两条规则的 Direction 与**两档** Comparison
+ *      （`new Rule(key, dir, critical, warning)` 的后两个参数）；
+ *   2. 解析代理 `NetworkRenderer.java` 的 `tpsCell` / `msptCell` 里**每一档实际写的比较符**
  *      （`<` / `<=` / `>` / `>=`），而不是解析常量值——常量值只决定阈值多少，
  *      比较符决定边界那一格归谁；
- *   3. 两边必须匹配：Direction=LOW_IS_BAD + STRICT ⇒ 代理必须用 `<`。
+ *   3. 两档必须**逐档**匹配：Direction=LOW_IS_BAD + STRICT ⇒ 该档必须用 `<`。
+ *
+ * <h2>为什么必须逐档（这条门禁曾经只看得见一半）</h2>
+ *
+ * 旧实现取方法体里**第一个** `(<=|>=|<|>) (TPS|MSPT)_(CRITICAL|WARN)` 就收工。cell 的写法是
+ * `if (v < CONST_CRITICAL) … else if (v < CONST_WARN) …`，第一次出现的永远是 CRITICAL 档，
+ * 于是 WARN 档的任何改动**永久放行**：实测把 `tps < TPS_WARN` 改成 `<=`、把
+ * `mspt > MSPT_WARN` 改成 `>=`，门禁都是 PASS。而 WARN 恰好是"黄灯"那一档——
+ * 服主最常看到的颜色正是在这里偏移。所以现在两档都取、都判；某档找不到比较也算失败
+ * （那意味着这一档被人删掉了，边界从此落进 else，被判成 OK）。
  *
  * 刻意**不**比较阈值数值：后端阈值可配置，代理侧硬编码的是"随包默认值"，
  * 服主改了后端配置本来就会不一致（README 已写明要手动同步）。数值漂移是已知的、
@@ -114,7 +124,13 @@ function expectedSymbol(direction, comparison) {
   return lowIsBad ? '≤' : '≥';
 }
 
-/** 从算子表里取一条规则的 {direction, comparison}。找不到就记问题。 */
+/**
+ * 从算子表里取一条规则的 {direction, critical, warning}。找不到就记问题。
+ *
+ * 两档都返回，不再只返回 critical —— 见文件头「为什么必须逐档」。两档闭合性不同
+ * （ThresholdOperatorBehaviorTest 专门测这种能力）也不再报"人工决定"：代理 cell 本身就有
+ * CRITICAL / WARN 两级，逐档比对已经能完整表达这种分叉。
+ */
 function readRule(src, key) {
   // new Rule("tps:global", Direction.LOW_IS_BAD, Comparison.STRICT, Comparison.STRICT);
   const re = new RegExp(
@@ -126,31 +142,67 @@ function readRule(src, key) {
     return null;
   }
   const [, direction, critical, warning] = m;
-  if (critical !== warning) {
-    // 两档闭合性不同是本仓库刻意支持的能力（ThresholdOperatorBehaviorTest 专门测它）。
-    // 代理侧只有一个显示档，无法表达分叉 —— 这种情况必须由人决定代理该怎么画，所以报错。
-    problems.push(`${key} 的两档闭合性不同（critical=${critical}, warning=${warning}）。`
-      + '代理侧只有一个显示档，无法照抄这种分叉；请人工决定代理该跟哪一档，并在本门禁里显式 allow-list 理由');
-  }
-  return { direction, comparison: critical };
+  return { direction, critical, warning };
 }
 
-/** 从渲染层取某个 cell 方法里首个与常量比较的符号。 */
-function readCellSymbol(src, methodName) {
+/**
+ * 取 {@code static Cell xxxCell(...) { ... }} 的**完整**方法体。
+ *
+ * 旧实现是 {@code src.slice(at, at + 1200)} —— 一个"恰好够长"的字符窗口。它之所以
+ * 看起来能用，是因为第一次比较总落在窗口内；WARN 档那次比较是否在窗口内，
+ * 取决于中间隔了多少注释。改成按花括号配平取到方法真正结束，窗口长度不再影响结论。
+ */
+function methodBody(src, methodName) {
   const at = src.indexOf(`static Cell ${methodName}(`);
   if (at < 0) {
     problems.push(`代理侧 NetworkRenderer 里找不到 ${methodName}（锚点过期）`);
     return null;
   }
-  const body = src.slice(at, at + 1200);
-  // TPS_CRITICAL / TPS_WARN 这类常量名不参与判断，只看比较符；
-  // `<=` / `>=` 要先于 `<` / `>` 匹配，否则会把两字符的读成单字符。
-  const m = body.match(/(<=|>=|<|>)\s*(TPS|MSPT)_(CRITICAL|WARN)\b/);
-  if (!m) {
-    problems.push(`代理侧 ${methodName} 里找不到与阈值的比较（锚点过期）`);
+  const open = src.indexOf('{', src.indexOf(')', at));
+  if (open < 0) {
+    problems.push(`代理侧 ${methodName} 的方法体大括号找不到（锚点过期）`);
     return null;
   }
-  return m[1];
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}') {
+      depth--;
+      if (depth === 0) return src.slice(open, i + 1);
+    }
+  }
+  problems.push(`代理侧 ${methodName} 的方法体花括号不配平——无法静态分析`);
+  return null;
+}
+
+/**
+ * 从 cell 方法体里取出**每一档**实际用的比较符：{ critical, warning }。
+ *
+ * <p>只认 `${metric}_CRITICAL` / `${metric}_WARN` 这两个常量旁边的那一个符号。
+ * `<=` / `>=` 必须先于 `<` / `>` 匹配，否则两字符的会被读成单字符。</p>
+ *
+ * <p>某档找不到就记问题并返回 null——这一档被删掉时，那个边界会落进最后的 else
+ * 被涂成 OK，正是这条门禁最该抓的形态，不能静默跳过。</p>
+ */
+function readCellSymbols(src, methodName, metric) {
+  const body = methodBody(src, methodName);
+  if (body === null) return null;
+
+  const pick = (tier) => {
+    const re = new RegExp(`(<=|>=|<|>)\\s*${metric}_${tier}\\b`);
+    const m = body.match(re);
+    return m ? m[1] : null;
+  };
+
+  const critical = pick('CRITICAL');
+  const warning = pick('WARN');
+  if (critical === null || warning === null) {
+    const missing = critical === null ? 'CRITICAL' : 'WARN';
+    problems.push(`代理侧 ${methodName} 里找不到 ${metric}_${missing} 的比较（该档可能被删了/锚点过期）。`
+      + '缺档意味着那个边界不再变色，会直接落进 else 被判成 OK');
+    return null;
+  }
+  return { critical, warning };
 }
 
 // ---------------------------------------------------------------------------
@@ -177,23 +229,29 @@ const operatorSrc = stripComments(fs.readFileSync(OPERATOR, 'utf8'));
 const rendererSrc = stripComments(fs.readFileSync(RENDERER, 'utf8'));
 
 const CASES = [
-  { ruleKey: 'tps:global', cell: 'tpsCell', label: 'TPS' },
-  { ruleKey: 'mspt:global', cell: 'msptCell', label: 'MSPT' },
+  { ruleKey: 'tps:global', cell: 'tpsCell', metric: 'TPS', label: 'TPS' },
+  { ruleKey: 'mspt:global', cell: 'msptCell', metric: 'MSPT', label: 'MSPT' },
 ];
 
-for (const { ruleKey, cell, label } of CASES) {
+for (const { ruleKey, cell, metric, label } of CASES) {
   const rule = readRule(operatorSrc, ruleKey);
-  const symbol = readCellSymbol(rendererSrc, cell);
-  if (!rule || !symbol) continue;
-  const expected = expectedSymbol(rule.direction, rule.comparison);
-  const okay = symbol === expected;
-  rows.push({ label, ruleKey, direction: rule.direction, comparison: rule.comparison, expected, actual: symbol, okay });
-  if (!okay) {
-    problems.push(
-      `${label}：后端 ${ruleKey} 是 ${rule.direction} + ${rule.comparison}（越界判据应为 \`${expected}\`），`
-      + `代理侧 ${cell} 用的是 \`${symbol}\`。同一个读数因此会在两个面板上颜色不同——`
-      + `例如恰好等于阈值的那个点，一边黄一边红。改代理侧的 ${cell}，或（若确实要改后端口径）`
-      + `同时更新代理与 README 的「阈值口径」段`);
+  const symbols = readCellSymbols(rendererSrc, cell, metric);
+  if (!rule || !symbols) continue;
+  for (const tier of ['critical', 'warning']) {
+    const expected = expectedSymbol(rule.direction, rule[tier]);
+    const actual = symbols[tier];
+    const okay = actual === expected;
+    rows.push({
+      label, ruleKey, tier, direction: rule.direction,
+      comparison: rule[tier], expected, actual, okay,
+    });
+    if (!okay) {
+      problems.push(
+        `${label}（${tier.toUpperCase()} 档）：后端 ${ruleKey} 是 ${rule.direction} + ${rule[tier]}`
+        + `（越界判据应为 \`${expected}\`），代理侧 ${cell} 用的是 \`${actual}\`。`
+        + `同一个读数因此会在两个面板上颜色不同——例如恰好等于阈值的那个点，一边黄一边红。`
+        + `改代理侧的 ${cell}，或（若确实要改后端口径）同时更新代理与 README 的「阈值口径」段`);
+    }
   }
 }
 
@@ -207,7 +265,7 @@ if (AS_JSON) {
   console.log(`  proxy    : ${RENDERER}`);
   console.log('');
   for (const r of rows) {
-    console.log(`  ${r.okay ? 'OK  ' : 'FAIL'}  ${r.label.padEnd(5)} `
+    console.log(`  ${r.okay ? 'OK  ' : 'FAIL'}  ${r.label.padEnd(5)} ${r.tier.padEnd(9)} `
       + `backend ${r.direction}/${r.comparison} → expects '${r.expected}', proxy uses '${r.actual}'`);
   }
   if (!okay) {

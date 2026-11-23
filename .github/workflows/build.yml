@@ -149,7 +149,7 @@ jobs:
         id: tools
         run: |
           set -euo pipefail
-          for f in check-i18n.mjs check-config-compat.mjs check-scenarios.mjs lib/java-strings.mjs; do
+          for f in check-i18n.mjs check-config-compat.mjs check-scenarios.mjs negative-controls.mjs lib/java-strings.mjs lib/scenario-model.mjs; do
             if [ ! -f "tools/$f" ]; then
               echo "::error::tools/$f missing -- gate scripts must be committed to the repo for CI to run them"
               exit 1
@@ -209,10 +209,15 @@ jobs:
           if [ ! -d "$HARNESS/tests/scenarios" ]; then
             echo '::warning::testharness not checked out beside this repo -- STATIC ASSERTION CHECK DID NOT RUN.'
             echo '::warning::This is not a pass. Run it locally: node tools/check-scenarios.mjs --harness <testharness>'
+            echo '::warning::negative-controls.mjs reads the same scenario files, so on its own a missing harness is exit 2 there too -- skip it, do not treat it as a pass either.'
             echo 'skipped=true' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           node "${{ steps.tools.outputs.dir }}/check-scenarios.mjs" --repo "$GITHUB_WORKSPACE" --harness "$HARNESS"
+          # negative-controls 用的是**同一批** scenario 文件，所以 harness 在时它必须也跑。
+          # 此前它只出现在上面的"文件存在性"清单里，**没有任何 step 真的执行它**——
+          # 于是它在 CI 里从来没有红过，也没人发现它本地是红的。
+          node "${{ steps.tools.outputs.dir }}/negative-controls.mjs" --repo "$GITHUB_WORKSPACE" --harness "$HARNESS"
 
   # ------------------------------------------------------------------------------------
   # J3: jar fingerprint -- the v1.0.0 shade/relocate incident gate (pre-existing, unchanged).
