@@ -25,8 +25,10 @@
 |---|---|---|
 | **1.4.5-SNAPSHOT-fix4** | `PerfScope-1.4.5-SNAPSHOT-fix4.jar` | **推荐使用**（最新发布）。从 fix1 起版本号采用 `-SNAPSHOT-fixN` 方案，`N` 是该补丁线的序号；`fix4` 是这条线上最新的一版。<br>
 `pom.xml` 是唯一版本源，`plugin.yml` 与 JAR 文件名都由它派生。<br>
-**注意：fix1～fix4 未归档到本目录**（下表里也没有它们），请从对应的 GitHub Release 附件下载。<br>
 GitHub Releases：<https://github.com/sqkl520/Minecraft-server-plugin-PerfScope/releases> |
+| 1.4.5-SNAPSHOT-fix3 | `PerfScope-1.4.5-SNAPSHOT-fix3.jar` | 验收复审：测试有效性与可用性。 |
+| 1.4.5-SNAPSHOT-fix2 | `PerfScope-1.4.5-SNAPSHOT-fix2.jar` | 跨服摘要上报。 |
+| 1.4.5-SNAPSHOT-fix1 | `PerfScope-1.4.5-SNAPSHOT-fix1.jar` | 版本号方案变更 + 未发布修复。 |
 | **1.4.4** | `PerfScope-1.4.4.jar` | **补丁版**，两个修复：
 
 ① **致命**：模块关掉时 `/metrics` 仍报 0。`tps.enabled: false` 会发出 `perfscope_tps 0`，
@@ -130,8 +132,9 @@ downloads.
 **Latest build: 1.4.5-SNAPSHOT-fix4** (`PerfScope-1.4.5-SNAPSHOT-fix4.jar`).
 
 From fix1 on, version numbers use the form `base-SNAPSHOT-fixN`, where `N` is the patch number
-along that line; `fix4` is the newest on this line. **fix1 through fix4 are not archived in this
-directory** — download them from the corresponding GitHub Release attachments. All GitHub Releases are flagged Pre-release, so `/releases/latest` no longer
+along that line; `fix4` is the newest on this line. fix1 through fix4 are all archived here; the
+jars are the exact bytes published as Release attachments, and each has been verified against its
+own git tag. All GitHub Releases are flagged Pre-release, so `/releases/latest` no longer
 resolves — take the topmost entry on the Releases page.
 
 **Historical releases were republished under the new scheme.** The nine tags `v1.1.0` … `v1.4.4`

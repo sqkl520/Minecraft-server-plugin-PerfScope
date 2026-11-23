@@ -15,6 +15,58 @@
 ---
 
 
+## [Unreleased] — 2026-11-24 — 归档补齐 fix1～fix4，并让归档校验认得「CI 构建 vs 本地重建」
+
+> 两件事其实是同一条链：归档缺口要靠工具发现，而工具本身对 CI 构建的产物必然假红——
+> 于是它一直在喊"归档不对"，人就开始无视它。
+
+### Fixed — `versions/` 缺 4 个版本（fix1～fix4 从未归档）
+
+发布过 13 个 Release，`versions/` 只有 1.0.0～1.4.4 这 10 个。fix1～fix4 虽然发到了
+GitHub，却一次也没落到本目录——`versions/README.md` 表头还写着"推荐使用 fix1"，
+照它去找会**找不到文件**。
+
+补上其中 4 个，用的是 GitHub Release 的**原始附件字节**（不是重新构建），
+并逐个用 `verify-release-artifact.mjs` 对着自己的 tag 验过：
+
+| 版本 | tag | 结果 |
+|---|---|---|
+| `1.4.5-SNAPSHOT-fix1` | `dc3e62b` | PASS 13/13 |
+| `1.4.5-SNAPSHOT-fix2` | `24e411f` | PASS 13/13 |
+| `1.4.5-SNAPSHOT-fix3` | `8b40b5b` | PASS 13/13 |
+| `1.4.5-SNAPSHOT-fix4` | `3145c88` | PASS 13/13 |
+| `1.4.4`（原已归档） | `751b87d` | PASS 13/13 |
+
+### Fixed — tag 名硬写成 `v${VERSION}`，导致 `-SNAPSHOT` / `-fixN` 版本必然假红
+
+本项目的 tag 命名变过一次：`1.4.4` 的 tag 是 `v1.4.4-SNAPSHOT`，`1.4.5-SNAPSHOT-fix4` 的
+tag 是 `v1.4.5-SNAPSHOT-fix4`。也就是说**版本字符串与 tag 后缀之间没有可推导的关系**，
+工具却硬写 `v${VERSION}`，于是每一版都报「tag 不存在」——判据错了，但输出与真的缺 tag
+一模一样。
+
+改成三级解析：`--tag <name>` 显式指定 → `--ref` 本身是 tag 就用它 → `v<VERSION>` 兜底。
+
+### Fixed — 整包 sha 不一致时，结论落在「内容是否相同」上
+
+`pom.properties` 由 Maven 生成，换行符跟**平台**走：CI 在 Linux 构建写 LF，本机 Windows
+重建写 CRLF。于是整包 sha 必不相同，而**内容逐字节等价**——`CONTENT` 那一步能分辨，
+`SHA256` 那一步不能，它先跑就会直接判 FAIL。
+
+现在把 SHA256 的结论延迟到 CONTENT 之后：若逐条目比对只发现「仅换行差异」，判
+**PASS (modulo line endings)** 并在措辞里写明原因；若真有内容差异，照旧 FAIL 并点名是哪几个条目。
+
+**负向验证**（实测）：把源码 `config.yml` 的 `config-version` 改掉再重建 →
+仍报 FAIL 并点名 `config.yml`，证明这条放宽只对换行生效，不会把真差异放过去。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| fix1～fix4 + 1.4.4 五个归档逐个验 | 全部 **13/13 PASS** |
+| 真实内容改动（改 `config.yml` 键名） | **FAIL**，点名 `config.yml` |
+| `1.4.4` 归档 sha256 | `06cd287a…`，与 `versions/README.md` 记载一致 |
+
+
 ## [Unreleased] — 2026-11-24 — 测试套件不再往 `%TEMP%` 里堆垃圾
 
 > 这一类问题不会让任何测试变红，只会慢慢吃掉磁盘和 inode——所以它活了很久。
