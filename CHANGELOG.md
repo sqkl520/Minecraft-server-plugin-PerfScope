@@ -15,6 +15,47 @@
 ---
 
 
+## [Unreleased] — 2026-11-24 — P1-S3 的修复本体补上护栏（它此前一行都没被守住）
+
+> 由 `.P1-VERIFICATION.md` 发现：`markMsptCollectFailed` 自己有 11 个用例测得很扎实，
+> 但**让 P1-S3 消失的那两个 `if`** 没有任何测试。删掉或写反它们，994 个用例全绿。
+
+### Fixed — 把两个判据抽成可测的纯函数
+
+问题在调用点的**位置**：`collectMSPT_Paper` / `collectMSPT_BukkitAvg` 的第一行就是
+`Bukkit.getServer()`，测试 JVM 进不去（`tools/KNOWN-TEST-LIMITS.md` 已记录）。
+
+| 抽出来的纯函数 | 原来内联在哪 |
+|---|---|
+| `tickTimesCollectedSamples(MsptStats)` | `collectMSPT_Paper` 的 `if (stats.hasSamples())` |
+| `avgTickIsUsable(double)` | `collectMSPT_BukkitAvg` 的 `if (snap.msptAvg <= 0)` |
+
+调用点现在只剩「把结果交给 `markMsptCollectFailed`」这一句，判定本身可测。
+
+### 变异验证（两条都被抓住）
+
+| 变异 | 结果 |
+|---|---|
+| `avgTickIsUsable` 的 `> 0` 放宽成 `>= 0` | **2 例红**，报 `exactly 0 is the sanitizeAvgTick failure shape` |
+| `tickTimesCollectedSamples` 改成恒 `true` | **2 例红**，报 `null stats must not count as a successful collection` |
+
+修复前这两条变异都是 **SURVIVED**（994 例全绿）。
+
+### 一条额外的护栏
+
+`bothPathsAgreeOnTheZeroBoundary` 把两种降级路径的输入摆在一起断言**口径一致**。
+P1-S3 的本质不是"某一条算错"，而是"两条口径不同"——一条标 `unavailable`、另一条不标，
+于是 `/ps` 说「未知」而 `/ps status` 说「正常」。分开测只能保证各自的取值域，
+这条才钉住那个不一致。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| 后端全量 | **997 例 / 0 失败 / 8 跳过**（新增 3 例）|
+| 两条变异 | 各自 **KILLED** |
+
+
 ## [Unreleased] — 2026-11-24 — CI 的 CHANGELOG 提取从来没成功过（只是没人发现）
 
 > 这一条是核验 P1-AB 时挖出来的。**已发布的 5 个 release 正文都是真的**（1115–3235 字节，

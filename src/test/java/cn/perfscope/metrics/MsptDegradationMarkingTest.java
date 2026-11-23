@@ -278,4 +278,70 @@ class MsptDegradationMarkingTest {
         assertTrue(s.unavailable.containsAll(new LinkedHashSet<>(s.disabledModules)));
         assertTrue(s.unavailable.containsAll(new LinkedHashSet<>(s.warmingUp)));
     }
+
+    // ====================================================================================
+    // 5. 两个判据本身（P1-S3 真正的修复点）
+    //
+    // 上面所有用例测的都是 markMsptCollectFailed 这个"动作"。而让 P1-S3 消失的是
+    // collectMSPT_Paper / collectMSPT_BukkitAvg 里那两个 **if**——它们所在的方法第一行
+    // 就要 Bukkit，测试进不来。判据抽成纯函数之前，删掉或写反那个 if，994 个用例全绿。
+    // ====================================================================================
+
+    /**
+     * 一级路径：有样本才算成功。
+     *
+     * <p>反驳的是"空数组也算采到了"——那会把 {@code msptAvg = -1} 当成精确读数，
+     * 于是 {@code /ps} 显示 {@code -1.0ms} 而 {@code /ps status} 说正常。</p>
+     */
+    @Test
+    void paperPathNeedsAtLeastOneSample() {
+        assertFalse(MetricsCollector.tickTimesCollectedSamples(null),
+            "null stats must not count as a successful collection");
+        assertFalse(MetricsCollector.tickTimesCollectedSamples(MetricsCollector.reduceTickTimes(new long[0])),
+            "an empty tick-times array is the warm-up shape, not a reading");
+        assertFalse(MetricsCollector.tickTimesCollectedSamples(MetricsCollector.reduceTickTimes(new long[100])),
+            "an all-zero array (unfilled ring buffer slots) is not a reading either");
+        assertTrue(MetricsCollector.tickTimesCollectedSamples(
+                MetricsCollector.reduceTickTimes(new long[]{1_000_000L, 2_000_000L})),
+            "one real sample is a reading");
+    }
+
+    /**
+     * 二级路径：{@code > 0} 才算可用。
+     *
+     * <p><b>边界必须钉死</b>：{@code 0} 是 {@code sanitizeAvgTick} 在未填充/除零/NaN
+     * 之后给出的形状。判据若放宽成 {@code <= -999}（一种看似"更有容错"的写法），
+     * 恰好 0 就会漏过去，于是 {@code /ps} 说"未知"而 {@code /ps status} 说"正常"——
+     * 正是 P1-S3 那条 bug 本身。</p>
+     */
+    @Test
+    void avgTickIsUsableOnlyAboveZeroAndFinite() {
+        assertFalse(MetricsCollector.avgTickIsUsable(0.0),
+            "exactly 0 is the sanitizeAvgTick failure shape, not a reading -- this is the P1-S3 boundary");
+        assertFalse(MetricsCollector.avgTickIsUsable(-1.0), "negative is the unknown sentinel");
+        assertFalse(MetricsCollector.avgTickIsUsable(Double.NaN), "NaN must not pass a >0 check by accident");
+        assertFalse(MetricsCollector.avgTickIsUsable(Double.POSITIVE_INFINITY),
+            "infinity would render as 'Infinity ms' and poison the average");
+        assertTrue(MetricsCollector.avgTickIsUsable(0.001), "the smallest positive reading is usable");
+        assertTrue(MetricsCollector.avgTickIsUsable(3.5), "a normal reading is usable");
+    }
+
+    /**
+     * 两个判据在"恰好 0 / 空"这个边界上必须**一致地**判失败。
+     *
+     * <p>分开测能覆盖各自的取值域，但真正的 bug 是"两条降级路径口径不同"——
+     * 一条标 unavailable、另一条不标。这条用例把两种输入摆在一起，
+     * 任何一侧被改宽都会红。</p>
+     */
+    @Test
+    void bothPathsAgreeOnTheZeroBoundary() {
+        boolean paperSaysFailed = !MetricsCollector.tickTimesCollectedSamples(
+            MetricsCollector.reduceTickTimes(new long[0]));
+        boolean avgSaysFailed = !MetricsCollector.avgTickIsUsable(0.0);
+        assertEquals(paperSaysFailed, avgSaysFailed,
+            "the two degradation paths must agree on what counts as 'collected nothing': "
+                + "if one marks the module unavailable and the other does not, /ps says 'unknown' "
+                + "while /ps status says 'normal'");
+        assertTrue(paperSaysFailed, "precondition: both must in fact judge this input as failed");
+    }
 }
