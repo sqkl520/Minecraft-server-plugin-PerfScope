@@ -344,22 +344,65 @@ jobs:
           # Release 标题 = 去掉 v 的 tag。单写一行到 GITHUB_OUTPUT，别在 yaml 里用
           # `${{ github.ref_name }}` 再去 v —— yaml 侧没有字符串裁剪函数。
           echo "release_name=$TAG" >> "$GITHUB_OUTPUT"
-          # Take the block that starts at the first heading mentioning this version and ends at
-          # the next heading of the same or higher level. Falls back to a pointer when absent.
-          awk -v v="$TAG" '
-            /^## / {
-              if (started) exit
-              if (index($0, v) > 0) { started = 1 }
-            }
-            started { print }
-          ' CHANGELOG.md > release-notes.md || true
+          # 抓 CHANGELOG 里属于本版本的那一段。
+          #
+          # 匹配不能要求标题与 tag 名逐字相等：本项目的 tag 与 CHANGELOG 标题**格式不同**，
+          # 而且历史上不一致过：
+          #   tag v1.4.4-SNAPSHOT        -> CHANGELOG 标题是 `## [1.4.4]`（没有 -SNAPSHOT）
+          #   tag v1.4.5-SNAPSHOT-fix4   -> 该 tag 的 CHANGELOG 里根本没有 fix4 段
+          #                                 （段是后来补的）
+          # 旧实现用 `index($0, v) > 0` 整串包含匹配，上面两种都匹配不到 -> 静默写占位符。
+          #
+          # 依次放宽试三档，任一命中即用。第三档**不能**去掉 -fixN：`1.4.5` 会命中
+          # `## [1.4.5-SNAPSHOT-fix1]`（第一个包含它的标题），把 fix1 的说明当成 fix4 的发出去。
+          #   ＊ 都要求标题行**以 `## [` 开头且版本号后紧跟 `]`**，避免子串误命中。
+          BARE=$(printf '%s' "$TAG" | sed 's/-SNAPSHOT\(-fix[0-9]*\)\?$//')
+          # 只取 `## [` 之后到**第一个 `]`** 之间的内容，再逐字比较。
+          # 直接用整行做比较会失败——标题是 `## [1.4.4] — 2026-11-15 — 补丁版`，
+          # 行尾还带着日期与描述，整行永远不等于 `[1.4.4]`。
+          extract() {
+            awk -v v="$1" -v mode="$2" '
+              /^## \[/ {
+                if (started) exit
+                rest = substr($0, 5)
+                i = index(rest, "]")
+                if (i > 0) {
+                  name = substr(rest, 1, i - 1)
+                  hit = 0
+                  if (mode == "exact") hit = (name == v)
+                  else if (mode == "bare") hit = (name == v || name == v "-SNAPSHOT")
+                  if (hit) started = 1
+                }
+              }
+              started { print }
+            ' CHANGELOG.md
+          }
+          extract "$TAG" exact > release-notes.md || true
+          if [ ! -s release-notes.md ] && [ "$TAG" != "$BARE" ]; then
+            extract "$BARE" exact > release-notes.md || true
+          fi
+          # 最后一档只认 `<裸版本>` 或 `<裸版本>-SNAPSHOT`。**不能**放宽成"包含裸版本"：
+          # 那样 `1.4.5` 会命中 `## [1.4.5-SNAPSHOT-fix1]`（第一个以它开头的标题），
+          # 把 fix1 的说明当成 fix4 发出去——比占位符更糟，因为它看起来是对的。
           if [ ! -s release-notes.md ]; then
+            extract "$BARE" bare > release-notes.md || true
+          fi
+          # 还是空的话**不要静默降级**：写占位符可以（release 得能发出去），但必须让这一步
+          # 变成失败，否则"正文是占位符"这件事永远不会被谁发现。历史上有 5 个 release 的正文
+          # 是手工写的，靠人记得而不是靠这条流水线——那不是可持续的做法。
+          MISSING_NOTES=0
+          if [ ! -s release-notes.md ]; then
+            MISSING_NOTES=1
             {
-              echo "Release $TAG"
+              echo "## $TAG"
               echo
-              echo "See [CHANGELOG.md](CHANGELOG.md) for the full history."
+              echo "> 本版本的 CHANGELOG 段没有在打 tag 的那个提交里找到。"
+              echo "> 完整历史见 [CHANGELOG.md](CHANGELOG.md)。"
+              echo
+              echo "> **这是占位符，不是发布说明。** 触发的条件通常是：先打了 tag、之后才补"
+              echo "> CHANGELOG 段。修法是补上该版本的段落，再手动编辑这条 Release 的正文。"
             } > release-notes.md
-            echo '::warning::no CHANGELOG section found for this version; using a placeholder'
+            echo "::error::no CHANGELOG section found for $TAG (tried [$TAG], [$BARE]); release notes are a PLACEHOLDER"
           fi
           # 正文尾部补产物指纹（参照仓库每条 release 都带 sha256），让下载方能校验字节。
           JAR=$(ls target/PerfScope-*.jar | grep -v original | head -n 1)
@@ -372,6 +415,14 @@ jobs:
             echo "**sha256**：\`$(sha256sum "$JAR" | cut -d' ' -f1)\`"
           } >> release-notes.md
           cat release-notes.md
+          # 占位符不阻断这一步——release 本身该发出去，产物不该因为说明缺失而丢。
+          # 失败由后面独立的 "Assert release notes are real" 步骤负责，放在 Create Release 之后，
+          # 这样"发出来了但正文是占位符"是一个**可见的失败**，而不是一个看不见的降级。
+          if [ "$MISSING_NOTES" -eq 1 ]; then
+            echo "notes_are_placeholder=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "notes_are_placeholder=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Create GitHub Release with the jar
         uses: softprops/action-gh-release@v2
@@ -389,6 +440,18 @@ jobs:
           # 仍为草稿：门禁只能证明字节，措辞与「现在该不该发」由人决定（项目铁律 Step 6）。
           draft: true
           generate_release_notes: false
+
+      - name: Assert release notes are real, not a placeholder
+        # 这一步在本 job 里是**故意失败的**：draft release 已经建好了（产物没丢），
+        # 但"正文是占位符"必须让这次 CI 变红，否则没有任何人或门禁会注意到它。
+        # 触发条件通常是"先打 tag、之后才补 CHANGELOG 段"——历史上有 5 个 release
+        # 的正文是手工写的，靠的是人记得，不是靠流水线。
+        if: steps.notes.outputs.notes_are_placeholder == 'true'
+        run: |
+          echo "::error::RELEASE NOTES FOR ${{ steps.notes.outputs.release_name }} ARE A PLACEHOLDER."
+          echo "The CHANGELOG section for this version was not present in the tagged commit."
+          echo "Fix: add the section, push, then edit the draft Release body by hand."
+          exit 1
 
       - name: Remind about the local gates this job cannot run
         run: |
