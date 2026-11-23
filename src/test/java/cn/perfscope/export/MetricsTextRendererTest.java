@@ -31,6 +31,68 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class MetricsTextRendererTest {
 
+    /**
+     * 断言输出里有这样一条样本，且**只比较"指标名 + 我关心的那几个标签 + 值"**，
+     * 不关心标签出现的顺序、也不关心是否还带着别的标签。
+     *
+     * <p>为什么不能直接 {@code out.contains("perfscope_tps{period=\"1m\"}")}：
+     * Prometheus 里标签顺序**没有语义**，而渲染器现在会给每条样本追加
+     * {@code server_id}（多服抓同一个 Prometheus 时靠它区分，缺了会串服）。
+     * 按字面前缀匹配的断言会因为多一个标签而全部失配——那锁的是标签顺序，
+     * 不是文本规范。</p>
+     *
+     * @param out   渲染结果
+     * @param name  指标名
+     * @param pairs 期望的标签（{@code k=v}，值不带引号），可传空
+     * @param value 期望的值；传 {@code null} 表示只校验指标名与标签，不校验值
+     */
+    private static void assertSample(String out, String name, String[] pairs, String value) {
+        for (String line : out.split("\n")) {
+            if (line.isEmpty() || line.startsWith("#")) {
+                continue;
+            }
+            int sp = line.lastIndexOf(' ');
+            if (sp <= 0) {
+                continue;
+            }
+            String head = line.substring(0, sp);
+            String got = line.substring(sp + 1);
+            int brace = head.indexOf('{');
+            String metric = brace < 0 ? head : head.substring(0, brace);
+            if (!metric.equals(name)) {
+                continue;
+            }
+            String labels = brace < 0 ? "" : head.substring(brace + 1, head.lastIndexOf('}'));
+            boolean allPresent = true;
+            for (String p : pairs) {
+                int eq = p.indexOf('=');
+                String k = p.substring(0, eq);
+                String v = p.substring(eq + 1);
+                if (!labels.contains(k + "=\"" + v + "\"")) {
+                    allPresent = false;
+                    break;
+                }
+            }
+            if (allPresent && (value == null || value.equals(got))) {
+                return;
+            }
+        }
+        throw new AssertionError("no sample " + name + "{" + String.join(",", pairs) + "}"
+            + (value == null ? "" : " " + value) + " in:\n" + out);
+    }
+
+    /** 只校验指标名存在（不校验值）。 */
+    private static boolean hasSample(String out, String name, String[] pairs) {
+        try {
+            assertSample(out, name, pairs, null);
+            return true;
+        } catch (AssertionError e) {
+            return false;
+        }
+    }
+
+    private static final String[] NO_LABELS = new String[0];
+
     private static MetricsTextRenderer.Context ctx() {
         return new MetricsTextRenderer.Context(
             "survival-1", "1.3.0", "Paper", "1.21.4", "21.0.10", "",
@@ -184,13 +246,14 @@ class MetricsTextRendererTest {
         s.msptMin = -1;             // TPS 反推路径没有极值
         String out = MetricsTextRenderer.render(s, ctx());
 
-        assertFalse(out.contains("perfscope_cpu_process_ratio"),
+        assertFalse(hasSample(out, "perfscope_cpu_process_ratio", NO_LABELS),
             "an uncollected CPU metric must be absent, never -1 or -0.01");
         // 没有 min 时不应输出 stat="min"，但 avg/max 必须还在
         assertTrue(out.contains("stat=\"avg\""));
         // P0-U：tick_duration 现在多带一个 source 标签（见 tickDuration 的 javadoc）。
         // 断言按标签出现而非逐字整行：既有查询 {stat="avg"} 是子集选择器，仍然匹配。
-        assertTrue(out.contains("perfscope_tick_duration_seconds{stat=\"max\",source=\"measured\"}"),
+        assertTrue(hasSample(out, "perfscope_tick_duration_seconds",
+            new String[]{"stat=max", "source=measured"}),
             "the max sample must still be emitted (with the new source label): " + out);
         assertFalse(out.contains("stat=\"min\""));
     }
@@ -211,10 +274,10 @@ class MetricsTextRendererTest {
         s.msptSource = MetricsSnapshot.MSPT_SOURCE_TPS_FALLBACK;
         String out = MetricsTextRenderer.render(s, ctx());
 
-        assertTrue(out.contains(
-                "perfscope_tick_duration_seconds{stat=\"avg\",source=\"tps_fallback\"}"),
+        assertTrue(hasSample(out, "perfscope_tick_duration_seconds",
+                new String[]{"stat=avg", "source=tps_fallback"}),
             "an estimated tick duration must carry source=tps_fallback: " + out);
-        assertFalse(out.contains("source=\"measured\""),
+        assertFalse(out.contains("source=\"measured\"") || hasSample(out, "perfscope_tick_duration_seconds", new String[]{"source=measured"}),
             "no sample of this snapshot is a real measurement, so none may be labeled measured: " + out);
         // HELP 必须说明这件事——只看标签不看文档，等于把发现成本转给下一个看板的人
         assertTrue(out.contains("ESTIMATE"),
@@ -237,7 +300,7 @@ class MetricsTextRendererTest {
         s.msptMax = 0.0;
         String out = MetricsTextRenderer.render(s, ctx());
 
-        assertFalse(out.contains("perfscope_tick_duration_seconds{"),
+        assertFalse(hasSample(out, "perfscope_tick_duration_seconds", NO_LABELS),
             "0 ms per tick is physically impossible; emitting it draws a false baseline: " + out);
         assertFalse(out.contains("# HELP perfscope_tick_duration_seconds"),
             "with no sample at all the HELP/TYPE pair must be absent too: " + out);
@@ -260,9 +323,9 @@ class MetricsTextRendererTest {
         s.msptMax = 88.8;
         String out = MetricsTextRenderer.render(s, ctx());
 
-        assertTrue(out.contains("perfscope_tick_duration_seconds{stat=\"avg\""),
+        assertTrue(hasSample(out, "perfscope_tick_duration_seconds", new String[]{"stat=avg"}),
             "the credible avg must still be emitted: " + out);
-        assertTrue(out.contains("perfscope_tick_duration_seconds{stat=\"max\""),
+        assertTrue(hasSample(out, "perfscope_tick_duration_seconds", new String[]{"stat=max"}),
             "the credible max must still be emitted: " + out);
         assertFalse(out.contains("stat=\"min\""),
             "a 0 stat is not a reading and must be dropped individually — the group-level guard "
@@ -376,13 +439,13 @@ class MetricsTextRendererTest {
     void snapshotlessRenderStillEmitsTheHealthSignals() {
         String out = MetricsTextRenderer.render(null, ctx());
 
-        assertTrue(out.contains("perfscope_build_info"), "build_info must survive a null snapshot");
-        assertTrue(out.contains("perfscope_snapshot_age_seconds"),
+        assertTrue(hasSample(out, "perfscope_build_info", NO_LABELS), "build_info must survive a null snapshot");
+        assertTrue(hasSample(out, "perfscope_snapshot_age_seconds", NO_LABELS),
             "age must be emitted even without a snapshot - it is the only 'collection is frozen' signal");
-        assertTrue(out.contains("perfscope_collector_degraded"));
+        assertTrue(hasSample(out, "perfscope_collector_degraded", NO_LABELS));
         // 但没有快照就不该有业务指标
-        assertFalse(out.contains("perfscope_tps"));
-        assertFalse(out.contains("perfscope_entities"));
+        assertFalse(hasSample(out, "perfscope_tps", NO_LABELS));
+        assertFalse(hasSample(out, "perfscope_entities", NO_LABELS));
     }
 
     @Test
@@ -390,11 +453,11 @@ class MetricsTextRendererTest {
         String out = MetricsTextRenderer.render(snap(), ctx());
 
         // 规范做法是同一指标名 + world 标签，而不是 world_entities 这种另造名字
-        assertTrue(out.contains("perfscope_entities{world=\"world\"} 1000"));
-        assertTrue(out.contains("perfscope_entities{world=\"world_nether\"} 234"));
-        assertFalse(out.contains("perfscope_world_entities"));
+        assertSample(out, "perfscope_entities", new String[]{"world=world"}, "1000");
+        assertSample(out, "perfscope_entities", new String[]{"world=world_nether"}, "234");
+        assertFalse(hasSample(out, "perfscope_world_entities", NO_LABELS));
         // 总数样本与按世界样本共存
-        assertTrue(out.contains("perfscope_entities 1234"));
+        assertSample(out, "perfscope_entities", NO_LABELS, "1234");
 
         long helpCount = out.lines()
             .filter(l -> l.equals("# HELP perfscope_entities Loaded entities in total and per world."))
@@ -411,12 +474,12 @@ class MetricsTextRendererTest {
         assertEquals(11, MetricsTextRenderer.modules().size(),
             "module list must match the 11 collection modules");
         for (String module : MetricsTextRenderer.modules()) {
-            assertTrue(out.contains("perfscope_module_available{module=\"" + module + "\"}"),
+            assertTrue(hasSample(out, "perfscope_module_available", new String[]{"module=" + module}),
                 "missing module_available for " + module);
         }
-        assertTrue(out.contains("perfscope_module_available{module=\"chunks\"} 0"),
-            "an unavailable module must read 0, not be omitted");
-        assertTrue(out.contains("perfscope_module_available{module=\"tps\"} 1"));
+        assertSample(out, "perfscope_module_available", new String[]{"module=chunks"}, "0");
+        // an unavailable module must read 0, not be omitted
+        assertSample(out, "perfscope_module_available", new String[]{"module=tps"}, "1");
     }
 
     @Test
@@ -424,10 +487,10 @@ class MetricsTextRendererTest {
         String out = MetricsTextRenderer.render(snap(), ctx());
 
         // 12/100 = 0.12，不是 12.0
-        assertTrue(out.contains("perfscope_players_usage_ratio 0.12"),
-            "ratios must be 0-1 per Prometheus convention");
-        assertTrue(out.contains("perfscope_cpu_system_ratio 0.88"));
-        assertFalse(out.contains("perfscope_cpu_system_ratio 88"));
+        assertSample(out, "perfscope_players_usage_ratio", NO_LABELS, "0.12");
+        // ratios must be 0-1 per Prometheus convention
+        assertSample(out, "perfscope_cpu_system_ratio", NO_LABELS, "0.88");
+        assertFalse(hasSample(out, "perfscope_cpu_system_ratio", new String[]{"x=88"}));
     }
 
     @Test
@@ -441,8 +504,8 @@ class MetricsTextRendererTest {
             System.currentTimeMillis(), System.currentTimeMillis(),
             false, 0, 2, 1, Map.of("open", 5L, "recover", 3L));
         String out2 = MetricsTextRenderer.render(snap(), withEvents);
-        assertTrue(out2.contains("perfscope_alert_events_total{type=\"open\"} 5"));
-        assertTrue(out2.contains("perfscope_alert_events_total{type=\"recover\"} 3"));
+        assertSample(out2, "perfscope_alert_events_total", new String[]{"type=open"}, "5");
+        assertSample(out2, "perfscope_alert_events_total", new String[]{"type=recover"}, "3");
     }
 
     @Test
@@ -463,7 +526,7 @@ class MetricsTextRendererTest {
         assertTrue(out.contains("# TYPE perfscope_gc_collections_total counter"));
         assertTrue(out.contains("# TYPE perfscope_heap_used_bytes gauge"));
         // 字节就是字节：1 GiB 应输出 1073741824，不是 1024
-        assertTrue(out.contains("perfscope_heap_used_bytes 1073741824"));
+        assertSample(out, "perfscope_heap_used_bytes", NO_LABELS, "1073741824");
     }
 
     // ==================== 模块不可用时必须整行不输出 ====================
@@ -509,8 +572,8 @@ class MetricsTextRendererTest {
         }
 
         // module_available 这一组本身必须还在——它正是告诉抓取方"别信这些缺失"的
-        assertTrue(out.contains("perfscope_module_available{module=\"tps\"} 0"),
-            "the availability signal itself must survive; it is how the scraper knows the gap is real");
+        assertSample(out, "perfscope_module_available", new String[]{"module=tps"}, "0");
+        // the availability signal itself must survive; it is how the scraper knows the gap is real
     }
 
     /** 模块可用时必须正常输出（守卫不能把所有东西都挡掉）。 */
@@ -519,8 +582,71 @@ class MetricsTextRendererTest {
         MetricsSnapshot s = snap();   // 默认没有任何模块进 unavailable
         String out = MetricsTextRenderer.render(s, ctx());
 
-        assertTrue(out.contains("perfscope_tps{period=\"1m\"}"), "TPS is available here");
+        assertTrue(hasSample(out, "perfscope_tps", new String[]{"period=1m"}), "TPS is available here");
         assertTrue(out.contains("perfscope_heap_used_bytes "), "memory is available here");
         assertTrue(out.contains("perfscope_entities "), "entities are available here");
+    }
+
+    // ==================== 跨服身份标签（server_id）====================
+
+    /**
+     * **每一条样本**都必须带上 `server_id`，否则多服抓进同一个 Prometheus 时会串服。
+     *
+     * <p>这条守的是一个「静默产生错数据」的缺陷：`server_id` 此前只出现在
+     * `perfscope_build_info` 一条序列上，其余几十条都没有。两个服被抓进同一个
+     * Prometheus 时，`perfscope_tps{period="1m"}` 在每个服上都是**同一组标签**，
+     * Prometheus 报 duplicate sample 或后者覆盖前者——看到的是一个随机某台服的数字，
+     * 而且**不会报任何错**。</p>
+     *
+     * <p>断言方式刻意是「扫每一条样本」而不是「挑几条看看」：漏一条就是一条序列会串服，
+     * 而那种漏检在单服测试里完全看不出来。</p>
+     */
+    @Test
+    void everySampleCarriesTheServerIdLabel() {
+        String out = MetricsTextRenderer.render(snap(), ctx());
+        int samples = 0;
+        for (String line : out.split("\n")) {
+            if (line.isEmpty() || line.startsWith("#")) {
+                continue;
+            }
+            samples++;
+            assertTrue(line.contains("server_id=\"survival-1\""),
+                "every sample must carry server_id, otherwise multi-server scrapes collide: " + line);
+        }
+        assertTrue(samples > 20, "precondition: this snapshot should emit many samples, got " + samples);
+    }
+
+    /** `server_id` 只能出现一次——重复的标签名会让 Prometheus 整次抓取判格式错误。 */
+    @Test
+    void serverIdLabelAppearsOnlyOncePerLine() {
+        String out = MetricsTextRenderer.render(snap(), ctx());
+        for (String line : out.split("\n")) {
+            if (line.isEmpty() || line.startsWith("#")) {
+                continue;
+            }
+            int first = line.indexOf("server_id=\"");
+            assertEquals(-1, line.indexOf("server_id=\"", first + 1),
+                "a duplicated label name makes the whole scrape fail to parse: " + line);
+        }
+    }
+
+    /** 没配 server-id 时不注入空标签——空值只会让 Grafana 的筛选器更难写。 */
+    @Test
+    void emptyServerIdInjectsNoLabel() {
+        MetricsTextRenderer.Context noId = new MetricsTextRenderer.Context(
+            "", "1.3.0", "Paper", "1.21.4", "21.0.10", "",
+            System.currentTimeMillis(), System.currentTimeMillis() - 1000L,
+            false, 0, 2, 1, null);
+        String out = MetricsTextRenderer.render(snap(), noId);
+        // perfscope_build_info 本来就带 server_id（即使为空），那是既有契约。
+        // 这里只要求**其余样本**不被注入空标签。
+        for (String line : out.split("\n")) {
+            if (line.startsWith("perfscope_build_info{")) {
+                continue;
+            }
+            assertFalse(line.contains("server_id=\"\""),
+                "an empty id must not become an empty label on: " + line);
+        }
+        assertTrue(hasSample(out, "perfscope_tps", new String[]{"period=1m"}));
     }
 }

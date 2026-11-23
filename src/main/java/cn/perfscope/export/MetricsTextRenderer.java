@@ -157,23 +157,83 @@ public final class MetricsTextRenderer {
         // 它只读 ctx 与 snap.alertLevels，不依赖任何采集值——而这个门控原本会让
         // "采集器自己挂了"这个最该看告警的时刻，告警指标一起消失。
         alerts(sb, ctx, snap);
-        if (snap == null) {
-            return sb.toString();
+        if (snap != null) {
+            tps(sb, snap);
+            tickDuration(sb, snap);
+            players(sb, snap);
+            entities(sb, snap);
+            chunks(sb, snap);
+            tileEntities(sb, snap);
+            memory(sb, snap);
+            cpu(sb, snap);
+            gc(sb, snap);
+            serverInfo(sb, snap);
+            modules(sb, snap);
         }
 
-        tps(sb, snap);
-        tickDuration(sb, snap);
-        players(sb, snap);
-        entities(sb, snap);
-        chunks(sb, snap);
-        tileEntities(sb, snap);
-        memory(sb, snap);
-        cpu(sb, snap);
-        gc(sb, snap);
-        serverInfo(sb, snap);
-        modules(sb, snap);
+        // 统一注入跨服身份标签。
+        //
+        // 此前 server_id 只出现在 perfscope_build_info 这一条序列上，其余几十条指标都没有。
+        // 后果不是"少一个标签"，而是**多服抓进同一个 Prometheus 时序列会互相覆盖**：
+        // perfscope_tps{period="1m"} 在每个服上都是同一组标签，Prometheus 报
+        // duplicate sample 或者后者覆盖前者——看到的是一个随机某台服的数字，且不会报错。
+        //
+        // README 那段"不输出 instance/job 标签，要跨服区分请用 server-id"因此在实现上
+        // 落不了地：server-id 压根不在那些序列上。
+        //
+        // 放在这里而不是每个 sample() 调用点各加一次：调用点有 30 多处，逐个改漏一处
+        // 就是一条序列会串服，而那种漏检在单服测试里**完全看不出来**。
+        // 后处理扫一遍，是唯一能保证"每一条都带上"的写法。
+        return injectServerId(sb.toString(), ctx.serverId());
+    }
 
-        return sb.toString();
+    /**
+     * 给每一条样本行插入 {@code server_id} 标签；{@code # HELP} / {@code # TYPE} 注释行原样保留。
+     *
+     * <p>已经有该标签的行（目前只有 {@code perfscope_build_info}）不重复注入——
+     * Prometheus 遇到同名标签两次会直接判格式错误，整次抓取失败。</p>
+     */
+    private static String injectServerId(String text, String serverId) {
+        String id = serverId == null ? "" : serverId;
+        if (id.isEmpty()) {
+            // 空身份不注入：留一个空标签只会让 Grafana 的筛选器更难写，
+            // 而且"没配置 server-id"这件事已经由 build_info 与启动告警说过了。
+            return text;
+        }
+        String label = "server_id=\"" + escape(id) + "\"";
+        StringBuilder out = new StringBuilder(text.length() + 512);
+        for (String line : text.split("\n", -1)) {
+            if (line.isEmpty() || line.startsWith("#")) {
+                // 注释行（HELP/TYPE）与末尾空行原样保留。
+                out.append(line).append('\n');
+                continue;
+            }
+            int brace = line.indexOf('{');
+            int space = line.indexOf(' ');
+            if (brace >= 0 && brace < space) {
+                int close = line.indexOf('}', brace);
+                String labels = line.substring(brace + 1, close);
+                if (labels.contains("server_id=\"")) {
+                    out.append(line).append('\n');       // 已带，别加第二次
+                } else {
+                    // **追加到末尾，不插到开头。** 标签顺序在 Prometheus 里无语义，
+                    // 但已有查询与测试大量按 `metric{period="1m"}` 这样的前缀匹配写，
+                    // 把 server_id 插到最前面会让它们全部失配——那是零收益的破坏。
+                    out.append(line, 0, close).append(',').append(label)
+                        .append(line.substring(close)).append('\n');
+                }
+            } else {
+                // 无标签的样本：name value -> name{server_id="..."} value
+                out.append(line, 0, space).append('{').append(label).append('}')
+                    .append(line, space, line.length()).append('\n');
+            }
+        }
+        // split(-1) 会在末尾多补一个空串，上面已按空行处理；去掉最后多出来的那个换行。
+        if (out.length() > 0 && out.charAt(out.length() - 1) == '\n'
+                && !text.endsWith("\n")) {
+            out.setLength(out.length() - 1);
+        }
+        return out.toString();
     }
 
     /**

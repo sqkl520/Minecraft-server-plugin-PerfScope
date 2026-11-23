@@ -30,6 +30,46 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class MetricsAlertStateTest {
 
+    /**
+     * 断言有这样一个 {@code perfscope_alert} 样本：指标名与给定标签齐备、值等于 {@code value}。
+     *
+     * <p>不按字面 {@code out.contains("perfscope_alert{key=...,module=...} N")} 匹配：
+     * Prometheus 的标签顺序**没有语义**，而渲染器会给每条样本追加 {@code server_id}
+     * （多服抓同一个 Prometheus 时靠它区分，否则序列互相覆盖）。字面前缀匹配锁的是
+     * 标签顺序，不是文本规范。</p>
+     */
+    private static void assertAlert(String out, String key, String module, String value) {
+        for (String line : out.split("\n")) {
+            if (line.isEmpty() || line.startsWith("#")) {
+                continue;
+            }
+            int sp = line.lastIndexOf(' ');
+            if (sp <= 0) {
+                continue;
+            }
+            String head = line.substring(0, sp);
+            if (!head.startsWith("perfscope_alert{")) {
+                continue;
+            }
+            if (head.contains("key=\"" + key + "\"") && head.contains("module=\"" + module + "\"")
+                    && line.substring(sp + 1).equals(value)) {
+                return;
+            }
+        }
+        throw new AssertionError("no perfscope_alert{key=\"" + key + "\",module=\"" + module
+            + "\"} " + value + " in:\n" + out);
+    }
+
+    /** 输出里是否存在任意一条 {@code perfscope_alert} 样本。 */
+    private static boolean hasAnyAlert(String out) {
+        for (String line : out.split("\n")) {
+            if (line.startsWith("perfscope_alert{")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static MetricsSnapshot snap() {
         MetricsSnapshot s = new MetricsSnapshot();
         s.timestamp = 1_700_000_000_000L;
@@ -70,8 +110,8 @@ class MetricsAlertStateTest {
         s.alertLevels = levels;
 
         String out = MetricsTextRenderer.render(s, ctx());
-        assertTrue(out.contains("perfscope_alert{key=\"tps:global\",module=\"tps\"} 0"), out);
-        assertTrue(out.contains("perfscope_alert{key=\"memory:global\",module=\"memory\"} 0"), out);
+        assertAlert(out, "tps:global", "tps", "0");
+        assertAlert(out, "memory:global", "memory", "0");
     }
 
     @Test
@@ -83,7 +123,7 @@ class MetricsAlertStateTest {
 
         String out = MetricsTextRenderer.render(s, ctx());
         // 关键断言：级别出现在**值**的位置，而不是 label 里
-        assertTrue(out.contains("perfscope_alert{key=\"tps:global\",module=\"tps\"} 2"), out);
+        assertAlert(out, "tps:global", "tps", "2");
         assertFalse(out.contains("severity="),
             "severity must NOT be a label - that makes each level change a new series and breaks `for:`");
     }
@@ -108,8 +148,8 @@ class MetricsAlertStateTest {
         healthy.alertLevels = lv2;
         String after = onlyAlertLines(MetricsTextRenderer.render(healthy, ctx()));
 
-        assertTrue(before.contains("perfscope_alert{key=\"chunks:world:world\",module=\"chunks\"} 2"), before);
-        assertTrue(after.contains("perfscope_alert{key=\"chunks:world:world\",module=\"chunks\"} 0"), after);
+        assertAlert(before, "chunks:world:world", "chunks", "2");
+        assertAlert(after, "chunks:world:world", "chunks", "0");
         // 样本条数不变——序列没有消失
         assertEquals(before.lines().count(), after.lines().count(),
             "the series must survive recovery; only its value changes");
@@ -150,8 +190,8 @@ class MetricsAlertStateTest {
             "the internal -1 marker must not reach Prometheus: it is outside the documented 0/1/2 domain");
         assertFalse(out.contains("} -1"),
             "no sample may carry a negative value; a negative here would trip `perfscope_alert < 1` rules");
-        assertTrue(out.contains("perfscope_alert{key=\"tps:global\",module=\"tps\"} 0"),
-            "the judgeable key in the same snapshot must still be emitted as healthy");
+        assertAlert(out, "tps:global", "tps", "0");
+        // the judgeable key in the same snapshot must still be emitted as healthy
     }
 
     // ==================== 渲染器约束 ====================
@@ -167,7 +207,7 @@ class MetricsAlertStateTest {
 
         assertTrue(out.contains("# HELP perfscope_alert "), "HELP must be unconditional");
         assertTrue(out.contains("# TYPE perfscope_alert gauge"), "TYPE must be unconditional");
-        assertFalse(out.contains("perfscope_alert{"), "but no samples when nothing is judgeable");
+        assertFalse(hasAnyAlert(out), "but no samples when nothing is judgeable");
     }
 
     /**

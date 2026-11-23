@@ -15,6 +15,66 @@
 ---
 
 
+## [Unreleased] — 2026-11-24 — Prometheus 的 `server_id` 只在一条序列上，多服抓取会静默串服
+
+> 由生态/冲突调研发现。这是本项目唯一一类「**静默产生错误数据**」的缺陷——
+> 不报错、不崩溃、单服测试完全看不出来，但 Grafana 上看到的是一个随机某台服的数字。
+
+### Fixed — `server_id` 只出现在 `perfscope_build_info` 一条序列上
+
+`MetricsTextRenderer` 里 `ctx.serverId()` 只被调用**一次**（原第 207 行，`build_info` 的标签）。
+其余几十条指标——`perfscope_tps`、`perfscope_players_online`、`perfscope_entities`……
+**全部不带 `server_id`**。
+
+后果具体而确定：两个服被抓进同一个 Prometheus 时，
+
+```
+perfscope_tps{period="1m"} 19.9        <- 服 A
+perfscope_tps{period="1m"} 18.2        <- 服 B，标签完全相同
+```
+
+Prometheus 只会保留其中一条（或报 `duplicate sample for timestamp`）。
+而 README 第 612 行写的「不输出 instance/job 标签……要跨服区分请用 `server-id`」
+在实现上**落不了地**——那个标签压根不在那些序列上。
+
+### 修法：在 `render()` 末尾统一注入，而不是逐调用点加
+
+调用点有 30 多处。逐个改，漏一处就是一条序列会串服，而那种漏检**在单服测试里完全看不出来**。
+所以改成渲染完扫一遍文本，给每条样本行插入标签。
+
+三个必须处理的细节（都实测过）：
+
+| 细节 | 原因 |
+|---|---|
+| `# HELP` / `# TYPE` 注释行必须跳过 | 给注释行插标签会让整次抓取解析失败 |
+| 已有 `server_id` 的行不重复注入 | 同名标签出现两次，Prometheus 判格式错误 |
+| 标签**追加到末尾**，不插开头 | 标签顺序无语义，但已有查询与测试大量按 `metric{period="1m"}` 前缀匹配，插开头会全部失配 |
+| `server-id` 为空时不注入 | 空标签只会让 Grafana 筛选器更难写；"没配"这件事已由 `build_info` 与启动告警说过 |
+
+### 顺带：现有测试的断言方式改成「顺序无关」
+
+有 16 处断言写成 `out.contains("perfscope_tps{period=\"1m\"}")`。这锁的是**标签顺序**，
+不是文本规范——Prometheus 里标签顺序没有语义。改成按「指标名 + 我关心的标签 + 值」匹配，
+新增两个助手 `assertSample` / `hasSample`。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| 全量测试 | **1000 例 / 0 失败 / 8 跳过**（新增 3 例）|
+| 新增 `everySampleCarriesTheServerIdLabel` | 扫**每一条**样本断言都带 `server_id` |
+| 新增 `serverIdLabelAppearsOnlyOncePerLine` | 重复标签名会让整次抓取判格式错误 |
+| 新增 `emptyServerIdInjectsNoLabel` | 空 id 不注入空标签 |
+| 变异：删掉 `injectServerId` 调用 | **1 例红**，报「perfscope_snapshot_timestamp_seconds 1700000000」缺标签 |
+| 七门门禁 | 全 PASS |
+
+### 这是破坏性变更，升级要知道
+
+已有 Grafana 查询里 `sum(perfscope_tps)` 这类**跨服聚合**现在会多一维，
+需要写成 `sum by (server_id) (perfscope_tps)` 才保持原来的按服分组语义。
+精确匹配（`perfscope_tps{period="1m"}`）不受影响——Prometheus 是子集匹配。
+
+
 ## [Unreleased] — 2026-11-24 — `check-sentinels` 的「0 写在左边」半边：不是判对了，是没看见
 
 > 上一轮的序关系修复只覆盖了「字段在左」那一半。36 格判定表实测 **12 格判错**，
