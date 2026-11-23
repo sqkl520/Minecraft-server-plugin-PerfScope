@@ -51,6 +51,7 @@ const argOf = (name, dflt) => {
 };
 const REPO = path.resolve(argOf('--repo', path.join(HERE, '..')));
 const AS_JSON = argv.includes('--json');
+const flag = (name) => argv.includes(name);
 
 /**
  * 有 -1 哨兵的字段，且 `0` <b>也</b>不是可信读数：两种判断方式都接受。
@@ -190,13 +191,102 @@ const rel = (p) => path.relative(REPO, p).replace(/\\/g, '/');
 const CMP = String.raw`(<=|>=|<|>|==|!=)`;
 const fieldAlt = (o) => Object.keys(o).map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
   .sort((a, b) => b.length - a.length).join('|');
+// 字段表达式。两条交替分支的顺序与边界都踩过坑：
+//
+// 1. **方法调用分支必须排前面**。交替是"从左到右取第一个能匹配的"，而 `s.tps1m()` 里
+//    「带前缀的字段名」分支会先吃掉 `s.tps1m`，然后正则要求后面跟运算符，实际却是 `()`
+//    —— 整个匹配失败，`s.tps1m() <= 0` 完全不被看见。
+// 2. **方法调用分支不能受外层的 `(?<![\w.])` 约束**。`s.tps1m()` 中 `tps1m` 前面是 `.`，
+//    后顾断言会把它挡掉。所以调用分支自己带上可选的前缀（`s.` 也算它的一部分）。
+const FIELD_EXPR = (o) => String.raw`((?:\b(?:snap\.|s\.|sample\.|last\.|first\.|prev\.)?` +
+  String.raw`(?:${fieldAlt(o)})\s*\(\s*\))|` +
+  String.raw`\b(?:snap\.|s\.|sample\.|last\.|first\.|prev\.)?(?:${fieldAlt(o)})\b)`;
+// 字面量 0。**不带自己的边界断言**：边界由 makeComparisonRe 在外层统一加，
+// 这里再带一个 `(?![\d.])` 会与外层的 `(?![\w.])` 叠加，把合法匹配也挡掉
+// （实测：0 与 < 之间有空格时 `(?![\d.])` 仍成立，但紧跟 `)` 或 `&` 时会失效）。
+const ZERO = String.raw`0(?:\.0+[dDfF]?)?`;
 
-const sentinelRe = new RegExp(
-  String.raw`(\b(?:snap\.|s\.|sample\.|last\.|first\.|prev\.)?(?:${fieldAlt(SENTINEL_FIELDS)})\b|` +
-  String.raw`\b(?:${fieldAlt(SENTINEL_FIELDS)})\s*\(\s*\))\s*${CMP}\s*0(?:\.0+[dDfF]?)?(?![\d.])`, 'g');
-const noSentinelRe = new RegExp(
-  String.raw`(\b(?:snap\.|s\.|sample\.|last\.|first\.|prev\.)?(?:${fieldAlt(NO_SENTINEL_FIELDS)})\b|` +
-  String.raw`\b(?:${fieldAlt(NO_SENTINEL_FIELDS)})\s*\(\s*\))\s*${CMP}\s*0(?:\.0+[dDfF]?)?(?![\d.])`, 'g');
+// --------------------------------------------------------------------------------------
+// 「正确写法集合」与「镜像形式」
+//
+// 三类字段的正确写法**不同**（见下方 CORRECT_OPS 的说明），所以不能共用一套运算符判断。
+// 但三类都吃同一个坑：**只认"字段在左"的形式**。
+//
+//   x < 0        正确           0 > x        等价，但此前完全不检查
+//   0 <= x       等价 x >= 0     此前也完全不检查
+//
+// 等值比较 `0 == x` 同样漏。所以每类都同时匹配两个方向，
+// 再把「0 在左」翻转成「字段在左」的等价运算符，统一按正确集合判定。
+// --------------------------------------------------------------------------------------
+
+/** 把 `0 <op> x` 翻转成 `x <op'> 0` 的等价运算符。 */
+const MIRROR = { '<': '>', '>': '<', '<=': '>=', '>=': '<=', '==': '==', '!=': '!=' };
+
+/**
+ * 三类字段各自的**正确写法集合**。
+ *
+ * <p>用「正确集合」而不是「错误枚举」是这套判定的关键。错误枚举永远漏：实测 12 种写法里，
+ * 旧实现只拦住 2 种（`<= 0` / `> 0`），其余 10 种全放行——包括语义**完全反转**的 `>= 0`
+ * （把 -1 当可信、把 0 当不可信）、`== 0` / `!= 0`，以及全部「0 写在左边」的镜像形式。</p>
+ *
+ * <p>正确集合还顺带挡住「将来新出现的运算符」：不在集合里就是错。</p>
+ */
+const CORRECT_OPS = {
+  // 哨兵 -1，0 是**合法读数**：只需排除负值。
+  //   x < 0   /  x >= 0   正确（互补）
+  //   x <= 0  /  x > 0    错（连合法的 0 一起排除）—— 这就是 v1.4.2 那类 bug
+  //   x == 0  /  x != 0   错（只判一个点，-1 与 0 混着当）
+  SENTINEL: new Set(['<', '>=']),
+  // 哨兵 -1 且 0 **也不可信**（MSPT）：两个方向都必须判"不可信"。
+  //   x <= 0  /  x > 0    正确（互补）
+  //   x < 0   /  x >= 0   错（漏掉 0 这一半）
+  BOTH_BAD: new Set(['<=', '>']),
+  // 无哨兵，0 是**真实读数**（TPS 0 = 冻结）。
+  //   x >= 0  /  x < 0    正确
+  //   x > 0   /  x <= 0   错（把冻结报成健康）—— v1.4.2 的正脸
+  NO_SENTINEL: new Set(['>=', '<']),
+};
+
+/** 正确写法的建议，按字段类别给（报错信息本身就是文档）。 */
+const ADVICE = {
+  SENTINEL: `0 是合法读数，不能连它一起排除；用 '< 0' 判"不可信"或 '>= 0' 判"可信"`,
+  BOTH_BAD: `'-1' 与 '0' 都不可信，两个方向都要覆盖；用 '<= 0' 判"不可信"或 '> 0' 判"可信"`,
+  NO_SENTINEL: `0 是真实读数，不能排除它；用 '>= 0' 判"可信"或 '< 0' 判"不可信"`,
+};
+
+/**
+ * 一张正则同时抓两个方向。捕获组：
+ *   1 = 左侧（字段表达式或字面量 0）
+ *   2 = 运算符
+ *   3 = 右侧（字段表达式或字面量 0）
+ *
+ * 判定时把「0 在左」的翻转成等价形式，再查 {@link CORRECT_OPS}。
+ * 要求**恰好一边**是字面量 0、另一边是字段：两边都不是 0 是阈值比较，
+ * 两边都是 0 是废话，都不在此列。
+ */
+function makeComparisonRe(fields) {
+  // 捕获组必须恰好是：1=左、2=运算符、3=右。
+  //
+  // 坑：FIELD_EXPR 自带一对**捕获**组。若直接嵌进外层捕获组，
+  // 组号会变成 1=外层左、2=内层左、3=运算符、4=右 —— 判定的三个下标全错位，
+  // 表现为 m[3] 拿到 undefined（只有左侧是字段时才是字段名，因为内层组恰好命中）。
+  // 所以先把 FIELD_EXPR 里的 `(` 换成 `(?:`，让它变成非捕获，再嵌。
+  //
+  // **两侧都必须允许 ZERO**。此前左侧硬编码成 FIELD_EXPR，于是 `0 < x` 这类镜像形式
+  // 压根匹配不到——不是"判对了"，是没被看见。实测 36 格矩阵里 12 格因此判错，
+  // 全部集中在「0 写在左边」这一半（见 .REMAINING-PLAN.md 第二部分）。
+  //
+  // 数字边界 `(?<![\w.])` / `(?![\w.])` 是必须的：两侧都可为 ZERO 之后，
+  // 字面量 0 会从数字中间开始匹配——`10 < snap.tps1m` 会把 "10" 尾部的 0
+  // 当成字面量 0，产生 [0 | < | snap.tps1m] 的假违规（实测）。
+  const f = FIELD_EXPR(fields).replace('(', '(?:');
+  const N = String.raw`(?:(?:${f})|${ZERO})`;
+  return new RegExp(String.raw`(?<![\w.])(${N})\s*${CMP}\s*(${N})(?![\w.])`, 'g');
+}
+const IS_ZERO = /^0(?:\.0+[dDfF]?)?$/;
+
+const sentinelRe = makeComparisonRe(SENTINEL_FIELDS);
+const noSentinelRe = makeComparisonRe(NO_SENTINEL_FIELDS);
 
 /**
  * 「哨兵是 -1 且 0 也不可信」的字段：**任何与 0 的等值/不等值比较都是错的**。
@@ -222,11 +312,9 @@ const noSentinelRe = new RegExp(
  *
  * **但扩到序关系后不能一刀切报**：`<= 0` 与 `> 0` 正是正确写法，
  * 一刀切会产生 20 处误报（实测），噪声一多这条门禁就没人看了。
- * 所以只报**漏掉 0 那一半**的两种：`>= 0` 与 `< 0`，外加等值的 `== 0` / `!= 0`。
+ * 所以按 {@link CORRECT_OPS}.BOTH_BAD 的**正确集合**判定，而不是枚举错误写法。
  */
-const bothBadRe = new RegExp(
-  String.raw`(\b(?:snap\.|s\.|sample\.|last\.|first\.|prev\.)?(?:${fieldAlt(SENTINEL_AND_ZERO_BOTH_BAD)})\b|` +
-  String.raw`\b(?:${fieldAlt(SENTINEL_AND_ZERO_BOTH_BAD)})\s*\(\s*\))\s*(==|!=|>=|<)\s*0(?:\.0+[dDfF]?)?(?![\d.])`, 'g');
+const bothBadRe = makeComparisonRe(SENTINEL_AND_ZERO_BOTH_BAD);
 
 function lineOf(text, idx) {
   let n = 1;
@@ -250,78 +338,49 @@ for (const f of files) {
     return EXEMPT.test(cur) || EXEMPT.test(prev);
   };
 
-  // ---- 有哨兵的字段：<= 0 与 > 0 是错的 ----
-  for (const m of text.matchAll(sentinelRe)) {
-    const [whole, lhsOrCall, op] = m;
-    found++;
-    // 从匹配里还原字段名
-    const name = Object.keys(SENTINEL_FIELDS).find((k) =>
-      lhsOrCall.includes(k));
-    if (!name) continue;
-    if (COUNTER_NAMES.has(name)) continue;
-    const wrong = op === '<=' || op === '>';
-    if (!wrong) continue;
-    const key = `${r}:${name}:${op}`;
-    if (BASELINE.has(key)) continue;
-    const ln = lineOf(text, m.index);
-    if (exemptAt(ln)) continue;
-    violations.push({
-      file: r,
-      line: ln,
-      field: name,
-      op,
-      code: whole.trim(),
-      rule: 'SENTINEL_AS_ZERO',
-      detail: `${SENTINEL_FIELDS[name]}。用 '${op} 0' 会把 0 也排除掉；应当用 '${op === '<=' ? '<' : '>='} 0'`,
-    });
+  // ---- 三类字段统一判定：对照「正确写法集合」，而不是枚举错误写法 ----
+  //
+  // 三层问题一次解决：
+  //   1. 只用错误枚举 -> 漏掉未枚举的运算符（实测 12 种写法只拦住 2 种）
+  //   2. 只认「字段在左」-> `0 < x` 这类镜像形式完全不检查
+  //   3. 三类的正确集合不同，不能共用一套判断
+  const CLASSES = [
+    { re: sentinelRe,   fields: SENTINEL_FIELDS,            kind: 'SENTINEL',    rule: 'SENTINEL_AS_ZERO' },
+    { re: bothBadRe,    fields: SENTINEL_AND_ZERO_BOTH_BAD, kind: 'BOTH_BAD',    rule: 'EQUALITY_AGAINST_ZERO' },
+    { re: noSentinelRe, fields: NO_SENTINEL_FIELDS,         kind: 'NO_SENTINEL', rule: 'ZERO_IS_REAL_READING' },
+  ];
+
+  for (const cls of CLASSES) {
+    for (const m of text.matchAll(cls.re)) {
+      const [whole, lhs, opRaw, rhs] = m;
+      const lhsIsZero = IS_ZERO.test(lhs.trim());
+      const rhsIsZero = IS_ZERO.test(rhs.trim());
+      // 必须恰好一边是字面量 0、另一边是字段。两边都不是 0 是阈值比较，两边都是 0 是废话。
+      if (lhsIsZero === rhsIsZero) continue;
+      found++;
+      const fieldSide = lhsIsZero ? rhs : lhs;
+      // 「0 在左」要翻转成等价的「字段在左」形式再判定：`0 > x` 等价于 `x < 0`
+      const op = lhsIsZero ? MIRROR[opRaw] : opRaw;
+      const name = Object.keys(cls.fields).find((k) => fieldSide.includes(k));
+      if (!name) continue;
+      if (COUNTER_NAMES.has(name)) continue;
+      if (CORRECT_OPS[cls.kind].has(op)) continue;
+      const ln = lineOf(text, m.index);
+      if (exemptAt(ln)) continue;
+      const key = `${r}:${name}:${op}`;
+      if (BASELINE.has(key)) continue;
+      violations.push({
+        file: r,
+        line: ln,
+        field: name,
+        op: opRaw,
+        code: whole.trim(),
+        rule: cls.rule,
+        detail: `${cls.fields[name]}。用 '${whole.trim()}' 判不对：${ADVICE[cls.kind]}`,
+      });
+    }
   }
 
-  // ---- 哨兵是 -1 且 0 也不可信的字段：不能与 0 做等值比较 ----
-  for (const m of text.matchAll(bothBadRe)) {
-    const [whole, lhsOrCall, op] = m;
-    found++;
-    const name = Object.keys(SENTINEL_AND_ZERO_BOTH_BAD).find((k) => lhsOrCall.includes(k));
-    if (!name) continue;
-    if (COUNTER_NAMES.has(name)) continue;
-    const ln = lineOf(text, m.index);
-    if (exemptAt(ln)) continue;
-    violations.push({
-      file: r,
-      line: ln,
-      field: name,
-      op,
-      code: whole.trim(),
-      rule: 'EQUALITY_AGAINST_ZERO',
-      // 建议必须按实际运算符给，不能写死。对 >= 0 建议 '< 0' 是错的——
-      // '< 0' 同样漏掉 0 这一半，正是这个字段不该有的写法。
-      detail: `${SENTINEL_AND_ZERO_BOTH_BAD[name]}。用 '${op} 0' 会把 -1 与 0 中的一个当成可信；`
-        + `应当用 '<= 0' 判"不可信"或 '> 0' 判"可信"（两者互补，都覆盖 -1 与 0）`,
-    });
-  }
-
-  // ---- 无哨兵的字段：> 0 与 <= 0 是错的 ----
-  for (const m of text.matchAll(noSentinelRe)) {
-    const [whole, lhsOrCall, op] = m;
-    found++;
-    const name = Object.keys(NO_SENTINEL_FIELDS).find((k) => lhsOrCall.includes(k));
-    if (!name) continue;
-    if (COUNTER_NAMES.has(name)) continue;
-    const wrong = op === '>' || op === '<=';
-    if (!wrong) continue;
-    const key = `${r}:${name}:${op}`;
-    if (BASELINE.has(key)) continue;
-    const ln = lineOf(text, m.index);
-    if (exemptAt(ln)) continue;
-    violations.push({
-      file: r,
-      line: ln,
-      field: name,
-      op,
-      code: whole.trim(),
-      rule: 'ZERO_IS_REAL_READING',
-      detail: `${NO_SENTINEL_FIELDS[name]}。用 '${op} 0' 会把它藏起来；应当用 '${op === '>' ? '>=' : '<'} 0'`,
-    });
-  }
 
   if (found > 0) stats.push({ file: r, comparisons: found });
 }
@@ -354,4 +413,93 @@ if (AS_JSON) {
   }
 }
 
-process.exit(violations.length === 0 ? 0 : 1);
+// 自检必须在退出之前跑完：它是「本次报告可信」的前提，不是一个可选的附加项。
+// 放在这里而不是文件末尾，是因为 process.exit 之后什么都不执行。
+
+// ======================================================================================
+// 自检：36 格判定表
+// ======================================================================================
+//
+// 这张表是三类字段 × 12 种写法，每一格的"该红/该绿"都有语义依据（见 CORRECT_OPS）。
+//
+// **为什么必须内置**：上一轮的"正确写法集合"改造把"字段在左"那一半修对了，但
+// "0 写在左边"的镜像形式**压根匹配不到**——不是判对了，是没被看见。36 格里 12 格判错，
+// 而所有现有测试都是绿的，因为没有任何东西覆盖这张表。
+//
+// 与 `check-docs.mjs` 同款：每次正常调用都**静默执行**，只在失败时影响退出码。
+// 单独看表时用 `--selftest`。
+function runSelftest() {
+  const MIRROR = { '<': '>', '>': '<', '<=': '>=', '>=': '<=', '==': '==', '!=': '!=' };
+  const OPS = ['<', '<=', '>', '>=', '==', '!='];
+  // **期望值是写死的字面量，不能从 CORRECT_OPS 推导**。
+  //
+  // 第一版写成 `expectRed = !CORRECT_OPS[kind].has(eff)`，看着简洁，实际是自指：
+  // 把 CORRECT_OPS.SENTINEL 改坏成 `['<']` 之后，`>=` 的期望值跟着变成"该红"，
+  // 于是自检仍报 36/36 PASS —— 自检把自己的错误当成了标准答案。
+  // 实测确认过这个形态：改坏集合后 selftest 依然 PASS。
+  //
+  // 表的内容来自 .REMAINING-PLAN.md 第二部分（三类语义各自推导，见 CORRECT_OPS 的注释）。
+  const EXPECT = {
+    SENTINEL:    { '<': 'GREEN', '<=': 'RED',  '>': 'RED',  '>=': 'GREEN', '==': 'RED', '!=': 'RED' },
+    BOTH_BAD:    { '<': 'RED',   '<=': 'GREEN','>': 'GREEN','>=': 'RED',   '==': 'RED', '!=': 'RED' },
+    NO_SENTINEL: { '<': 'GREEN', '<=': 'RED',  '>': 'RED',  '>=': 'GREEN', '==': 'RED', '!=': 'RED' },
+  };
+  const CASES = [
+    { kind: 'SENTINEL',    field: 'processCpuLoad' },
+    { kind: 'BOTH_BAD',    field: 'msptMax' },
+    { kind: 'NO_SENTINEL', field: 'tps1m' },
+  ];
+  const made = {
+    SENTINEL: sentinelRe, BOTH_BAD: bothBadRe, NO_SENTINEL: noSentinelRe,
+  };
+  const out = [];
+  for (const c of CASES) {
+    for (const mirror of [false, true]) {
+      for (const op of OPS) {
+        const text = mirror ? `0 ${op} snap.${c.field};` : `snap.${c.field} ${op} 0;`;
+        const eff = mirror ? MIRROR[op] : op;
+        // 期望值查**字面量表**，不查被检验的集合本身。
+        const expectRed = EXPECT[c.kind][eff] === 'RED';
+        const re = made[c.kind];
+        re.lastIndex = 0;
+        const m = re.exec(text);
+        // 「有没有被这条正则看见」是独立的一件事：看不见 = 该报的也报不出来。
+        const sawIt = m != null && (IS_ZERO.test((m[1] || '').trim()) || IS_ZERO.test((m[3] || '').trim()));
+        const actualRed = sawIt && !CORRECT_OPS[c.kind].has(eff);
+        // 看见 + 判定正确，才算这一格对。没看见的格子里，期望绿的那些算"碰巧对"，
+        // 但也要标记出来——因为漏匹配意味着下次换成同义写法时会漏。
+        const ok = sawIt ? expectRed === actualRed : !expectRed;
+        out.push({ kind: c.kind, text: text.trim(), eff, expectRed, actualRed, sawIt, ok });
+      }
+    }
+  }
+  return out;
+}
+
+const selftestRows = runSelftest();
+const selftestFailures = selftestRows.filter((r) => !r.ok);
+if (flag('--selftest')) {
+  console.log('check-sentinels 自检：三类字段 × 12 种写法 = 36 格');
+  console.log('');
+  console.log('  状态 类别          写法                     等价形式  期望   实际');
+  for (const r of selftestRows) {
+    console.log(`  ${r.ok ? 'OK  ' : 'FAIL'} ${r.kind.padEnd(13)} ${r.text.padEnd(24)} ${r.eff.padEnd(8)} `
+      + `${r.expectRed ? 'RED  ' : 'GREEN'}  ${r.sawIt ? (r.actualRed ? 'RED' : 'GREEN') : '(未匹配)'}`);
+  }
+  console.log('');
+  console.log(`SENTINEL SELFTEST: ${selftestFailures.length === 0 ? 'PASS' : 'FAIL'} `
+    + `(${selftestRows.length - selftestFailures.length}/${selftestRows.length})`);
+}
+
+if (selftestFailures.length > 0) {
+  console.log('');
+  console.log(`SENTINEL SELFTEST: FAIL (${selftestFailures.length}/${selftestRows.length} cells wrong) -- `
+    + `the operator sets in CORRECT_OPS and the regex in makeComparisonRe disagree. `
+    + `Run with --selftest to see the full table.`);
+  for (const r of selftestFailures.slice(0, 6)) {
+    console.log(`  ${r.kind}  ${r.text}  expected ${r.expectRed ? 'REPORTED' : 'not reported'}, got `
+      + `${r.sawIt ? (r.actualRed ? 'reported' : 'not reported') : 'NOT MATCHED AT ALL'}`);
+  }
+}
+
+process.exit(violations.length === 0 && selftestFailures.length === 0 ? 0 : 1);

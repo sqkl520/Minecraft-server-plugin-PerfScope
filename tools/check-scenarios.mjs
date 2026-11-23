@@ -17,9 +17,17 @@
 //                            actionbar is built by concatenating " | {0}: " with "MSPT").
 //                            All variants dead = the check can never pass. Some dead = it is
 //                            silently down to fewer variants than the author thought.
-//   S2 NEGATIVE-NO-CONTROL   a negative assertion needs a positive check in the same scenario
-//                            proving the guarded behaviour does happen. Otherwise "we saw no
-//                            duplicate" is also true when we saw nothing at all.
+//   S2 NEGATIVE-NO-CONTROL   a negative assertion needs a firing control: either a positive
+//                            check in the same scenario proving the guarded behaviour does
+//                            happen, or `negativeSamples` -- text the failure would emit, which
+//                            must actually make this check fail. A count-contract check
+//                            (minMatches/maxMatches) must also give `cleanSamples` and one
+//                            failure sample that is clean text plus the forbidden content;
+//                            a lone sample cannot show which half of the contract did the
+//                            flipping (S2-CONTROL-NEVER-MATCHES / S2-NO-CLEAN-SAMPLE /
+//                            S2-NO-DISCRIMINATOR / S2-CLEAN-SAMPLE-TRIPS).
+//                            The criteria live in ./lib/scenario-model.mjs, shared with
+//                            negative-controls.mjs so the two gates cannot disagree.
 //   S3 NO-WINDOW             a `notPresent` log check without sinceMarker/trigger scans whatever
 //                            the log already held -- a previous run can satisfy or defeat it.
 //   S4 REGEX-IN-LITERAL      `rcon` / `rcon-wait` / `vbot` compare with literal Contains
@@ -43,46 +51,22 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { javaFiles, readJava, stringLiterals } from './lib/java-strings.mjs';
+import { argOf, findHarness, judgeControl, scenarioDir, scenarioFiles } from './lib/scenario-model.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
-const argOf = (name, dflt) => {
-  const i = argv.indexOf(name);
-  return i >= 0 && i + 1 < argv.length ? argv[i + 1] : dflt;
-};
 const AS_JSON = argv.includes('--json');
 const STRICT = argv.includes('--strict');
-const ONLY = argOf('--scenario', '');
+const ONLY = argOf(argv, '--scenario', '');
 
-const REPO = path.resolve(argOf('--repo', path.join(HERE, '..')));
+const REPO = path.resolve(argOf(argv, '--repo', path.join(HERE, '..')));
 
-/**
- * 找 testharness 目录：从仓库根逐层向上找，最多 4 层。
- *
- * <p>它不在仓库里，也不总在固定的相对位置 —— 本项目实际布局是
- * {@code <Server plugin>/testharness}，而仓库在 {@code <Server plugin>/PerfScope/PerfScope}，
- * 也就是要往上 3 层。原先硬编码 {@code HERE/../../testharness}（2 层），差一层。</p>
- *
- * <p>向上找而不是写死层数，是因为这个脚本不该在别人换了目录结构时静默给一个空结果。</p>
- */
-function findHarness() {
-  let dir = REPO;
-  for (let i = 0; i < 4; i++) {
-    const candidate = path.join(dir, 'testharness');
-    if (fs.existsSync(path.join(candidate, 'tests', 'scenarios'))) return candidate;
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return path.join(REPO, '..', '..', 'testharness');   // 找不到时给一个可能的位置用于报错
-}
-
-const HARNESS = path.resolve(argOf('--harness', findHarness()));
-const SCEN_DIR = path.join(HARNESS, 'tests', 'scenarios');
+const HARNESS = path.resolve(argOf(argv, '--harness', findHarness(REPO)));
+const SCEN_DIR = scenarioDir(HARNESS);
 const SRC = path.join(REPO, 'src', 'main', 'java');
 
-if (!fs.existsSync(SCEN_DIR)) {
-  console.error(`ERROR: scenario directory not found: ${SCEN_DIR}`);
+if (!SCEN_DIR) {
+  console.error(`ERROR: scenario directory not found: ${path.join(HARNESS, 'tests', 'scenarios')}`);
   console.error('       searched up to 4 levels above the repo root for a "testharness" folder.');
   console.error('       pass --harness <testharness dir> to point at it explicitly.');
   process.exit(2);
@@ -260,13 +244,13 @@ function fixtureSupplies(text, blob) {
 // Scenario model.
 // --------------------------------------------------------------------------------------
 const RAW_TYPES = new Set(['rcon', 'rcon-wait', 'vbot']);   // literal Contains in the harness
+const isRegex = (c) => c.regex === true;
 const variantsOf = (v) => {
   if (v == null) return [];
   if (Array.isArray(v)) return v.flatMap(x => (typeof x === 'string' ? [x] : []));
   if (typeof v === 'string') return [v];
   return [];
 };
-const isRegex = (c) => c.regex === true;
 /** Regex syntax smuggled into a literal-Contains check: \\[ , \\d , .* , \\| , ^...$ , (? */
 const REGEX_SYNTAX = /(\\[\[\]().*+?{}|^$dDwWsS])|(\.\*)|(\.\+)|(\(\?)|(\$$)|(^\^)/;
 
@@ -288,10 +272,7 @@ function literalRuns(re) {
   return [...new Set(parts)];
 }
 
-const files = fs.readdirSync(SCEN_DIR)
-  .filter(f => /^perfscope-.*\.json$/.test(f))
-  .filter(f => !ONLY || f === `${ONLY}.json` || f === ONLY)
-  .sort();
+const files = scenarioFiles(SCEN_DIR, ONLY);
 
 if (files.length === 0) {
   console.error(`ERROR: no scenarios matched in ${SCEN_DIR}${ONLY ? ` (filter: ${ONLY})` : ''}`);
@@ -424,34 +405,21 @@ for (const file of files) {
     // Three ways to satisfy it, in order of strength:
     //   1. `negativeSamples`: literal text the guarded failure WOULD emit. The strongest form --
     //      it proves the matcher fires, without needing a second check in the same scenario.
-    //      Validated here: at least one sample must actually match this check's patterns.
+    //      A count-contract check (minMatches/maxMatches) must additionally supply
+    //      `cleanSamples` plus one failure sample that is clean text + the forbidden content;
+    //      see tools/lib/scenario-model.mjs for why one sample cannot answer that question.
     //   2. `controlledBy`: names a positive check in the same scenario that asserts the same text.
     //   3. (legacy heuristic) some positive check happens to share a variant.
     // Without any of these the check passes both when the failure never happens AND when the
     // pattern can never match -- i.e. it proves nothing.
+    //
+    // The criteria themselves live in ./lib/scenario-model.mjs so negative-controls.mjs judges
+    // from the same definition instead of keeping its own copy.
     const isNegative = (c.expectNot && expectNotVars.length > 0) || c.notPresent === true;
     if (isNegative) {
-      const samples = variantsOf(c.negativeSamples);
-      if (samples.length > 0) {
-        // The samples must be matched BY THIS CHECK's own matcher, not just non-empty.
-        const ownPats = (c.notPresent === true ? patternVars : expectNotVars);
-        const ownRegex = isRegex(c);
-        const matchers = ownPats.map(p => {
-          if (ownRegex) {
-            try { const re = new RegExp(p); return s => re.test(s); }
-            catch { return () => false; }
-          }
-          return s => s.includes(p);
-        });
-        const hit = samples.some(s => matchers.some(m => m(s)));
-        if (!hit) {
-          add('ERROR', name, id, 'S2-CONTROL-NEVER-MATCHES',
-            `negativeSamples supplied but NONE of them match this check's own patterns `
-            + `(${ownRegex ? 'regex' : 'literal'}) -- the control is wrong, or the pattern is dead. `
-            + `samples: ${JSON.stringify(samples.slice(0, 3))}`);
-        }
-        // A valid control settles the question; nothing more to report.
-      } else {
+      const verdict = judgeControl(c);
+      for (const f of verdict.findings) add(f.sev, name, id, f.rule, f.msg);
+      if (!verdict.declared) {
         const declared = c.controlledBy;
         const negVars = new Set([...expectNotVars, ...patternVars]);
         const control = declared

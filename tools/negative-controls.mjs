@@ -1,133 +1,120 @@
-// Positive-control tests for the negative assertions in the perfscope scenarios.
+// Positive-control runner for the negative assertions in the perfscope scenarios.
 //
 // A negative assertion (`notPresent` / `expectNot`) proves nothing on its own: it passes both
 // when the guarded failure never happens AND when the pattern can never match anything. The
-// only way to tell those apart is a positive control -- feed the pattern text it is SUPPOSED
-// to catch and confirm it does.
+// only way to tell those apart is a control -- feed the matcher text the check is SUPPOSED to
+// catch and confirm the check goes red; feed it a healthy window and confirm it stays green.
+//
+// WHERE THE CONTROLS COME FROM
+//   The scenario JSON itself (`negativeSamples` / `cleanSamples`). This file used to carry a
+//   second, hand-maintained copy of the samples, and the copy had drifted one string away from
+//   the scenario's own -- so the two gates could return OPPOSITE verdicts for the same check
+//   (check-scenarios.mjs red on up02 while this file passed it, same scenario file, same run).
+//   Two copies of one criterion is the defect; the fix is one source. Direction: scenario JSON
+//   is the source and both tools are readers -- the harness has to run where this repo is not
+//   checked out, so it can never depend on a file here, and the samples belong next to the
+//   pattern they must fire. The judging rules live in tools/lib/scenario-model.mjs, imported
+//   here AND by check-scenarios.mjs, so there is exactly one definition of "does this control
+//   prove the assertion can fail".
 //
 // This is a unit-level control: it validates the matcher, not the running server. It answers
-// "would this assertion fire if the failure occurred?", which is exactly what S2 asks for.
+// "would this assertion fire if the failure occurred?", which is exactly what S2 asks for. The
+// same criterion runs inside check-scenarios.mjs; running it standalone here names every check
+// it inspected, which is what a person debugging one assertion wants.
 //
-// Run: node tools/negative-controls.mjs
-// Exit 0 = every negative assertion has at least one firing sample.
+// Usage:
+//   node tools/negative-controls.mjs
+//   node tools/negative-controls.mjs --harness "D:\...\testharness"
+//   node tools/negative-controls.mjs --repo "D:\...\PerfScope"
+//   node tools/negative-controls.mjs --strict      # skipped checks (no declared control) fail too
+//   node tools/negative-controls.mjs --json
+//
+// Exit: 0 = every judged control holds (and, with --strict, nothing was skipped),
+//       1 = at least one control does not hold or (with --strict) a check was skipped,
+//       2 = could not run (harness missing) -- never 1, which must mean "ran and found a fault".
 
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  argOf, findHarness, isNegativeCheck, judgeControl, scenarioDir, scenarioFiles, variantsOf,
+} from './lib/scenario-model.mjs';
 
-const SCEN_DIR = 'D:/Server/MCServers/Server plugin/testharness/tests/scenarios';
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const argv = process.argv.slice(2);
+const AS_JSON = argv.includes('--json');
+const STRICT = argv.includes('--strict');
 
-// For each negative check that the linter flagged, one or more samples that MUST match.
-// Each sample is real text the product or the JVM would emit when the guarded failure occurs.
-const CONTROLS = {
-  // --- soak: a 30-minute clean window must contain none of these -------------------
-  'soak03a-clean-window-seg1': [
-    'java.util.ConcurrentModificationException: null',
-    'java.lang.NullPointerException: Cannot invoke "String.isEmpty()"',
-    'at PerfScope-1.2.1.jar/cn.perfscope.MetricsCollector.collectTPS(MetricsCollector.java:1316)',
-    '[PerfScope] monitor push failed (skipped this round): boom',
-    '[PerfScope] console push failed: boom',
-    '[PerfScope] 控制台推送失败: boom',
-  ],
-  'soak03b-clean-window-seg2': null, // same pattern as seg1 -- filled in below
-  'soak03c-clean-window-seg3': null,
-  'soak03d-clean-window-seg4': null,
-  'soak03e-clean-window-seg5': null,
-  'soak03f-clean-window-seg6': null,
-  'soak03g-clean-window-seg7': null,
-  'soak03h-clean-window-seg8': null,
+const REPO = path.resolve(argOf(argv, '--repo', path.join(HERE, '..')));
+const HARNESS = path.resolve(argOf(argv, '--harness', findHarness(REPO)));
+const SCEN_DIR = scenarioDir(HARNESS);
 
-  // --- alert / alertv2: no fake recovery line for memory:global -------------------
-  'alert05-mid-alert-reload-no-fake-recovery': [
-    '[PerfScope] [Alert][Recovery][TAG] Heap usage high recovered | key=memory:global | lasted 5m, no breach for 3 consecutive check cycles',
-  ],
-  'up02-no-old-recovery-on-upgrade': [
-    '[PerfScope] [Alert][Recovery][TAG] Heap usage high recovered | key=memory:global | lasted 5m',
-  ],
-
-  // --- inject: no plugin stack frames when debug=false ----------------------------
-  'inject06-no-stacktrace-in-console': [
-    'at PerfScope-1.2.1.jar/cn.perfscope.MetricsCollector.collectTPS(MetricsCollector.java:1316)',
-    'at cn.perfscope.MetricsCollector.collectTPS(MetricsCollector.java:1316)',
-  ],
-
-  // --- vbot: kick mid-monitor must not blow up the monitor task -------------------
-  'mon02-kick-mid-monitor-console-clean': [
-    'java.util.ConcurrentModificationException: null',
-    'java.lang.NullPointerException',
-    '[PerfScope] monitor push failed (skipped this round): boom',
-  ],
-  'mon02b-post-kick-still-clean': [
-    'java.util.ConcurrentModificationException: null',
-    'java.lang.NullPointerException',
-    '[PerfScope] monitor push failed (skipped this round): boom',
-  ],
-
-  // --- surface: /perfscope with no args must not throw ---------------------------
-  'cmd02-noarg-no-exception': [
-    'java.lang.NullPointerException',
-    'java.lang.ArrayIndexOutOfBoundsException',
-    'at PerfScope-1.2.1.jar/cn.perfscope.command.PerfScopeCommand',
-  ],
-
-  // --- surface: the "(estimated)" marker must not leak onto the exact MSPT path ---
-  't02-mspt-no-estimate-marker': [' (estimated)', ' (估算)'],
-  't02-noarg-no-estimate-marker': [' (estimated)', ' (估算)'],
-
-  // --- perms: a player without the alert permission must get no push -------------
-  'perms05b-no-perm-player-no-push': [
-    '[PerfScope] [Alert]',
-    'System CPU load high',
-  ],
-};
-
-// seg2..seg8 share seg1's pattern verbatim.
-const SOAK_PATTERN = CONTROLS['soak03a-clean-window-seg1'];
-for (const id of Object.keys(CONTROLS)) {
-  if (id.startsWith('soak') && CONTROLS[id] === null) CONTROLS[id] = SOAK_PATTERN;
+if (!SCEN_DIR) {
+  console.error(`ERROR: scenario directory not found: ${path.join(HARNESS, 'tests', 'scenarios')}`);
+  console.error('       searched up to 4 levels above the repo root for a "testharness" folder.');
+  console.error('       pass --harness <testharness dir> to point at it explicitly.');
+  process.exit(2);
 }
 
-const scenarios = new Map();
-for (const f of ['perfscope-soak', 'perfscope-alert', 'perfscope-alertv2', 'perfscope-inject',
-                 'perfscope-vbot', 'perfscope-surface', 'perfscope-perms']) {
-  const j = JSON.parse(readFileSync(join(SCEN_DIR, f + '.json'), 'utf8'));
-  for (const c of j.checks) scenarios.set(c.id, c);
+const files = scenarioFiles(SCEN_DIR);
+if (files.length === 0) {
+  console.error(`ERROR: no perfscope-*.json scenarios in ${SCEN_DIR}`);
+  process.exit(2);
 }
 
-let fail = 0, checked = 0, skipped = 0;
-
-for (const [id, samples] of Object.entries(CONTROLS)) {
-  const c = scenarios.get(id);
-  if (!c) { console.log(`SKIP  ${id}  (not found in scenarios)`); skipped++; continue; }
-
-  const isNegative = c.notPresent === true || Array.isArray(c.expectNot) || typeof c.expectNot === 'string';
-  if (!isNegative) { console.log(`SKIP  ${id}  (not a negative assertion)`); skipped++; continue; }
-
-  // Build the matcher the harness would use.
-  const pats = c.notPresent === true
-    ? [].concat(c.pattern ?? [])
-    : [].concat(c.expectNot ?? []);
-  const asRegex = c.regex === true;
-
-  const matchers = pats.map(p => {
-    if (typeof p !== 'string') return () => false;
-    if (asRegex) {
-      try { const re = new RegExp(p); return s => re.test(s); }
-      catch { return () => false; }
-    }
-    return s => s.includes(p);
-  });
-
-  const hit = samples.some(s => matchers.some(m => m(s)));
-  checked++;
-  if (hit) {
-    console.log(`ok    ${id}`);
-  } else {
-    fail++;
-    console.log(`FAIL  ${id}  -- NONE of the ${samples.length} failure sample(s) matched.`);
-    console.log(`        patterns (${asRegex ? 'regex' : 'literal'}): ${JSON.stringify(pats)}`);
-    for (const s of samples) console.log(`        sample: ${JSON.stringify(s.slice(0, 100))}`);
+// Every negative assertion in every scenario is in scope. The old version listed seven
+// scenario names by hand, so a negative assertion added to an eighth file was silently
+// uncontrolled -- the same class of drift as the duplicated samples.
+const rows = [];
+for (const file of files) {
+  let scen;
+  try {
+    scen = JSON.parse(fs.readFileSync(path.join(SCEN_DIR, file), 'utf8'));
+  } catch (e) {
+    console.error(`ERROR: cannot parse ${file}: ${e.message}`);
+    process.exit(2);
+  }
+  for (const c of Array.isArray(scen.checks) ? scen.checks : []) {
+    if (!c.id || !isNegativeCheck(c)) continue;
+    const verdict = judgeControl(c);
+    rows.push({
+      id: c.id,
+      scenario: file,
+      failSamples: variantsOf(c.negativeSamples).length,
+      cleanSamples: variantsOf(c.cleanSamples).length,
+      declared: verdict.declared,
+      findings: verdict.findings,
+    });
   }
 }
 
-console.log(`\nNEGATIVE CONTROLS: ${checked} checked, ${fail} failed, ${skipped} skipped`);
-process.exit(fail === 0 ? 0 : 1);
+let failed = 0, checked = 0, skipped = 0;
+const lines = [];
+for (const r of rows) {
+  if (!r.declared) {
+    skipped++;
+    lines.push(`skip  ${r.id}  (no negativeSamples/cleanSamples declared in ${r.scenario})`);
+    continue;
+  }
+  checked++;
+  if (r.findings.length === 0) {
+    lines.push(`ok    ${r.id}  (${r.failSamples} failure sample(s), ${r.cleanSamples} clean)`);
+    continue;
+  }
+  failed++;
+  lines.push(`FAIL  ${r.id}  -- ${r.findings.length} control fault(s)`);
+  for (const f of r.findings) lines.push(`        [${f.rule}] ${f.msg}`);
+}
+
+const strictFail = STRICT && skipped > 0;
+if (AS_JSON) {
+  console.log(JSON.stringify({ harness: HARNESS, repo: REPO, checked, failed, skipped, rows }, null, 2));
+} else {
+  for (const l of lines) console.log(l);
+  if (strictFail) {
+    console.log(`\n${skipped} check(s) skipped and --strict is set: an undeclared control is an `
+      + 'unproven assertion, not a clean one.');
+  }
+  console.log(`\nNEGATIVE CONTROLS: ${checked} checked, ${failed} failed, ${skipped} skipped`);
+}
+process.exit(failed === 0 && !strictFail ? 0 : 1);

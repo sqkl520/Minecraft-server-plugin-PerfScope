@@ -69,6 +69,16 @@ for (const f of fs.readdirSync(DIR).filter(x => x.startsWith('perfscope-') && x.
   for (const c of j.checks) {
     if (!SAMPLES[c.id]) continue;
     if (c.notPresent !== true && !c.expectNot) continue;
+    // Never clobber a control that is already declared. This script is a one-shot migration
+    // from the era when no check had samples; a check that has them now may have been
+    // corrected by hand since (up02 is: its table entry below is the WRONG shape -- a bare
+    // recovery line, which that check is red on for the wrong reason -- and it carries a
+    // cleanSamples pair instead). Re-running this must not undo that.
+    if (Array.isArray(c.negativeSamples) && c.negativeSamples.length > 0
+        || Array.isArray(c.cleanSamples) && c.cleanSamples.length > 0) {
+      report.push(`  kept existing control: ${c.id} (${f})`);
+      continue;
+    }
     c.negativeSamples = SAMPLES[c.id];
     n++;
   }
