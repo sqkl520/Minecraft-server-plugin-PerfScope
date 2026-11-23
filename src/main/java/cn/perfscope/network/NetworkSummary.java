@@ -135,10 +135,21 @@ public final class NetworkSummary {
          */
         public int pushIntervalSec() { return pushIntervalSec; }
 
-        /** 快照年龄（毫秒）。负值说明后端时钟比代理快，按 0 处理——时钟不同步不该读成"未来的数据"。 */
-        public long ageMs(long nowMs) {
-            return Math.max(0L, nowMs - collectedAtMs);
-        }
+        // 这里曾经有一个 ageMs(long nowMs) = max(0, now - collectedAt)。
+        //
+        // 它已删除，不是"暂时不用"，而是**不该存在**，理由三条：
+        //
+        // 1. 生产零调用。接收端算年龄的是代理侧的 SummaryPacket.ageMs(PacketAnchor)，
+        //    它必须锚定在"包到达的那一刻"（否则伪造未来时间戳就能换来永久 0 岁）。
+        //    那个锚点只有接收方有；发送方拿到一个 nowMs 根本算不出对方视角的年龄。
+        // 2. 语义已经分叉。它是 max(0, ...)，于是"时间戳在未来"会被 clamp 成 0——
+        //    正是 P1-V 修掉的那个 bug 的形状。留着一个同名字、同话题、结论相反的第二实现，
+        //    下一个人按名字找"怎么算年龄"时会先撞上它。
+        // 3. 唯一的消费者是一个断言 3_500L 的测试。改掉那个测试比留着这个函数便宜，
+        //    而且改完之后测试钉住的是真正要钉的东西（"两个时间字段不可混用"）。
+        //
+        // 需要年龄请读 collectedAtMs() / sentAtMs() 并自己决定基准——
+        // 基线只有一处，见代理侧 SummaryPacket#ageMs(PacketAnchor) 的推导。
 
         /**
          * 序列化成线上格式（扁平 Map，Gson 直接写）。

@@ -82,8 +82,15 @@ public class DailySummaryService {
     private final WebhookNotifier webhookNotifier;
     private final AlertService alertService;
 
-    /** 周期检查任务句柄（null = 未运行） */
-    private SchedulerAdapter.TaskHandle timerHandle;
+    /**
+     * 周期检查任务句柄槽位（null = 未运行）。
+     *
+     * <p><b>P0-1：为什么不是普通 {@code TaskHandle} 字段</b>——与 {@link AlertService} 同款竞态：
+     * {@code start()} 首行的 {@code stop()} 只在单线程下幂等，两个线程同时 reload 会各装一个
+     * 定时器、字段只留后者，先建的从此无人取消 → <b>每日摘要在同一分钟被发两次</b>
+     * （{@code lastSentDate} 的判定不是原子的，两份额外的定时器各自判断都通过）。</p>
+     */
+    private final cn.perfscope.compat.TaskHandleSlot timerSlot = new cn.perfscope.compat.TaskHandleSlot();
 
     /**
      * 当日已发日期（null = 从未发过；reload 不清，跨天自动滚动）。
@@ -108,19 +115,21 @@ public class DailySummaryService {
     /**
      * 刷新目标时区：{@code alerts.daily-summary.timezone}（IANA 名），空/非法 → 系统时区。
      *
-     * <p>该键需要 ConfigManager 增加字段 {@code alerts_dailySummaryTimezone}（String，默认 ""）；
-     * 在字段落地前直接从 config.yml 读（{@link AlertService.RawConfig}）。
-     * 读盘只发生在构造与 {@link #start()}（reload 会重新 start），每分钟节拍只读缓存。</p>
+     * <p>读的是 {@link ConfigManager.ConfigData#alerts_dailySummaryTimezone}——与
+     * {@link AlertService} 的日计数器同源。此前这里用 {@code AlertService.RawConfig}
+     * 直接解析 config.yml，于是同一个键有两个读者、两套回退，而且这条读盘路径
+     * 完全绕过 {@code ConfigManager} 的 config-version 迁移与类型校验。
+     * 现在配置快照是唯一入口：reload 时 {@code ConfigManager.load()} 已先跑过，
+     * 本方法只需重新解析时区字符串（{@code ZoneId.of} 的合法域比 YAML 类型校验细，
+     * 非法 IANA 名仍由这里点名）。</p>
+     *
+     * <p>读快照只发生在构造与 {@link #start()}（reload 会重新 start），每分钟节拍只读缓存。</p>
      */
     private void refreshZone() {
         String spec = "";
-        try {
-            spec = AlertService.RawConfig.load(plugin).getString("alerts.daily-summary.timezone", "");
-        } catch (Exception | LinkageError e) {
-            plugin.getLogger().warning(logText("daily.log.zone-read-failed", e.getMessage()));
-        }
-        if (spec == null) {
-            spec = "";
+        ConfigManager.ConfigData cfg = configManager == null ? null : configManager.get();
+        if (cfg != null && cfg.alerts_dailySummaryTimezone != null) {
+            spec = cfg.alerts_dailySummaryTimezone;
         }
         spec = spec.trim();
         if (spec.isEmpty()) {
@@ -207,8 +216,14 @@ public class DailySummaryService {
         }
         refreshZone(); // 9A-14：reload 后时区变更即时生效
         // 每分钟检查（1200 ticks = 60 秒）；首查延迟 5 秒（等采集器与历史环就绪）
-        timerHandle = SchedulerAdapter.runGlobalTimer(plugin, this::checkCycle, 100L, 1200L);
-        if (!timerHandle.isActive()) {
+        //
+        // P0-1：经槽位安装，两个线程同时 reload 时只有一个真的装上（另一个复用或让位）。
+        SchedulerAdapter.TaskHandle handle =
+            timerSlot.start(() -> SchedulerAdapter.runGlobalTimer(plugin, this::checkCycle, 100L, 1200L));
+        if (handle == null) {
+            return; // 另一线程正在安装：它装好的定时器与本线程要装的是同一份配置
+        }
+        if (!handle.isActive()) {
             // f-s01-err-02：与 AlertService.start 同构——noop = 任务没装上，不得再打印"已启用"
             //（否则每日摘要静默永不送达）。v1.3.0 -14：文案改走键表。
             plugin.getLogger().severe(logText("daily.log.start-failed-no-scheduler"));
@@ -229,10 +244,8 @@ public class DailySummaryService {
 
     /** 停止：取消定时器（幂等）。不清 lastSentDate——reload 后同日不重发。 */
     public void stop() {
-        if (timerHandle != null) {
-            timerHandle.cancel();
-            timerHandle = null;
-        }
+        // P0-1：getAndSet(null) 抢占后才有权 cancel。
+        timerSlot.stop();
     }
 
     // ==================== 周期入口 ====================

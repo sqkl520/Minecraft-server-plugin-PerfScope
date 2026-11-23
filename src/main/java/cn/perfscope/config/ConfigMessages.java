@@ -208,6 +208,51 @@ public final class ConfigMessages {
         put(en, zh, "config.check.history-retention",
             "Configuration check: {0}={1} is invalid (must be at least 1); using {2} days instead",
             "配置校验：{0}={1} 非法（需 ≥1），已按 {2} 天处理");
+        // 告警决策层数值参数（9A-14 / 9C-4）。这 5 条**原先在 alert 表**（alert.log.bad-*），
+        // 因为当时校验由 AlertService 的 RawConfig 做完；现在校验搬进 validateThresholds，
+        // 执行者也变成 ConfigManager，故键名一起搬到 config.check.* 族——
+        // 键名的前缀是"谁在读这个配置、谁在抱怨它"的归属标记，留着旧前缀会让
+        // 下一次排查的人去 AlertService 里找一个已经不在那里的校验。
+        //
+        // 参数遵循本族既有口径：{0}=配置键名（由调用点传入，绝不写进模板正文）、
+        // {1}=用户写的值、{2}=实际采用的值。键名不进正文的理由见类注释的硬约束。
+        put(en, zh, "config.check.alerts-recovery-debounce",
+            "Configuration check: {0}={1} is invalid (must be at least 1); using the debounce cycle "
+                + "count {2} instead. Recovery would otherwise be announced after every single clean "
+                + "cycle, which a garbage-collection dip alone can produce",
+            "配置校验：{0}={1} 非法（需 ≥1），已按防抖周期数 {2} 处理。"
+                + "否则一次干净采样就宣布恢复，而内存类指标在 GC 之后天然会短暂低于阈值");
+        put(en, zh, "config.check.alerts-unknown-after",
+            "Configuration check: {0}={1} is invalid (must be at least 1); using {2} minutes instead. "
+                + "A value below 1 moves every active alert to unknown on the first jittery cycle, "
+                + "and unknown alerts recover silently (no \"recovered\" notice)",
+            "配置校验：{0}={1} 非法（需 ≥1），已按 {2} 分钟处理。"
+                + "小于 1 会让活跃告警在第一次采集抖动时就全部转入 unknown，"
+                + "而 unknown 告警恢复时是静默的（不发「已恢复正常」）");
+        // 下面三条的合法下界是 0（0 = 关闭该项抑制），只有负值才回退——
+        // 文案必须把 0 是合法值说出来，否则用户看到"非法"会以为自己不能关掉它。
+        put(en, zh, "config.check.alerts-refire",
+            "Configuration check: {0}={1} is invalid (must be 0, to disable re-fire detection, or a "
+                + "positive number of seconds); using the default {2}s instead",
+            "配置校验：{0}={1} 非法（应为 0 以关闭复燃识别，或正数秒）；已按默认值 {2} 秒处理");
+        put(en, zh, "config.check.alerts-flap",
+            "Configuration check: {0}={1} is invalid (must be 0, to disable flap suppression, or a "
+                + "positive number of seconds); using the default {2}s instead",
+            "配置校验：{0}={1} 非法（应为 0 以关闭抖动抑制，或正数秒）；已按默认值 {2} 秒处理");
+        put(en, zh, "config.check.alerts-repush",
+            "Configuration check: {0}={1} is invalid (must be 0, to disable the change-magnitude "
+                + "suppression, or a positive number); using the default {2} instead",
+            "配置校验：{0}={1} 非法（应为 0 以关闭「数值变化幅度」抑制，或正数）；已按默认值 {2} 处理");
+        // warn-only：不合理量级的抑制窗口。**不改值**——旧实现对这些键没有上界，
+        // 加上界会让一直在跑的极端配置在升级后被静默改小（breaking change）。
+        put(en, zh, "config.check.alerts-window-implausible",
+            "Configuration check: {0}={1} exceeds {2}, which is implausible for a suppression "
+                + "window - an alert suppressed for that long would never announce its recovery. "
+                + "Value kept as configured; use 0 to disable the suppression, or "
+                + "alerts.enabled: false to turn alerts off entirely",
+            "配置校验：{0}={1} 超过 {2}，对抑制窗口而言不合常理"
+                + "——抑制这么久的告警永远不会宣布恢复。已按原值保留；"
+                + "如需关闭该抑制请写 0，要整体关闭告警请用 alerts.enabled: false");
         put(en, zh, "config.check.hotspots-cycles",
             "Configuration check: {0}={1} is invalid (must be at least 1); using {2} cycles instead",
             "配置校验：{0}={1} 非法（需 ≥1），已按 {2} 周期处理");
@@ -223,7 +268,7 @@ public final class ConfigMessages {
                 + "（热点扫描分片数：1 = 关闭分片；值越大每周期越省，但同一批区块刷新越慢）");
         put(en, zh, "config.check.language",
             "Configuration check: {0}={1} is not a supported language (supported: {2}); reverted to {3}",
-            "配置校验：{0}={1} 不是受支持的语言（支持: {2}），已回退 {3}");
+            "配置校验：{0}={1} 不是受支持的语言（支持 {2}），已回退 {3}");
         // v1.4：Prometheus 端点配置校验。端口越界会让端点绑定失败，路径缺前导斜杠会让
         // HttpServer.createContext 抛异常——两者在 reload 时都只表现为"端点起不来"，
         // 所以这里把它们在加载期就地修正并说明。
@@ -331,6 +376,55 @@ public final class ConfigMessages {
                 + "带这个值的包会被代理整包丢弃，这台后端会在 /pscope network 上永久隐身。"
                 + "请换一个名字（survival / lobby 之类）；判据区分大小写，所以「Unknown」是合法的。"
                 + "修好之前这台后端不发送任何数据");
+        // 参数：{0}=配置键名、{1}=非法字符的码点列表。
+        //
+        // 为什么这条必须单独成句、且必须给出码点：控制符在控制台里是不可见的
+        // （BEL 会响铃、ESC 会吞掉后面的字符），原样拼进日志只会得到一条"看起来
+        // 完全正常的名字被拒了"的告警——最没法自查的一种。而后果不是显示难看：
+        // 代理侧会把这类字符**剔除**，于是 "survival\u0007" 与真正的 "survival"
+        // 塌成同一个 server-id，先到的包抢注身份，真正的后端随后被判抢占而永久丢包。
+        put(en, zh, "config.check.network-server-id-unsafe-chars",
+            "Cross-server identity rejected: {0} contains characters that are illegal in a server id "
+                + "({1}). The proxy strips these characters, so this value would collide with a "
+                + "clean server id of the same name -- whoever reports first wins the identity, and "
+                + "the real backend is then rejected as an impostor and loses every packet "
+                + "permanently. Control characters (C0/C1/DEL) and the legacy color prefix \"§\" are "
+                + "all unsafe. Remove them and use a plain name such as \"survival\". NOTHING is sent "
+                + "from this backend until then.",
+            "跨服身份被拒：{0} 含 server-id 不允许的字符（{1}）。代理侧会把这些字符**剔除**，"
+                + "于是这个值与同名的干净 id 会塌成同一个身份——先上报的那一方抢注成功，"
+                + "真正的后端随后被判成冒充而**永久丢包**。控制符（C0/C1/DEL）与 legacy 颜色前缀"
+                + "「§」都属于非法字符。请把这类字符去掉，改成一个普通名字（如 survival）。"
+                + "修好之前这台后端不发送任何数据");
+
+        // ---- network.push-interval-seconds：绝对值越界回退（P2 从硬编码中文迁入）----
+        // {0}=用户写的值，{1}/{2}=合法区间，{3}=回退后的值。
+        // 必须点名"整体回退默认值"而不是"钳到边界"：写 500 得到的是 10 而不是 300，
+        // 不说清楚的话服主会以为插件按边界钳制了。
+        put(en, zh, "config.check.network-push-interval-out-of-range",
+            "network.push-interval-seconds={0} is outside the valid range {1}-{2}s; reverted to the "
+                + "default {3}s (NOT clamped to the nearest bound)",
+            "network.push-interval-seconds={0} 超出 {1}–{2} 秒，已回退默认值 {3} 秒"
+                + "（不是钳到最近的边界）");
+        // ---- network.push-interval-seconds × general.update_interval：交叉校验（P1-O，P2 迁入）----
+        // 参数口径固定为 {0}=原上报间隔秒、{1}=采集周期 tick、{2}=采集周期约等于多少秒、{3}=上调后的秒数。
+        // 三个数缺一不可：服主只有知道"这个调整是照着哪两个数算出来的"，才不会以为插件擅自动了配置。
+        put(en, zh, "config.check.network-push-interval-below-collect-period",
+            "network.push-interval-seconds={0}s is shorter than one collection period "
+                + "(general.update_interval={1} ticks ~= {2}s); raised automatically to {3}s. "
+                + "Sending can only happen at the end of a collection period, and the proxy treats "
+                + "a backend as stale after 3x the push interval -- with a push interval shorter than "
+                + "the collection period, a healthy backend shows \"stale\" periodically and is "
+                + "excluded from the network-wide TPS average and player total. This change is NOT "
+                + "written to config.yml; to genuinely slow reporting down, raise "
+                + "network.push-interval-seconds explicitly.",
+            "network.push-interval-seconds={0} 秒小于一个采集周期（general.update_interval={1} tick ≈ "
+                + "{2} 秒），已自动上调为 {3} 秒。"
+                + "上报只能发生在采集周期末尾，而代理侧按「3 × 上报间隔」判过期——"
+                + "上报间隔小于采集周期时，健康后端会周期性显示「数据过期」，"
+                + "并被排除出全网 TPS 平均与在线合计。"
+                + "本次调整不写入 config.yml；若要真正降低上报频率，请把 "
+                + "network.push-interval-seconds 显式调大。");
 
         Messages.registerModule(en, zh);
     }

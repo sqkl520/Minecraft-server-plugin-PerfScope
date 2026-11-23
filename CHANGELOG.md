@@ -14,6 +14,596 @@
 
 ---
 
+
+## [Unreleased] — 2026-11-23 — 修 `available()` 缓存的正确性 bug：mtime 精度碰撞把"已修好的目录"永久报成不可用
+
+> 分支 `fix/audit-round2-batch`。这是上一段"`available()` 改 mtime 缓存"引入的**真 bug**，
+> 不是测试问题：缓存键只有目录 mtime 一位，而 mtime 在 `FileTime.toMillis()` 口径下只有毫秒精度。
+
+### Fixed — `HistoryFileStore.available()` 在"文件→删除→建成目录"时可能命中过期缓存
+
+- **症状（CI 实测）**：`HistoryFileStoreWriteTest.writeFailureIsRecordedAndRecoversAfterTheDirectoryBecomesUsable:481`
+  在 **JDK 21 红、JDK 17 绿**，本地 Windows 连跑三次全过。失败行是
+  `dir fixed + no failures → healthy again ==> expected: <true> but was: <false>`。
+- **根因（已复现，非推测）**：缓存键 = `dir.toFile().lastModified()`。测试里 `blocked` 先是一个**文件**、
+  被 `Files.delete` 后由 `openWriter` 建成**目录**——两种形态的 mtime 完全可能落在**同一毫秒**，
+  于是键相等 → 命中上一次的结论 `false` → 目录明明已经修好，`available()` 仍说不可用。
+  - **实测碰撞率**（连续 300 次"删文件→建目录"，JDK 21 / Linux **ext4**）：**253/300**；
+    "删目录→重建目录"同样 **253/300**；同一台机的 **Windows/NTFS**：**1/300**。
+  - 这就是"只在本机 Windows 上绿、只在 CI 的 ubuntu-latest 上红"的来源——
+    **不是 JDK 版本差异，是文件系统时间戳精度 + 执行速度**。
+  - 用真实 `HistoryFileStore` 复刻测试体的循环探针（Linux）：**9/300** 次命中过期缓存，
+    失败样本一律是 `fileMtime == dirMtime` 且 `availabilityProbeMtimeMs` 与之逐位相等。
+  - 把旧实现放回同一套测试跑（Linux，10 轮）：**10/10 轮红**，并逐字复现 CI 那条断言失败；
+    其中原用例 4/10 轮红（概率性），新增的确定性用例 **10/10 轮红**。
+- **这不是测试问题，是生产问题**：服主"把配错的文件删掉、换成目录"正是这条缓存要支持的真实场景
+  （`PerfScopeCommand` 的 `/pscope trend`、reload 的 `runRetention`、`/pscope status` 的
+  `isHealthy()` 三处主线程调用都会读到这个结论）。
+- **改法**：缓存键从"mtime 一位"换成**目录身份指纹**
+  `AvailabilityKey(exists, isDirectory, mtimeMs, fileKey)`，由**一次** `Files.readAttributes` 同时取回：
+  - `isDirectory` 这一位让"文件→目录"迁移**确定性**失效缓存（与毫秒精度无关）；
+  - `fileKey`（Linux = dev+inode）再把"目录→删→同类型重建"也变成确定性失效；
+    Windows 上它恒为 `null`，那一侧靠 mtime + isDirectory 兜住（NTFS 同毫秒碰撞实测 1/300）；
+  - 路径不存在时 `readAttributes` 抛 `NoSuchFileException`，直接转成 `MISSING` 指纹——
+    比"先 `exists()` 再读"少一次系统调用，也不在两个调用之间留竞态窗口；
+  - 指纹**先于结论采集**（`readAvailabilityKey()` 在 `isWritable` 之前）。反过来会把"旧对象的结论"
+    配到"新对象的指纹"上，正是本次事故的形状；当前顺序最坏只多一次探测，不会给出错误答案。
+- **性能没有退回去（同机同 JVM 同 fixture 实测，7 天 × 1440 行）**：
+  | 路径 | 无缓存基线 | 旧（mtime 键） | 新（身份指纹） |
+  |---|---|---|---|
+  | `available()` 单次 | 7.04 ms | 0.11 ms | 0.10 ms |
+  | `loadRecentDays(7, 7d)` 稳态 | **11.57 ms** | 2.77 ms | 2.72 ms |
+  | `Files.isWritable` 冷探测 | 6.37 ms | — | 6.73 ms |
+  | 缓存键成本（`readAttributes`） | — | 0.12 ms（`lastModified`） | 0.09–0.10 ms |
+  - 新键比旧键**还略便宜**：一次 `readAttributes` 比 `File.lastModified()` 更廉价，却多拿三个信号；
+    `availabilityProbeCount()` 在 2230 次调用下仍为 **1**，缓存命中率未变。
+  - A/B 各跑 3 轮，`loadRecentDays` 新旧差 <0.2 ms（在噪声内），两者都远优于 11.57 ms 的无缓存基线。
+- **测试**：
+  - 新增 `cachedAnswerInvalidatesOnFileToDirectoryTransitionWithIdenticalMtime`——
+    **确定性**复刻 ext4 的碰撞现场：转成目录后把 mtime 设回与文件态**逐毫秒相等**，
+    于是"mtime 相同"这个前提在两平台都成立，断言与平台无关；并额外断言
+    `availabilityProbeCount` 恰好 +1，确保是**重探**而非"碰巧每次都绕过缓存"。
+  - `availabilityCacheTracksDirectoryStateTransitions` 去掉原先的 `setLastModifiedTime(+2s)` 补丁——
+    那个补丁恰好掩盖了本 bug；去掉后这一步成为真正的回归断言。
+- **验证**：`mvn -B -ntp test` 994 用例全绿（Windows / JDK 21）；`HistoryFileStoreWriteTest`
+  在 JDK 17 与 JDK 21 均 27/27；修复前的实现放回同一套测试在 Linux ext4 上 10/10 轮红。
+
+---
+
+## [Unreleased] — 2026-11-23 — i18n 收口：`load(null)` 丢 730 键（P1 真 bug）+ 硬编码日志迁移 + 翻译质量
+
+> 分支 `fix/i18n-load-null-and-gaps`。五个任务，其中任务 1 是**真 bug**：
+> `Messages.load(null)` 把 730 个模块键整批丢掉，而这条分支正是无 Bukkit 环境下
+> 初始化消息层的唯一入口。
+
+### Fixed — `Messages.load(null)` 丢 730 个模块键（P1 真 bug）
+
+**现象**：`load(plugin == null)` 发布的是 `EN_DEFAULTS`——静态块里手写的 85 个基础键。
+模块表（`cmd.*` / `alert.*` / `report.*` / `diag.*` / `config.*` / `run.*`）要等
+`mergeModules()` 才并进 `BUILTIN_MUTABLE`，于是这条早退分支让 **815 - 85 = 730 个键整批消失**，
+任何 `Messages.get()` 都退化成返回键名本身。
+
+**为什么它不是"测试环境的无关差异"**：`AlertFixtures.initMessages()` 与
+`TaskHandleContractTest` 都写着"只能传 null"。差 85 vs 815 个键，足以让
+"注册了模块键 → load 之后仍能取到值" 这件本应成立的事在测试里永远无法成立，
+于是依赖渲染文案的断言只能退成"断言键名/令牌"。
+
+**修法**（一行之隔）：改成 `defaultsOf(DEFAULT_LOCALE)`，并且**同时跑 `touchModules()` +
+`mergeModules()`**——只换表引用不合并，结果与改之前一样（模块 static 块还没执行）。
+
+**测试** `MessagesLoadNullTest`（4 例）：先 `registerModule` 再 `load(null)`，
+断言键**仍能取到值**（不是键名）；并锁住三条边界：语言回默认、覆盖表为空、
+中文表同样被合并。**变异验证**：改回 `EN_DEFAULTS` 后 2 例立刻变红。
+
+### Changed — `SummaryPublisher.formatDuration` 改用 `DurationFormat`（P2）
+
+原实现自带一份 `{" 天"," 小时"," 分"," 秒"}` 中文单位表，注释写着"不做 i18n：与
+DurationFormat 的既有口径同源"。但那段片段会被拼进一条**已经本地化**的句子，
+英文界面下必然混排（整句英文里夹着"1 小时"）。
+
+新增 `DurationFormat.elapsed(long, int maxUnits)`：从"天"起算、只写前 N 个**非零**单位。
+为什么不是复用 `uptime`：后者的窗口按"级"数（天/时/分），`1 天 0 时 0 分 3 秒` 会写成 `1d`，
+而这里要的是"跳过 0 分量"的形态。`network → util` 是允许的方向。
+
+**测试**：`PublisherClockRollbackTest` 新增中文用例；`NetworkLogLocalisationTest`
+断言英文界面下时长是 `1h 1m`（不是"1 小时"）、中文界面下是"1 时 1 分"。
+**变异验证**：改回中文单位表后 2 例变红。
+
+### Changed — 硬编码中文日志迁进 i18n（P2，用户可见）
+
+新增 `network.NetworkMessages` 模块表（`network.*` 前缀，7 键），迁移位置：
+
+| 位置 | 旧 | 新键 |
+|------|----|------|
+| `SummaryPublisher:289` | 通道登记失败 | `network.log.register-failed` |
+| `SummaryPublisher:371-375` | 时钟回拨 | `network.log.clock-rollback` |
+| `SummaryPublisher:426-428` | 发送失败（限频） | `network.log.send-failed` |
+| `SummaryPublisher:673-675` | server-id 派生 | `network.log.server-id-derived` |
+| `PerfScope:647-656` | 跨服摘要启用/未启用/启动失败 | `network.log.enabled` / `not-enabled` / `start-failed` |
+| `ConfigManager:1203-1204` | push-interval 越界回退 | `config.check.network-push-interval-out-of-range` |
+| `ConfigManager:1260-1266` | push-interval 低于采集周期 | `config.check.network-push-interval-below-collect-period` |
+| `MetricsCollector:652-653` | 子集契约违反（外壳） | `run.collector.subset-violation` |
+| `MetricsCollector:716-717` | 子集契约违反（详情） | `run.collector.subset-violation-detail` |
+| `MetricsCollector:787` | 跨服摘要上报异常 | `run.collector.network-report-failed` |
+
+**`PerfScope:134-136`（平台守卫）保留英文内联，这是时序限制而非偷懒**，理由写在代码注释里：
+① 语言来自 `config.yml`，而读配置正是本守卫要赶在之前避免的 Bukkit 副作用；
+② 紧接着就 `disablePlugin` + `return`，没有"之后补一条"的机会；
+③ 此时 `Messages.get()` 只会拿到键名，比英文更不可读。
+原实现是"英文一条 + 中文一条"的两行混排——现在只留英文（项目的 fallback 语言）。
+
+**测试**：`NetworkLogLocalisationTest`（5 例）与 `ConfigCheckLogLocalisationTest`（3 例）
+都做**双向**断言（en 下全英文无 CJK、zh 下是中文且无英文模板）——单向断言会把实现
+锁死成硬编码另一种语言。**变异验证**：各方向各杀一次。
+
+### Fixed — 翻译质量（P2）
+
+- `alert.threshold.{tps,mspt,players,entities,chunks,memory}` 六个键的**中文版原本是英文**
+  （`warning < 18 / critical < 10` 夹在中文句子里）。改成「警告 {2} {0} / 严重 {3} {1}」，
+  与 `alert.event.*` / `alert.msg.*` 的既有措辞一致。
+  `ThresholdTextMatchesOperatorTest` 的中文断言同步更新，并新增"不得残留英文
+  warning/critical"的判据。
+- `cmd.world.tile-entities-label` 中文值 = `"Tile Entity: "` → `"方块实体: "`。
+- **"Tile Entity" 的 4 种拼法统一**：中文值一律「方块实体」
+  （`cmd.tileentities.total-label` / `cmd.help.tileentities.desc` /
+  `cmd.section.tileentities[.world]` / `report.html.th.tile-entities` /
+  `report.txt.world-row`）。命令名 `tileentities`、模块 id `tile_entities`、
+  Bukkit 方法名 `getTileEntityCount` **保持原文**（翻了用户就敲不出来/搜不到）。
+  **测试** `ZhTerminologyConsistencyTest`（3 例）用正则排除这三类合法用法。
+  testharness 的 `cmd02-tileentities` 断言同步为 `=== 方块实体统计 ===`。
+- **标点：不统一，只消除单个值内部的混用**。理由（实测 815 键：半角 204 处 / 全角 69 处）：
+  ① `report-generated` 的 `: ` 是**调用点拼接契约**（`get(...) + path`）；
+  ② 改内置值虽不坏用户覆盖，但会让"内置值与用户值"的标点分叉；
+  ③ testharness 有 9 处按字面量断言 `总实体数:` / `报告已生成:` / `最低 TPS:` 等，
+  批量替换会一次性打断跨仓库断言。只修了唯一一处"同一值内混用"
+  （`config.check.language`）。**测试** `ZhPunctuationConventionTest`（2 例）。
+
+### Fixed — 占位符前导零（P3）
+
+`{01}` / `{00}` 此前被 `\{(\d+)\}` 接受并当成 `{1}` / `{0}`，于是"写错了"与"写对了"
+产出同一份结果；而 `check-i18n.mjs` 的 `placeholderSet()` 把两者当成不同占位符，
+门禁与实现不同口径。
+
+**选了"运行时拒绝"而不是"门禁归一化"**：归一化把一个必然的笔误变成一次成功的替换，
+用户永远看不到自己写错了；而拒绝让它像 `{not-a-placeholder}` 一样**原样显示在界面上**
+（这正是本类对非占位花括号一直采用的策略）。正则改为 `\{(0|[1-9]\d*)\}`，
+门禁同步用同一正则并新增 `E-PLACEHOLDER-LEADING-ZERO` 报错。
+
+**测试**：`PlaceholderLeadingZeroTest`（5 例，含"`{0}`/`{10}` 不被误伤"的反向对照）。
+**变异验证**：改回 `\{(\d+)\}` 后 2 例变红；门禁的正向对照（喂 `{00}` 给它）也确认会报错。
+
+### Notes
+
+- 新增 i18n 键 **12 个**（i18n 门禁 815 → 827），全部中英成对。
+- 新增测试类 6 个 / 22 例。
+- 新增 `Messages.builtin(locale, key)`（按语言取内置值，绕过用户覆盖与当前语言）：
+  术语一致性检查需要同时看 en 与 zh 两份原文，逐次切语言会污染同 JVM 的后续测试。
+
+---
+
+## [Unreleased] — 2026-11-23 — 并发：四处任务句柄竞态（P0）× 2 + 关停丢弃不计数（P1）
+
+> 三条都不是"代码风格"问题，而是**在 Folia 上会真实发生**的数据错误：每个缺陷的触发条件
+> 都是"两个 region 线程各跑一次 `/perfscope reload`"，而 reload 与那时装/卸的定时任务
+> 都没有任何裁决机制。实测环境限制见 `tools/KNOWN-TEST-LIMITS.md` 第 1 条。
+
+### Fixed — P0-1：四处服务的任务句柄是非 volatile 普通字段，start/stop 无互斥
+
+- **四处**（本轮全部改掉，一处不漏）：
+  | 文件 | 原字段 | 现字段 |
+  |---|---|---|
+  | `MetricsCollector` | `syncHandle` / `jvmHandle` | `syncSlot` / `jvmSlot` |
+  | `AlertService` | `timerHandle` | `timerSlot` |
+  | `DailySummaryService` | `timerHandle` | `timerSlot` |
+  | `PerfScope` | `autoReportTask` / `healthWatchTask` | `autoReportSlot` / `healthWatchSlot` |
+- **竞态形状**：`start()` 首行是 `stop()`，「先停后启」**只在单线程下幂等**。两线程交错成
+  「A 停 → A 装 H_A → B 读到 null（A 的写未发布）→ B 装 H_B 并覆盖字段」：
+  **两个定时器并存，H_A 从此无人能取消**。后果按服务分别是
+  告警每条推两次 + `cooldowns` 双重推进、采集双倍频率 + 历史写两份、
+  日报同一分钟发两次、报告文件重复生成 + 保留清理互踩。
+- **修法：照抄 `PerfScopeCommand:96-119` 已验证的 monitor 任务范式**（不是自创）——
+  抽出 `compat/TaskHandleSlot`：
+  - `AtomicReference<TaskHandle>` 取代普通字段（同时解决并发读-判-写与跨 region 线程的可见性）；
+  - `AtomicBoolean installing` 门闩把**创建区段串行化**（`runGlobalTimer` 返回前任务已提交给调度器，
+    这段时间字段仍是 null，没有门闩两个线程会各建一份）；
+  - 安装用 `compareAndSet(null, created)`：**只有一个赢家**，输家自己 `cancel()` 刚建的任务；
+  - 取消用 `getAndSet(null)` 抢占：**抢到才有权 cancel**，同一句柄不会被两个线程各取消一次；
+  - `created.isActive() == false`（noop）**不安装**，保住不变量「句柄非空 ⇔ 任务在跑」。
+- **另有 `PerfScope.reload()` 加实例级锁 `reloadLock`**：四个槽位只解决"同一服务不会有两个
+  定时器"，但两段 reload 仍能交错成「A 停 → B 停 → A 重建 → B 重建」，最终生效的采集间隔
+  取决于交错顺序而不是最后一次配置。串行化让并发 reload 退化排队。
+  刻意用显式锁对象而不是把方法改成 `synchronized`：`tools/check-reload-rebuild.mjs` 按
+  `public void reload()` 定位方法体，签名不能动。
+- **`MetricsCollector` 另加 `lifecycleLock`（收口一个槽位挡不住的中态）**：本类要装**两个**槽位，
+  中间夹着 `++generation` 与十几个缓存字段重置。两线程并发时可以出现「A 抢到 sync 槽位、
+  B 抢到 jvm 槽位」，两个任务捕获到**不同代际**，最终 `generation` 停在后一个值上
+  → 先装的那个主线程任务每轮都在 `isCurrentGeneration` 处自我作废：任务在跑、但没有一条快照产出，
+  `/status` 恒报"采集已停止更新"，而看门狗只会反复报过期。`startLocked`/`stop` 整段持锁，
+  让「停旧 → 进代 → 重置缓存 → 装两个槽位」成为不可分割的整体。
+  **两层分工不可合并**：槽位负责单点裁决（含"输家自取消、不泄漏"），锁负责跨槽位的原子性；
+  把锁并进槽位只会变成每个槽位各自加锁，仍挡不住跨槽位交错。
+
+### Fixed — P0-2：`ConfigManager.load()` 无并发保护，内部却是普通集合
+
+- `missingKeysThisLoad`（`LinkedHashMap`）/ `typeWarnedThisLoad`（`HashSet`）/
+  `typeWarningsThisLoad`（`ArrayList`）全是裸集合，每次进入先 `clear()` 再逐键 `put`/`add`。
+- 两层伤害，**第一层会把排障方向带偏**：
+  1. `ConcurrentModificationException` 从 `load()` 抛出 → 被 `reload()` 的 catch 当成
+     「配置解析失败」→ 打印"已按旧配置继续"。日志里一个字都没提并发；
+  2. `HashSet` 并发 `add` 撕裂桶链成环 → 后续 `contains` **永远转**在链上，
+     卡死 region 线程，**零日志**（比异常严重得多）。
+- **修法：`load()` 加 `synchronized`**。`reload` 的锁是第一道防线，这条是第二道——
+  `load()` 是 `public`，命令层与将来的热重载接口都不受 `reloadLock` 保护。
+- **为什么不用 `ConcurrentHashMap` 换掉集合**：加锁的代价只在 reload 期间（读盘+解析，低频人工操作），
+  而 `synchronized` 一次覆盖了真正的不变量「三个集合的**重置与填充是一个整体**」——
+  换并发容器只防撕裂，防不住 A 的 `clear()` 抹掉 B 刚填的缺键（结果变成"日志少报几条"，静默错报）。
+
+### Fixed — P1-3：`HistoryFileStore.append()` 在 `running == false` 时静默丢弃、不计数
+
+- `append()` 的 `!running` 分支是裸 `return`，不计入 `droppedSamples`；而
+  `droppedSamples()` 是**唯一对外暴露**的丢弃计数。
+- 于是关服窗口内（`onDisable` 里 `stopCollectionTasks()` 之后仍在飞的那个采集周期）
+  **最后一批样本无声消失且统计为 0**，与类注释「失败可见」的承诺相反。
+- **修法**：`!running` 记入 `droppedSamples` 并 `return`。同时明确另外两个分支的语义——
+  `history.persist=false`（用户主动关闭）与 `configManager == null`（尚未接线）**不**计入，
+  否则持久化关闭的服务器 `/status` 会显示一个不断增长的丢弃数，而实际一条没丢。
+
+### Added — 测试（974 例，基线 928 → +46 例中本批新增 15 例）
+
+- `compat/TaskHandleSlotTest`（8 例）——**P0-1 的靶点测试**：
+  - `startTwiceInstallsExactlyOneHandle`：单线程幂等（任务书兜底要求），工厂只调一次；
+  - `concurrentStartLeavesExactlyOneLiveHandle`：16 线程并发 `start`，断言
+    **`created - cancelled == 1`**（每建一个任务要么是最终赢家、要么被自己取消，没有第三种归宿）；
+  - `concurrentStopHasExactlyOneWinner`：8 线程并发 `stop`，只有 1 个返回 true、句柄只取消一次；
+  - `noopHandleIsNeverInstalledAndCanBeRetried`：noop 不安装且失败后可重试；
+  - `factoryFailureReleasesTheInstallLatch`：工厂抛异常时门闩必须释放，否则该服务永久起不来；
+  - `secondStarterYieldsWhileTheFirstIsStillCreating`：第一个线程卡在工厂里时，
+    第二个 `start` 必须**让位（返回 null）而不是也进工厂**。
+- `concurrency/DeferredTaskOwnershipTest`（4 例）——**接线**断言（源码级，
+  `StatusExportsTest` 同一范式）：四处服务都必须持 `TaskHandleSlot` 字段、不得残留裸
+  `TaskHandle` 字段、不得直接 `handle.cancel()`、不得 `= SchedulerAdapter.runXxxTimer(...)` 直接赋值；
+  另锁 `reload()` 方法体被 `synchronized (reloadLock)` 包住。
+  **为什么不能做成行为测试**：端到端跑 `MetricsCollector.start()` 就要真
+  `SchedulerAdapter.runGlobalTimer`，它的 `<clinit>` 读 `ServerCompat.isFolia()`，测试 JVM 里必抛
+  `ExceptionInInitializerError`（`KNOWN-TEST-LIMITS.md` 第 1 条）——故把约束上升到源码层。
+- `config/ConfigLoadSynchronizationTest`（2 例）：`load()` 必须 `synchronized`；
+  反面对照 `get()` **不得** `synchronized`（热路径，加锁会让 reload 的读盘放大成全局卡顿）。
+- `history/HistoryFileStoreWriteTest` 新增 2 例：
+  `appendAfterShutdownCountsAsDropped`（P1-3 靶点：期望 3，改回裸 return 则实际 0）、
+  `persistDisabledDoesNotCountAsDropped`（对照组，防止"顺手也给 persist=false 计数"）。
+
+### Verified — 变异验证（实测 KILLED，在 `/tmp` 的仓库副本上跑，未污染工作树）
+
+| 变异 | 结果 |
+|---|---|
+| `installed.compareAndSet(null, created)` 改成 `installed.set(created)`（旧形状） | `startTwiceInstallsExactlyOneHandle` 等 7 例红 |
+| 删掉 `installing` 门闩（`if (!installing.compareAndSet…)` → `if (false)`） | `secondStarterYieldsWhileTheFirstIsStillCreating` 红 |
+| `HistoryFileStore.append` 的 `!running` 分支改回裸 `return` | `appendAfterShutdownCountsAsDropped` 红（期望 3，实际 0） |
+| `public synchronized LoadResult load()` 去掉 `synchronized` | `loadIsSynchronized` 红 |
+| 任一服务残留一个裸 `SchedulerAdapter.TaskHandle` 字段 | `everyServiceHandleIsATaskHandleSlot` 红 |
+| 取消写成 `timerSlot.current().cancel()`（"先取快照再取消"的绕道） | **第一版门禁漏了**（正则只匹配裸标识符接收者），已收紧为"这四个文件里不出现任何 `.cancel()`"，重跑后红 |
+
+最后一行是本轮唯一一次"门禁自己写漏"——记在这里是因为它正是源码断言这种手法的典型失效方式：
+**断言锁的是文本形态，而绕道可以换一种形态**。收紧后仍有未知绕道（例如经辅助方法间接 cancel），
+但那已经越出"顺手改坏"的范围。
+
+### Notes — `MessagesLoadNullTest` 的 2 个失败与本批无关（不在本批范围内）
+
+- 全量跑时 `util/MessagesLoadNullTest` 的 `builtinModuleKeysSurviveLoadNull` /
+  `registeredModuleKeysSurviveLoadNull` 两例红。**已定位：不是本批引入**——
+  在 `git archive HEAD` 导出的**纯净 HEAD 源码树**上单独跑这两例，同样 2 失败。
+- 该测试文件与它所测的 `Messages.load(null)` 早退分支都属另一批（`messages.yml` / i18n）改动，
+  本批未触碰 `Messages.java`。排除这两例后全量 **970 例全绿**（含本批新增 15 例）。
+
+### Notes — 并发 reload 只产生一个定时器的证据链（分两层，分开标注）
+
+- **实测（单测）**：`TaskHandleSlotTest` 的两条并发用例真的用线程池跑了 16/8 线程，
+  断言的是"存活句柄数 == 1"与"不泄漏（created == cancelled + 1）"。这覆盖了
+  **裁决机制本身**，且能杀掉"把 CAS 改成 set"的变异。
+- **结构（源码门禁）**：四处服务**确实**都改用了该机制 —— `DeferredTaskOwnershipTest`。
+  这一层无法用行为测试替代（见上一条），属于"行为只能在特定运行环境显现时把约束上升到源码层"
+  的既有取舍（`check-reload-rebuild.mjs` / `check-sentinels.mjs` 同一范式）。
+- **未做的部分（诚实标注）**："两个 region 线程真的同时进 `PerfScope.reload()` 且产生两份定时器"
+  这条端到端复现**没有**做——需要可注入的假 `SchedulerAdapter` 或往生产代码插闩锁，
+  两者都会为了测试而改变被测量对象。**当前状态是"机制已测 + 接线已断言"，不是"端到端复现过"**。
+
+---
+
+## [Unreleased] — 2026-11-23 — 性能：`available()` 的昂贵探测改成 mtime 缓存（行为零变更）
+
+> 这一批**不改任何判定逻辑**，只去掉每次调用都重复付出的系统调用与对象分配。
+> 每一项都附"改前/改后行为相同"的证据（字节相同 / 测试全绿 / 结论逐次相等）。
+
+### Optimized — `HistoryFileStore.available()` 不再每次调 `Files.isWritable`
+
+- **问题**：`available()` 被三处**主线程**调用——`loadRecentDays`（每次 `/pscope trend`）、
+  `runRetention`（每次 reload）、`isHealthy`（每次 `/pscope status`）。旧实现每次都做
+  `Files.isDirectory(dir) && Files.isWritable(dir)`。本机 JDK 21 / Windows 实测：
+  `Files.isDirectory` = 0.15 ms，`Files.isWritable` = 3.1–3.5 ms（**20 倍**）。
+- **为什么不换成 `File.canWrite()`**（查证过 JDK 源码与实际行为，**两者不等价**）：
+  - `Files.isWritable` → `WindowsFileSystemProvider.checkAccess(WRITE)` →
+    `hasDesiredAccess(file, FILE_WRITE_DATA)`，走 `GetFileSecurity` 解析完整 DACL；
+  - `File.canWrite()` → `WinNTFileSystem.checkAccess0` → Windows `access()`，
+    `W_OK` 只映射到 `FILE_WRITE_ATTRIBUTES`（较弱权限）。
+  - 实测：对本机一个 **ACL 显式拒绝写**的目录，`Files.isWritable=false` 而
+    `File.canWrite=true`。差异恰好出现在"服主把历史目录权限配错了"这个本方法存在的理由上，
+    所以不换 API。
+  - 其它场景两种写法一致（不存在 / 普通文件 / junction / DOS 只读属性 / 卷只读）。
+- **改法**：缓存探测结论，缓存键 = 目录 mtime（`File.lastModified`，0.16 ms，与
+  `isDirectory` 同量级）。目录"被删/被换成文件/被重建"都会改 mtime，因此结论仍跟着真实状态变；
+  纯 ACL 变更不改 mtime，由写线程每 5 秒的周期节拍强制重探兜住（写在写线程上，不占主线程）。
+- **实测**（7 天 × 1440 行 fixture，新旧两份代码同机对跑）：
+  | 路径 | 改前 | 改后 |
+  |---|---|---|
+  | `available()` 单次 | 5.78 ms | 0.08 ms（**72x**） |
+  | `loadRecentDays(7, 7d)` 稳态 | 7.51 ms | 1.37 ms（**5.5x**） |
+  | 同上，冷启动（首次解析 7 文件） | 156.2 ms | 87.1 ms |
+  - 稳态下 10080 行样本两份实现**逐条相等**（`List.equals` = true）。
+- **测试**：`HistoryFileStoreWriteTest` 新增 3 例——
+  - `repeatedAvailabilityChecksReuseOneExpensiveProbe`：目录未变时 50 次调用**零**新增探测，
+    且结论与即时 `Files.isDirectory && Files.isWritable` 相等；
+  - `availabilityCacheTracksDirectoryStateTransitions`：删除 / 换成文件 / 重建三种迁移后结论都跟着变；
+  - `forcedRefreshPicksUpChangesThatDoNotTouchTheDirectoryMtime`：强制重探能纠正一个
+    "mtime 未变但结论已过期"的缓存。
+- **新增诊断访问器** `availabilityProbeCount()`：让"缓存真的生效"成为可断言的性质，
+  而不是读代码猜。
+
+### Optimized — 命令层/采集层的 `DateTimeFormatter.ofPattern` 提到静态常量
+
+- `MetricsCollector:1707`、`PerfScope:505`、`PerfScopeCommand:264/1577/1583/1603/2308`
+  共 **7 处**每次调用重建 formatter。本机实测 0.33 µs → 0.17 µs（缓存 pattern 后）。
+- **只缓存 pattern、不缓存 `withZone(ZoneId.systemDefault())`**：后者会把时区**冻结在类加载
+  那一刻**，而 `ZoneId.systemDefault()` 在 JVM 生命周期内可被 `TimeZone.setDefault()` 改动
+  （管理工具常这么做）。保留每次约 20 ns 的时区查询，换"改时区立刻生效"这个行为不变。
+
+### Optimized — `MetricsTextRenderer` 的 `StringBuilder` 初始容量 8192 → 12288
+
+- 实测真实输出：2 世界 6175 字符、8 世界 7255、12 世界 7985、**16 世界 8725**、
+  24 世界 10205、32 世界 11685 —— 即 16 个世界起就要扩容一次。
+- 12288 = 32 世界实测输出（11685）再留约 5% 余量；不设到 65536 是因为常规场景
+  （12 世界、7985 字符）会白占 128KB 堆。
+
+### Fixed — `DiagnosticEngineContractTest` 里又一条"只在文案查不到时才绿"的断言
+
+- **现象**：`staleConfigInsideGraceWindowSkipsEveryRule` 断言
+  `"diag.skip.stale-config".equals(s.reason())`。`Messages.resolve()` 在查不到键时
+  **退回键名本身**，所以这条断言真正测的是"这个键没有文案"——文案接上了它反而红。
+- **实测取证**（本地，同一键在 `Messages.load(null)` 前后）：
+  ```
+  [before load] diag.skip.stale-config
+  [after  load] Configuration was reloaded after this sample was collected; ...
+  [is raw key? false
+  ```
+  即这条断言被"`Messages.load(null)` 丢掉模块键"这个**另一个缺陷**养绿了很久；
+  那个缺陷修好之后它就立刻转红。
+- **改法**：期望值改为 `Messages.get("diag.skip.stale-config")` 解析出的实际文案，
+  并加一条前置断言 `assertFalse(key.equals(expected))` 把这个"恒真"形态本身钉死。
+  文案将来改了不会假红（直接读表），文案没接上则立刻红。
+
+---
+
+## [Unreleased] — 2026-11-23 — 测试：修掉一条恒真断言，补 `register()` 行为测试与 `messages.yml` 语言标签测试
+
+> 三件事相互独立，共同点是"此前看起来有测试、实际什么都没锁住"。
+
+### Fixed — `StatusExportsTest` 里那条恒真断言
+
+- **现象**：`networkRegistrationResultDrivesTheLogLine` 用
+  `assertContains(publisherSrc, "return false;")` 守 P0-E（catch 吞掉异常后被调用方读成成功）。
+  但 `SummaryPublisher.java` 里有 **4 处** `return false;`（`publish` / `resolveServerId` /
+  `channelRegistered` / `register` 的 catch），任何一个都能把它喂饱。
+  **变异实测**：把 `register()` 的 catch 改成 `return true`（P0-E 的原始形状），
+  925 个用例全绿——它一个字都没守住。
+- **修法**：把断言范围从"整个 795 行文件"缩到"`register()` 方法体 → 它内部的 catch 块"。
+  catch 块里只有一处 `return`，于是"必须 `return false` / 不得 `return true` / 不得裸 `return`"
+  三条都是精确判定。同一变异下现在变红。
+- 实现用花括号配对（`methodSource` / `blockAfter`），不是正则：归一化把换行压成空格后
+  括号结构仍然可靠。找不到签名或括号不配对时让断言自己失败，不抛看不懂的
+  `StringIndexOutOfBoundsException`。
+- **该类其余源码断言原样保留**（`showExports(sender, cfg)` 等）：无 MockBukkit 时它们是
+  锁住调用点的唯一手段，不是同一个问题。
+
+### Added — `SummaryPublisherRegisterTest`（7 个用例，`register` / `unregister` / `resetState` 首次有行为测试）
+
+- `register()` 成功 → `true`；`Messenger` 抛 `Exception` / `LinkageError` → 返回 **`false`**
+  且**不抛**（P0-E 本体）；失败原因留在 `registrationFailureReason()` 供 `/perfscope status`；
+  成功时清掉上一次的失败原因（不清的话修好的故障会一直显示着）。
+- `unregister()` 吞掉解注册异常（关服途中通道可能已随服务端消失）。
+- `resetState()` 必须同时清 `lastSentSemantic` 与 `lastSentAtMs`（只清一半会让
+  reload 改了 `network.push-interval` 后仍按旧间隔等待，看起来像"reload 没生效"）。
+- **环境限制的解法**：见 `tools/KNOWN-TEST-LIMITS.md` 新增的 **1b**。`Proxy.newProxyInstance(Server.class, …)`
+  在 JDK 17（surefire 实际使用的 JVM）上必炸——`Server` 有
+  `createExplorerMap(..., StructureType, ...)`，`Proxy` 生成类的 `<clinit>` 解析参数类型触发
+  `StructureType.<clinit>` → 解引用 `Bukkit.server`（null）。改用**手写最小 `Server` 实现**
+  （`src/test/java/cn/perfscope/support/FakeServer.java`，205 个方法，从 `Server.class.getMethods()` 生成）：
+  编译期解析签名可以，运行期加载不初始化 `StructureType`（JLS 12.4.1）。**零生产代码改动**。
+
+### Added — `MessagesLocaleTagMismatchTest`（6 个用例，`loadOverrides` / `overrideNotice` / 标签校验首次有测试）
+
+- 此前 `migrateLegacyFile` / `hasCustomizedValues` / `loadOverrides` / `overrideNotice`
+  **全部零引用**，而类注释用整段论证一条安全属性：`messages.yml` 的语言标签与
+  `general.language` 不一致时**整份文件被忽略**（避免中文覆盖文案混进英文界面）。
+- 锁三条：**失配 → 忽略**（文件写 `zh`、配置 `en`，覆盖值不得出现，取值必须精确等于英文内置默认）；
+  **用户能被告知**（`overrideNotice()` 非 null 且同时点名两种语言）；**一致 → 生效**
+  （含 `zh`+`zh` 这一格，防止判据被写成 `"en".equals(tag)`）。
+- 另加两格：未知标签（`fr`）不得被归一化成默认语言；没有文件时不制造"未生效"噪音。
+- **变异实测**：`if (!fileLocale.equals(locale))` → `if (false)`（尽力合并）抓到 2 例；
+  未知标签归一化成默认语言抓到 1 例；`if (true)`（永远忽略覆盖）抓到 2 例。
+
+### Notes
+
+- 本轮**只加测试与改测试**，生产代码零改动（除变异验证期间临时改坏后已逐一还原）。
+- `tools/KNOWN-TEST-LIMITS.md` 补 1b / 1c：更正"造不出假 `Server`"为"`Proxy` 造不出、手写实现造得出"，
+  并记录 `Proxy` 造 `Messenger` / `PluginMessageRecipient` 是安全的（接口方法签名不牵出
+  `StructureType` / `PotionEffectType` / `Registry` 那类静态块）。
+
+---
+
+## [Unreleased] — 2026-11-23 — 告警配置双读修复：8 个 `alerts.*` 键收敛到 `ConfigData`，删掉 `RawConfig`
+
+> **缺陷（真实行为缺陷，非风格问题）**：`AlertService.loadOptions()` 用内部类 `RawConfig`
+> **再读一遍原始 config.yml**，而 `ConfigManager.load()` 已经把其中 5 个键读进了
+> `ConfigData` 字段——那 5 个字段在 `ConfigManager` 内只有「声明 + 赋值」两处，
+> **零消费者**。即"读进了一个没人用的地方，真正生效的是另一条绕过全部校验的路径"。
+
+### Fixed — 8 个键只有一个读取入口
+
+- **`config-version` 迁移与未知键检测对这 5 个键完全失效**。`RawConfig` 直接
+  `YamlConfiguration.loadConfiguration(file)`，绕过了 `ConfigManager` 的整条流水线：
+  版本迁移、缺键汇总、类型校验、未知键点名，一个都不经过。用户把
+  `alerts.unknown-after-minutes` 写成 `"5m"` 时，`ConfigManager` 的告警与
+  `RawConfig` 的静默回退给出两个互不相干的结果。
+- **两份默认值**。`ConfigData` 的 `readXxx(key, def)` 与 `RawConfig.getXxx(key, def)`
+  各自维护一份，改一处而忘另一处不会编译失败、不会测试失败，只会让"首次安装的默认行为"
+  与"缺键的旧配置"分叉。
+- **3 个键连 `ConfigData` 字段都没有**：`alerts.refire-min-interval-seconds` /
+  `alerts.flap-window-seconds` / `alerts.repush-delta` 只存在于 `RawConfig` 的读取里
+  （其中 flap / repush 在 `ConfigManager.load()` 里还有一次"读了只为取副作用"的调用，
+  真值仍由 `AlertService` 从原文件取）。
+
+### Changed — 落地方式
+
+- `ConfigData` 新增 3 个字段：`alerts_refireMinIntervalSeconds`（int，默认 60）/
+  `alerts_flapWindowSeconds`（int，默认 180）/ `alerts_repushDelta`（double，默认 8）。
+- `ConfigManager.load()` 用 `readInt` / `readDouble` 读取；**`repushDelta` 必须走 double 域**
+  （`f-s03-data-07` 的老问题：曾用 `readInt` 读一遍只为告警，用户写 8.5 会被判
+  "类型错误、已改用 8"，而实际生效的仍是 8.5）。
+- `ConfigManager.validateThresholds()` 成为这 5 项的**唯一执法点**：
+  - `recovery-debounce-cycles` < 1 → 回退到**已钳制的** `debounce-cycles`（保持旧语义：
+    用户把防抖调到 9 时，恢复防抖的兜底也是 9，不是写死的 3）；
+  - `unknown-after-minutes` < 1 → 回退 5；
+  - `refire-min-interval-seconds` **0 合法**（= 关闭复燃识别），负值 → 回退 60；
+  - `flap-window-seconds` **0 合法**（= 关闭抖动抑制），负值 → 回退 180；
+  - `repush-delta` **0 合法**（= 关闭幅度抑制），负值 / NaN / Infinity → 回退 8。
+  - 三项新增**warn-only** 提示：超过「7 天 / 30 天」的不合理量级只点名不改值——
+    旧实现没有上界，加上界会让一直在跑的极端配置在升级后被静默改小（breaking change）。
+- `AlertService.loadOptions()` 改为全部读 `cfg.alerts_*`，**整个 `RawConfig` 内部类删除**。
+  它现在只做单位换算（秒 → 毫秒）与可空归一，不再做任何合法性判定——
+  同一个值在两处各自校验，日志会变成"一条说改用 A、另一条说改用 B"而真实生效的只有最后一次赋值。
+- `DailySummaryService.refreshZone()` 改为读 `cfg.alerts_dailySummaryTimezone`
+  （此前经 `AlertService.RawConfig.load(plugin).getString(...)` 直读原文件）。
+  随之删除不再有触发路径的 `daily.log.zone-read-failed` / `alert.log.rawconfig-failed`，
+  以及 5 条 `alert.log.bad-*`（校验执行者变成 `ConfigManager`，键名迁到 `config.check.*` 族——
+  键名前缀是"谁在读这个配置、谁在抱怨它"的归属标记）。
+- 过时注释修正：`alerts.refire-min-interval-seconds` 上那条「本键是 loadOptions 里唯一
+  既不被 ConfigManager 读取、也不在 jar 内 config.yml 中登记的键」在改完后已不成立，
+  连同它解释的 `f-s01-err-10` 专键 `alert.log.refire-unparsable` 一并删除；
+  `config.yml` 该键的注释改为陈述当下语义（负值回退 / 非数值按类型错误回退 / 超过 7 天只提示）。
+
+### 语义零变更的验证方法（实测，非推断）
+
+同一份 config.yml 在**改前**（`HEAD` 的独立工作树，仍带 `RawConfig`）与**改后**各跑一遍
+`loadOptions()`，逐字段 dump `Options.recoveryDebounceCycles / digestMode / notifyMitigation /
+unknownAfterMinutes / dailyTimezone` 与 `refireMinIntervalMs / flapWindowMs / repushDelta`：
+
+- **8 个键 × 29 种值形态 = 232 组**，其中**类型正确**的 86 组：**零差异**。
+- 全部 232 组里 49 组有差异，**全部落在"配置值类型写错"上**，分三类，且每一类的旧行为
+  本身就是自相矛盾的：
+  1. int 键写成 `8.5` / `45.7` / `"45"` / `"8"`：旧 `RawConfig` 用 `intValue()` 截断或
+     `Integer.parseInt` 解析（8.5 → 8、`"45"` → 45），**同时** `ConfigManager` 已经在报
+     `config.type.error` 说"这不是整数，已改用默认值"。即旧行为是"日志说用默认值、
+     实际用截断值"。新行为统一为"日志说什么就用什么"。
+  2. 布尔键写成 `1` / `0` / `"yes"` / `"no"`：旧 `RawConfig.getBool` 只认 `Boolean` 与
+     `String`（`"1"` 会被 `Boolean.parseBoolean` 判成 **false**），而 `1` / `0` 直接落回默认值；
+     `ConfigManager.coerceBool` 则把 `1/0/yes/no/on/off` 全部归一。新行为取后者的宽口径。
+  3. 时区键写成非字符串（数字/布尔）：旧 `RawConfig.getString` 用 `String.valueOf(v)`
+     硬转成 `"123"`，进而被 `ZoneId.of` 拒绝；新行为走 `readString` 的类型校验 + 回退空串。
+- 结论：**类型正确的配置（也就是所有真实用户的正常配置）行为逐值不变**；差异只出现在
+  本来就会被控制台警告的写错配置上，且方向是"日志与实际终于一致"。
+
+### Added — 回归测试
+
+`AlertOptionsSingleSourceTest`（10 例）锁三件事：
+
+1. **改 `ConfigData` 的字段真的会改变 `Options`**（8 个字段逐一断言），
+   以及反向对照「只改文件不改 `ConfigData` 时 `Options` 不变」——两条合起来才能排除
+   "两边恰好一致"的巧合；
+2. 缺键默认值与**随包 `config.yml` 逐值一致**；`0 = 关闭` 的三个键在 0 时原样传导为 0 毫秒；
+   负值 / NaN 回退默认；`recovery-debounce` 的缺键与非法值都跟随**已钳制的** `debounce-cycles`；
+3. **结构性断言**：每个键在 `ConfigManager` 里只能有一处 `readXxx()` 调用点
+   （先剥注释——本次的关键信息恰好写在注释里），且生产代码除 `ConfigManager` 外
+   不得再出现 `loadConfiguration(...)` 解析 config.yml。
+
+### Notes — 第 6 个双读键的排查结论
+
+按同一判据（"`ConfigData` 字段存在但零消费者"）全仓扫描：**71 个字段中只有
+1 个零外部消费者，即 `configVersion`**，而它在 `ConfigManager` 内部本身就在被使用
+（`LoadResult` 与日志）。另确认全仓 **`getConfig()` 调用点为 0**、直接
+`YamlConfiguration.loadConfiguration` 只剩 `ConfigManager`（config.yml）与 `Messages`
+（messages.yml，另一份文件）；`ThresholdColors` 的类注释虽写"直接读取 config.yml 的告警阈值"，
+实际走的是 `ConfigManager.get()`，注释是修辞不是事实，不构成第二个读者。
+
+**未发现第 6 个双读键。**
+
+---
+
+## [Unreleased] — 2026-11-23 — 独立验证第二批：`server-id` 两端判据真正对称、删掉 `NetworkSummary.ageMs`
+
+
+> 这两条是独立验证在**后端侧**发现的问题。代理侧另有 7 条（含一条本批引入的 P0 回归），
+> 见代理仓库 CHANGELOG。后端 925 → 928 例。
+
+### Fixed — P1：`validateServerId` 不查控制字符，与代理侧注释矛盾
+
+`SummaryPacket.java:348` 的注释写「两端同口径：后端 validateServerId 也会拒绝它」，
+实际后端只查长度/保留字，`validateServerId("a\nb")` = OK。**注释承诺的对称是对的，
+实现没跟上**——所以选择改实现。
+
+三个可滥用的后果（Agent 实测）：
+
+1. `server-id: "survival\u0007"` 在代理被 `sanitize` 成 `survival`，**先到的伪造包可以抢注
+   受害者的 id**，真正的 `survival` 后端随后 `REJECT_SQUAT` **永久丢包**；
+2. `server-id: "§csurvival"` 在面板显示 `csurvival`——服主配的名字在面板上不存在；
+3. `sanitize` 让 `ab` 与 `a\u0007b` 塌成同一 key，后到者**覆盖**先到者的数据。
+
+新增 `ServerIdVerdict.UNSAFE_CHARS` 与 `SummaryPublisher.stripUnsafeChars`（判据与代理侧
+`isUnsafeChar` **逐字一致**：`Character.isISOControl` + DEL + `§`）。判定顺序：
+空白 → 控制符 → 保留字 → 长度。控制符先于保留字，因为 `"unknown\u0007"` 剔除后就是保留字，
+但服主写错的是那个**不可见**字符——报成"是保留字"他会盯着 `unknown` 发愣。
+
+**两端不是"做同一件事"，而是同一条判据的两种用法**：代理把不合格输入剔除后继续用
+（它面对的多是外来包，没得修，整包拒收会让那台后端隐身）；后端拒发并点名原因
+（它面对的是服主配错了，能修，且必须说清是哪个码点）。正常部署走不到代理那条剔除路径。
+
+告警文案新增 `config.check.network-server-id-unsafe-chars`，参数是**码点列表**而不是原值——
+BEL 在控制台里不可见且会响铃、ESC 会吞掉后续字符，直接拼接得到的是"一个看起来完全正常的
+名字被拒了"，最没法自查。`describeUnsafeChars` 去重后按出现顺序列（最多 8 个）。
+加载期（`ConfigManager.checkCrossServerId`）与发送期共用同一条键与同一组参数。
+
+### Removed — P3：`NetworkSummary.ageMs(long nowMs)`（死代码，且语义已分叉）
+
+它仍是 `max(0, now - collectedAt)`（未来时间戳会被 clamp 成 0，正是 P1-V 修掉的形状），
+生产零调用，只被一个测试用到。P1-V 只修了代理侧，留着它是旧语义的第二实现。
+
+删掉而不是"改成与代理一致"，理由：
+1. 发送方拿一个 `nowMs` 根本算不出对方视角的年龄——那个锚点只有接收方有；
+2. 同名字、同话题、结论相反的第二实现，会让下一个人按名字找"怎么算年龄"时先撞上它。
+
+改掉那个测试比留着这个函数便宜，且改完后测试钉住的是真正要钉的
+（"collectedAt 与 sentAt 不可混用"）。另加一条反射断言"`Report` 不再有 `ageMs`"，
+防止有人顺手加回来——改实现而不是删它，普通测试抓不到。
+
+### Tests
+
+新增 3 例（925 → 928）：
+
+- 9 个控制符（`\n \r \t NUL BEL ESC DEL C1×2`）+ `§` 逐个断言 `UNSAFE_CHARS`；
+  `"unknown\u0007"` 必须先报"含非法字符"；中文/连字符/点的合法 id 一个都不能误伤
+- `describeUnsafeChars` 输出码点、去重、多字符按序、空输入给「（无）」而不是空串
+- 判据边界表（用**同一组字符**独立验证两端，不靠共享代码——两个仓库无法共享）
+
+### Notes — 与另一批改动共存
+
+本仓库工作树在本次会话期间**同时有另一批（告警/配置校验）的未提交改动**。
+本批只碰 `network/SummaryPublisher.java`、`network/NetworkSummary.java`、
+`config/ConfigManager.java`（只加一个 `case`）、`config/ConfigMessages.java`（只加一条键）、
+`network/NetworkSummaryTest.java`。验证方式：把这些文件复制到一个 detached worktree
+（`6dc370f`）单独跑，928 例全绿；主树的其余失败（`AlertOptionsSingleSourceTest` 等
+8 个 error）在该 detached worktree 上复现于**不存在的类/字段**，属于那批改动未完成的中间态，
+与本批无关。
+
+---
+
 ## [Unreleased] — 2026-11-23 — `PublisherFailureThrottleTest` 4 个 error：载体接缝让 `publish()` 的 catch 分支真正跑起来
 
 > 这 4 个是 **error（`NoClassDefFound` / `ExceptionInInitializerError`）而不是断言失败**，

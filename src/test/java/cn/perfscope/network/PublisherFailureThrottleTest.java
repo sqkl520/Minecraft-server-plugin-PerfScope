@@ -79,8 +79,42 @@ class PublisherFailureThrottleTest {
 
     private static final String LOGGER_NAME = "pscope-publisher-throttle";
 
-    /** {@code publish} 里那条限频日志的特征串。 */
-    private static final String FAIL_LOG_TOKEN = "跨服摘要发送失败";
+    /**
+     * {@code publish} 里那条限频日志的特征串 —— <b>按语言给两份</b>。
+     *
+     * <p>P2 之后这条日志走消息表（{@code network.log.send-failed}），文案随
+     * {@code general.language} 切换。本类只关心"打了几条"，若把特征串写死成中文，
+     * 默认语言（en）下它会一条都数不到——测试会对一个**正确**的实现报
+     * "Actual warnings: [...]" 却仍然失败。</p>
+     *
+     * <p>两份都要列：surefire 复用同一个 JVM，同批次里若有别的测试把语言切到中文，
+     * 只剩英文特征串又会失效。</p>
+     */
+    private static final String[] FAIL_LOG_TOKENS = {
+        "Cross-server summary send failed",   // en
+        "跨服摘要发送失败",                     // zh
+    };
+
+    /** 该日志行是不是"发送失败"那一条（语言无关）。 */
+    private static boolean isFailLog(String w) {
+        for (String token : FAIL_LOG_TOKENS) {
+            if (w.contains(token)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * 日志里是否写着"连续第 N 次失败"（语言无关：只认那个数字）。
+     *
+     * <p>"连续第 N 次"的中英文模板分别是 {@code 连续第 {0} 次} 与 {@code consecutive failure #{0}}，
+     * 共同点是数字紧跟在模板给出的位置上。断言只看数字，因此不受语言切换影响；
+     * 同时它仍然能杀死"计数只在输出时递增"那个错误实现——那种实现打出的是 1 而不是 6。</p>
+     */
+    private static boolean containsConsecutive(String line, int n) {
+        if (line == null) return false;
+        return line.contains("第 " + n + " 次")          // zh
+            || line.contains("failure #" + n);           // en
+    }
 
     /** 捕获到的 WARNING 文案。 */
     private final List<String> warnings = new ArrayList<>();
@@ -247,7 +281,7 @@ class PublisherFailureThrottleTest {
     }
 
     private long countFailLogs() {
-        return warnings.stream().filter(w -> w.contains(FAIL_LOG_TOKEN)).count();
+        return warnings.stream().filter(PublisherFailureThrottleTest::isFailLog).count();
     }
 
     // ==================== 正向 ====================
@@ -303,7 +337,7 @@ class PublisherFailureThrottleTest {
             publisher.publish(snap, t + i * 1000L);
         }
         assertEquals(1, countFailLogs(), "the first five failures collapse into one line");
-        assertTrue(warnings.get(0).contains("连续第 1 次"),
+        assertTrue(containsConsecutive(warnings.get(0), 1),
             "the first failure is the first one; got: " + warnings.get(0));
 
         // 模拟"已经过去一个限频窗口"——直接清锚点，避免测试睡 5 分钟。
@@ -311,10 +345,10 @@ class PublisherFailureThrottleTest {
         publisher.publish(snap, t + 6_000L);
 
         String secondLog = warnings.stream()
-            .filter(w -> w.contains(FAIL_LOG_TOKEN))
+            .filter(PublisherFailureThrottleTest::isFailLog)
             .reduce((a, b) -> b)
             .orElseThrow();
-        assertTrue(secondLog.contains("连续第 6 次"),
+        assertTrue(containsConsecutive(secondLog, 6),
             "the counter must count every failure, not just the logged ones; otherwise a link "
                 + "that has been broken for a day looks like it just broke. Actual log: " + secondLog);
     }
@@ -396,7 +430,7 @@ class PublisherFailureThrottleTest {
         // 发送失败的锚点会在**清掉之后**被这次失败重新写上（那是正确行为），
         // 所以不能用"它等于 0"来断言重置发生过。可观测的等价事实是：
         // 锚点若没被清，这次失败会被限频吞掉、日志一条不出；清掉了才会立刻打出来。
-        assertTrue(warnings.stream().skip(warningsBefore).anyMatch(w -> w.contains(FAIL_LOG_TOKEN)),
+        assertTrue(warnings.stream().skip(warningsBefore).anyMatch(PublisherFailureThrottleTest::isFailLog),
             "the send-failure anchor was parked in the future by the rollback; if it had not been "
                 + "cleared, this failure would be silently throttled. Actual new warnings: "
                 + warnings.subList(warningsBefore, warnings.size()));

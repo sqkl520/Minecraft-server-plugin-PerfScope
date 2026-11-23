@@ -21,6 +21,7 @@ import cn.perfscope.PerfScope;
 import cn.perfscope.alert.Alert;
 import cn.perfscope.compat.SchedulerAdapter;
 import cn.perfscope.compat.ServerCompat;
+import cn.perfscope.compat.TaskHandleSlot;
 import cn.perfscope.config.ConfigManager;
 import cn.perfscope.history.HistoryStore;
 import cn.perfscope.util.Messages;
@@ -45,14 +46,36 @@ import java.util.logging.Level;
  */
 public class MetricsCollector {
 
+    /**
+     * {@code HH:mm:ss} 的 pattern，**只缓存 pattern、不缓存 zone**（本类诊断/日志输出用）。
+     *
+     * <p>旧写法在 {@code formatClock} 里每次调用都 {@code DateTimeFormatter.ofPattern(...)}，
+     * 本机 JDK 21 实测约 0.33 µs/次（缓存后 0.17 µs）；主要成本是每次重建 pattern 的解析器树。
+     * {@code formatClock} 不是热路径，但它出现在状态行与日志里，属于"顺手就省掉"的类型喵。</p>
+     *
+     * <p><b>为什么不把 {@code withZone(ZoneId.systemDefault())} 也一起缓存</b>：
+     * 那会把时区<b>冻结在类加载那一刻</b>。{@code ZoneId.systemDefault()} 在 JVM 生命周期内
+     * 可以被 {@code TimeZone.setDefault()} 改动（插件生态里不少管理工具会这么做，
+     * 用来让整服日志与游戏内时间对齐），一旦冻住，改完之后本类的时刻与命令层就会差一个时区，
+     * 而这种不一致只在跨时区/改过时区之后才显现，极难排查。保留每次 20 ns 的时区查询，
+     * 买到的是"改时区立刻生效"这个行为完全不变。</p>
+     */
+    private static final DateTimeFormatter CLOCK_PATTERN = DateTimeFormatter.ofPattern("HH:mm:ss");
+
     private final PerfScope plugin;
     private final ConfigManager configManager;
     // Wave 7A：历史环形缓冲（由 PerfScope 持有并注入；本类只写不读，stop/reload 不影响其内容）
     private final HistoryStore historyStore;
 
-    // P0-1/P0-8：采集任务句柄（主线程节拍 syncHandle + 异步 JVM 节拍 jvmHandle），替代旧的 Bukkit taskId
-    private SchedulerAdapter.TaskHandle syncHandle;
-    private SchedulerAdapter.TaskHandle jvmHandle;
+    // P0-1/P0-8：采集任务句柄（主线程节拍 sync + 异步 JVM 节拍 jvm），替代旧的 Bukkit taskId。
+    //
+    // 为什么是 TaskHandleSlot 而不是两个普通字段：start() 首行的 stop() 只在单线程下幂等。
+    // Folia 上两个 region 线程同时 reload 时，「读-判-写」会交错成"两个定时器并存、
+    // 字段只记得后一个"，先建的那个从此无人能取消——采集会以双倍频率跑，历史样本写两份。
+    // 非 volatile 普通字段另有可见性问题（跨 region 线程可能长期读到旧值）。槽位把安装与取消
+    // 都收成单一赢家，范式与 PerfScopeCommand 的 monitor 任务同源（见 TaskHandleSlot 类注释）。
+    private final TaskHandleSlot syncSlot = new TaskHandleSlot();
+    private final TaskHandleSlot jvmSlot = new TaskHandleSlot();
 
     // ==================== 9A-10 #1：代际令牌（generation） ====================
     // 背景：TaskHandle.cancel() 只是"请求取消"，不中断、也不 join——旧任务若正在执行中，
@@ -366,9 +389,9 @@ public class MetricsCollector {
 
     /**
      * 启动采集任务（P0-1/P0-8），拆分为两个节拍，间隔均为 general.update_interval：
-     *  - syncHandle：主线程（Folia 下 GlobalRegionScheduler）节拍，采集 TPS/MSPT/玩家等轻量 Bukkit 指标，
+     *  - sync 槽位：主线程（Folia 下 GlobalRegionScheduler）节拍，采集 TPS/MSPT/玩家等轻量 Bukkit 指标，
      *    并对实体/区块/方块实体做分级降频；每周期产出完整快照入 history。
-     *  - jvmHandle：异步（Folia 下 AsyncScheduler）节拍，采集纯 JVM/MXBean 指标写入 volatile 缓存。
+     *  - jvm 槽位：异步（Folia 下 AsyncScheduler）节拍，采集纯 JVM/MXBean 指标写入 volatile 缓存。
      * Folia 下世界 API 的 region 线程归属问题由 P0-5 的 safeCollect 兜底（抛异常则标 unavailable）。
      */
     public void start() {
@@ -423,26 +446,26 @@ public class MetricsCollector {
         long interval = Math.max(1, configuredInterval);
         // 9A-10 #1：把代际捕获进闭包——任务体每次执行前先校验，过期代直接丢弃本轮结果
         final long taskGen = gen;
-        syncHandle = SchedulerAdapter.runGlobalTimer(plugin, () -> collectSync(taskGen), 0L, interval);
-        jvmHandle = SchedulerAdapter.runAsyncTimer(plugin, () -> collectJvmAsync(taskGen), 0L, interval);
+        // P0-1：安装走唯一的 CAS 闸口。两个线程同时 reload 时只有一个能装成功，
+        // 输家刚建出来的任务由槽位自己取消——绝不留下一份无人持有的定时器。
+        syncSlot.start(() -> SchedulerAdapter.runGlobalTimer(plugin, () -> collectSync(taskGen), 0L, interval));
+        jvmSlot.start(() -> SchedulerAdapter.runAsyncTimer(plugin, () -> collectJvmAsync(taskGen), 0L, interval));
     }
 
     /**
-     * 停止采集任务：取消两个任务句柄（句柄为空时无操作），并置空以便重建。
+     * 停止采集任务：抢占并取消两个任务句柄（句柄为空时无操作），并置空以便重建。
      *
      * <p><b>9A-10 #1</b>：cancel() 只能阻止"下一次"执行，拦不住已经在跑的那一次。这里同时推进
      * {@link #generation}，使所有仍在飞的旧任务在下一个状态发布点自行作废（见 {@link #isCurrentGeneration(long)}）。</p>
+     *
+     * <p><b>P0-1</b>：取消权由 {@link TaskHandleSlot#stop()} 的 {@code getAndSet(null)} 唯一裁决。
+     * 旧实现是"读字段 → 判空 → cancel → 写 null"，两个线程同时进来会各自取到同一个句柄
+     * 各取消一次；更糟的是它与 {@code start()} 的写交错时，先建的任务会在这条路径上被漏掉。</p>
      */
     public void stop() {
         generation++;   // 9A-10：让仍在飞的旧任务作废
-        if (syncHandle != null) {
-            syncHandle.cancel();
-            syncHandle = null;
-        }
-        if (jvmHandle != null) {
-            jvmHandle.cancel();
-            jvmHandle = null;
-        }
+        syncSlot.stop();
+        jvmSlot.stop();
     }
 
     /**
@@ -648,9 +671,8 @@ public class MetricsCollector {
             return;
         }
         subsetViolationLoggedAtMs = now;
-        java.util.logging.Logger.getLogger("PerfScope").warning("[PerfScope] "
-            + subsetViolationDetail + "。这是采集侧的自身一致性 bug，已自动修正以免影响展示；"
-            + "请报告给开发者");
+        java.util.logging.Logger.getLogger("PerfScope").warning(
+            Messages.get("run.collector.subset-violation", subsetViolationDetail));
     }
 
     /**
@@ -713,8 +735,11 @@ public class MetricsCollector {
         Set<String> extra = new LinkedHashSet<>(child);
         extra.removeAll(parent);
         parent.addAll(extra);
-        subsetViolationDetail = "MetricsSnapshot 子集契约 " + childName + " ⊆ " + parentName
-            + " 被违反：多出 " + extra + "（已补进 " + parentName + "）";
+        // 详情在这里组装成"可读片段"，外壳（"这是采集侧的 bug / 请报告给开发者"）由
+        // warnSubsetViolation 用消息模板套上。拆成两半是为了让语言跟随配置：
+        // 详情里的集合名是标识符（不翻译），只有句式需要跟着 general.language 走。
+        subsetViolationDetail = Messages.get("run.collector.subset-violation-detail",
+            childName, parentName, extra, parentName);
         warnSubsetViolation();
         return true;
     }
@@ -784,8 +809,8 @@ public class MetricsCollector {
             long now = System.currentTimeMillis();
             if (now - lastNetworkFailureLogAtMs > NETWORK_FAILURE_LOG_INTERVAL_MS) {
                 lastNetworkFailureLogAtMs = now;
-                plugin.getLogger().warning("[PerfScope] 跨服摘要上报异常（已忽略，不影响采集）："
-                    + e.getClass().getSimpleName() + ": " + e.getMessage());
+                plugin.getLogger().warning(Messages.get("run.collector.network-report-failed",
+                    e.getClass().getSimpleName() + (e.getMessage() == null ? "" : ": " + e.getMessage())));
             }
         }
     }
@@ -1704,7 +1729,7 @@ public class MetricsCollector {
 
     /** epoch ms → "HH:mm:ss"（本地时区，与命令层"采集时间"同口径）。 */
     private static String formatClock(long epochMs) {
-        return DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault())
+        return CLOCK_PATTERN.withZone(ZoneId.systemDefault())
             .format(Instant.ofEpochMilli(epochMs));
     }
 

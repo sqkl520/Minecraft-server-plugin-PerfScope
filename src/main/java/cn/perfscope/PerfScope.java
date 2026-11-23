@@ -46,6 +46,17 @@ public final class PerfScope extends JavaPlugin {
     private static final int BSTATS_PLUGIN_ID = 35061;
 
     /**
+     * {@code HH:mm:ss} 的 pattern（与命令层"采集时间"同口径）；每次仍现取时区。
+     *
+     * <p>提成静态常量省掉每次调用重建 pattern 的解析器树（本机实测 0.33 → 0.17 µs）。
+     * 刻意<b>不</b>把 {@code withZone(ZoneId.systemDefault())} 一起冻进常量：那会让
+     * 时区在类加载时被钉死，而 {@code TimeZone.setDefault()} 在 JVM 生命周期内是可能被改的
+     * （见 {@code MetricsCollector.CLOCK_PATTERN} 的同款说明）。行为零变更优先于那 20 ns。</p>
+     */
+    private static final java.time.format.DateTimeFormatter CLOCK_PATTERN =
+        java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss");
+
+    /**
      * bStats 句柄（Wave 10）：非 null 表示遥测已启用且需在 onDisable 时显式 {@code shutdown()}。
      * 占位 ID（0）或配置关闭时恒为 null。
      */
@@ -90,7 +101,14 @@ public final class PerfScope extends JavaPlugin {
     private MetricsCollector metricsCollector;
     private ReportGenerator reportGenerator;
     private PerfScopeCommand command;
-    private SchedulerAdapter.TaskHandle autoReportTask;
+    /**
+     * 自动报告任务句柄槽位（P0-1）。
+     *
+     * <p>旧字段是非 volatile 的普通 {@code TaskHandle}，{@code startAutoReport()} 首行的
+     * {@code stopAutoReport()} 只在单线程下幂等。并发 reload 时两个线程可以各装一个定时器、
+     * 字段只留后者，先建的从此无人取消——报告文件会被重复生成（同分钟两份、保留清理互相踩）。</p>
+     */
+    private final cn.perfscope.compat.TaskHandleSlot autoReportSlot = new cn.perfscope.compat.TaskHandleSlot();
     private AlertService alertService;
     private WebhookNotifier webhookNotifier;
     /** v1.4：Prometheus 抓取端点（默认不启用；null 表示尚未装配）。 */
@@ -105,7 +123,23 @@ public final class PerfScope extends JavaPlugin {
     // 采集不会报错、不会打日志，只会永久停在最后一张快照上。本 supervisor 每 10 秒看一眼
     // MetricsCollector.isStale()，只在"进入过期/恢复"的边沿各记一条日志（不刷屏），
     // 让控制台成为唯一的、不依赖人工比对时间戳的告警源。
-    private SchedulerAdapter.TaskHandle healthWatchTask;
+    private final cn.perfscope.compat.TaskHandleSlot healthWatchSlot = new cn.perfscope.compat.TaskHandleSlot();
+
+    /**
+     * {@link #reload()} 的实例级串行锁（P0-1）。
+     *
+     * <p><b>为什么需要它</b>：reload 的语义是「停四个任务 → 重读配置 → 重建四个任务」，
+     * 这三步必须是一个整体。Folia 上两个 region 线程同时 {@code /perfscope reload} 时，
+     * 两段 reload 会交错成「A 停 → B 停 → A 重建 → B 重建」——即使每个句柄槽位都能保证
+     * "只装一个"，最终活下来的仍是<b>最后一次重建按当时配置装的那一份</b>，而那可能是
+     * 由 A 在 B 重读配置之前读到的旧配置算出来的间隔。串行化让并发 reload 退化成
+     * "排队各跑一遍"，最后一次的配置一定生效。</p>
+     *
+     * <p>用显式锁对象而不是把方法改成 {@code synchronized}：方法签名保持
+     * {@code public void reload()} 可以让 {@code tools/check-reload-rebuild.mjs} 的源码
+     * 定位逻辑继续成立（那条门禁守的是"加载失败也要重建"，不能被签名重构连带改坏）。</p>
+     */
+    private final Object reloadLock = new Object();
     /** supervisor 上次观测到的过期状态（false = 正常）；仅该任务线程读写。 */
     private boolean lastStaleState = false;
     /** supervisor 上次观测到的 JVM 异步节拍过期状态；仅该任务线程读写。 */
@@ -124,16 +158,20 @@ public final class PerfScope extends JavaPlugin {
         // 放在最前面：此刻还没有任何 Bukkit API 副作用（配置未读、任务未起、事件未注册），
         // disablePlugin 之后不会有残留。
         //
-        // 注意：这里 **不能** 用 Messages.get()——消息层要等 load() 之后才就绪，此时调用
-        // 只会拿到键名本身（见 Messages#resolve 的 fallback）。所以文案直接内联。
+        // ── 为什么这三行**不能**走 Messages.get()（P2 结论：这是时序限制，不是偷懒）──
+        // 1. 语言来源不可知：{@code general.language} 在 config.yml 里，而读配置正是本守卫要
+        //    赶在之前避免的 Bukkit 副作用（见上一段）。要为一条"平台不对，我要禁用自己"的
+        //    日志去写一个 plugins/PerfScope/ 目录出来，代价明显大于收益。
+        // 2. 没有"之后再补一条"的机会：下面紧接着就 disablePlugin 并 return，插件不再有
+        //    横幅、不再有 load() 之后的生命周期。所以"先英文打、load 后再补中文"做不到。
+        // 3. 强行调 Messages.get() 只会拿到键名本身（快照里还没有这条键），比英文更不可读。
+        // 折中：只打英文。英文是本项目的 fallback / 默认语言，任何语言的服主都读得懂；
+        // 而原实现打的是"英文一条 + 中文一条"的两行混排——那正是 9D 要消灭的形态。
         if (!ServerCompat.isSupportedPlatform()) {
             getLogger().severe("[PerfScope] Unsupported server platform: " + ServerCompat.getServerName()
                 + ". This plugin targets the Paper family (Paper / Purpur / Pufferfish / Folia). "
                 + "Version checking may be wrong and some features are unavailable. "
                 + "Disabling PerfScope - delete the jar, or run it on Paper.");
-            getLogger().severe("[PerfScope] 不支持的服务端平台：" + ServerCompat.getServerName()
-                + "。本插件面向 Paper 系（Paper / Purpur / Pufferfish / Folia）。"
-                + "指标可能与事实不符，且部分功能不可用。已禁用 PerfScope —— 请删除本插件，或改用 Paper 系服务端。");
             getServer().getPluginManager().disablePlugin(this);
             return;
         }
@@ -164,6 +202,10 @@ public final class PerfScope extends JavaPlugin {
         Messages.onFirstLoad(RuntimeMessages::init);
         // 9D：配置校验警告（服主改错配置时最常看到的那类）
         Messages.onFirstLoad(cn.perfscope.config.ConfigMessages::init);
+        // P2：跨服摘要日志（通道登记 / 启停 / 回拨 / 发送失败 / server-id 派生）。
+        // 必须在这里登记：startNetworkPush() 在 load() 之后才跑，但 reload 路径会重新
+        // startNetworkPush 并再次打这些日志——不登记的话首次 load 之后这些键仍会缺失。
+        Messages.onFirstLoad(cn.perfscope.network.NetworkMessages::init);
         // 9D 修（验收）：必须**先合并模块表**再生成 messages.yml，
         // 否则 saveDefault 只会写出基础 86 个键（模块表尚未合并进来），
         // 用户打开模板找不到 cmd.*/report.*/alert.*，会以为自定义功能不存在。
@@ -426,22 +468,20 @@ public final class PerfScope extends JavaPlugin {
      */
     private void startHealthWatch() {
         stopHealthWatch();
+        // lastStaleState / lastJvmStaleState 是"边沿判定"的基线，只有该任务线程读写。
+        // 并发起停时两份看门狗会让同一次过期被报两遍、恢复也被报两遍——槽位保证只有一份在跑。
         lastStaleState = false;
         lastJvmStaleState = false;
         try {
-            healthWatchTask = SchedulerAdapter.runAsyncTimer(this, this::checkCollectorHealth,
-                HEALTH_WATCH_PERIOD_TICKS, HEALTH_WATCH_PERIOD_TICKS);
+            healthWatchSlot.start(() -> SchedulerAdapter.runAsyncTimer(this, this::checkCollectorHealth,
+                HEALTH_WATCH_PERIOD_TICKS, HEALTH_WATCH_PERIOD_TICKS));
         } catch (Exception | LinkageError e) {
-            healthWatchTask = null;
             getLogger().warning(Messages.get("core.log.watchdog-start-failed", e.getMessage()));
         }
     }
 
     private void stopHealthWatch() {
-        if (healthWatchTask != null) {
-            healthWatchTask.cancel();
-            healthWatchTask = null;
-        }
+        healthWatchSlot.stop();
     }
 
     /** 看门狗单轮检查（异步线程；只读 MetricsCollector 的 volatile 状态）。 */
@@ -502,7 +542,7 @@ public final class PerfScope extends JavaPlugin {
         if (epochMs <= 0L) {
             return Messages.get("core.time.never");
         }
-        return java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")
+        return CLOCK_PATTERN
             .withZone(java.time.ZoneId.systemDefault())
             .format(java.time.Instant.ofEpochMilli(epochMs));
     }
@@ -520,21 +560,21 @@ public final class PerfScope extends JavaPlugin {
         long intervalTicks = intervalMinutes * 60L * 20L;
         try {
             // P0-8：经 SchedulerAdapter 走异步调度（Folia 下自动用 AsyncScheduler）
-            autoReportTask = SchedulerAdapter.runAsyncTimer(
-                this, () -> reportGenerator.generateAndSave(), intervalTicks, intervalTicks);
+            // P0-1：经槽位安装（并发 reload 时只有一个真的装上，另一个复用或让位）
+            SchedulerAdapter.TaskHandle handle = autoReportSlot.start(() -> SchedulerAdapter.runAsyncTimer(
+                this, () -> reportGenerator.generateAndSave(), intervalTicks, intervalTicks));
+            if (handle == null) {
+                return; // 另一线程正在安装：它装好的定时器与本线程要装的是同一份配置
+            }
         } catch (Exception | LinkageError e) {
             getLogger().severe(Messages.get("core.log.auto-report-failed", e.getMessage()));
-            autoReportTask = null;
             return;
         }
         getLogger().info(Messages.get("core.banner.auto-report", intervalMinutes));
     }
 
     private void stopAutoReport() {
-        if (autoReportTask != null) {
-            autoReportTask.cancel();
-            autoReportTask = null;
-        }
+        autoReportSlot.stop();
     }
 
     /** 启动告警服务（P0-4）：定时器重建以应用新间隔；enabled=false 时 start() 内部直接返回。 */
@@ -644,17 +684,16 @@ public final class PerfScope extends JavaPlugin {
             // 于是控制台先 warning「登记失败」紧跟 info「已启用」——后一句更像结论，
             // 管理员会以为跨服摘要正常，实际代理侧永远收不到数据。
             if (summaryPublisher.register()) {
-                getLogger().info("[PerfScope] 跨服摘要已启用：通道 "
-                    + cn.perfscope.network.NetworkSummary.CHANNEL
-                    + "，间隔 " + cfg.network_pushIntervalSeconds + " 秒。"
-                    + "（plugin messaging 需有玩家在线才能转发，空服期间代理侧收不到）");
+                getLogger().info(Messages.get("network.log.enabled",
+                    cn.perfscope.network.NetworkSummary.CHANNEL,
+                    cfg.network_pushIntervalSeconds));
             } else {
-                getLogger().warning("[PerfScope] 跨服摘要未启用：通道登记失败（原因见上一条 warning，"
-                    + "/perfscope status 也会显示）。network.enabled 仍是 true，但跨服摘要不会发出任何数据。");
+                getLogger().warning(Messages.get("network.log.not-enabled"));
             }
         } catch (Exception | LinkageError e) {
-            getLogger().warning("[PerfScope] 跨服摘要启动失败：" + e.getClass().getSimpleName()
-                + (e.getMessage() == null ? "" : ": " + e.getMessage()));
+            getLogger().warning(Messages.get("network.log.start-failed",
+                e.getClass().getSimpleName()
+                    + (e.getMessage() == null ? "" : ": " + e.getMessage())));
         }
     }
 
@@ -805,62 +844,66 @@ public final class PerfScope extends JavaPlugin {
      * 采集/告警/自动报告一律照常重建（按旧配置继续运行），并给出明确日志。
      */
     public void reload() {
-        stopCollectionTasks();
-        stopAutoReport();
-        stopAlertService();
-        stopDailySummary();
-        boolean loadFailed = false;
-        try {
-            configManager.load();
-        } catch (Exception | LinkageError e) {
-            loadFailed = true;
-            getLogger().severe(Messages.get("core.log.config-load-failed", e.getMessage()));
-            getLogger().log(java.util.logging.Level.SEVERE, Messages.get("core.log.config-load-stack"), e);
-        }
-        Messages.load(this); // Wave 8D：消息层随 reload 刷新（缺失/损坏自动回退默认）
+        // P0-1：并发 reload 退化串行。没有这把锁时两段 reload 会交错成
+        // 「A 停 → B 停 → A 重建 → B 重建」，最终生效的间隔取决于交错顺序而不是最后一次配置。
+        synchronized (reloadLock) {
+            stopCollectionTasks();
+            stopAutoReport();
+            stopAlertService();
+            stopDailySummary();
+            boolean loadFailed = false;
+            try {
+                configManager.load();
+            } catch (Exception | LinkageError e) {
+                loadFailed = true;
+                getLogger().severe(Messages.get("core.log.config-load-failed", e.getMessage()));
+                getLogger().log(java.util.logging.Level.SEVERE, Messages.get("core.log.config-load-stack"), e);
+            }
+            Messages.load(this); // Wave 8D：消息层随 reload 刷新（缺失/损坏自动回退默认）
 
-        // 无论 load 成败，任务必须重建：绝不允许"采集停了不重建"的半途冻结态
-        startCollectionTasks();
-        startAlertService();
-        // Wave 7D：webhook 配置随 reload 刷新（enabled/url 变化即生效；就绪状态内部重算）
-        if (webhookNotifier != null) {
-            webhookNotifier.reload();
-        }
-        // v1.4：Prometheus 端点配置随 reload 刷新。start() 内部先 stop()，
-        // 所以改端口/路径/鉴权都能生效；未启用时 start() 直接返回 false 并不监听。
-        startPrometheus();
-        // v1.5：跨服上报随 reload 刷新。必须先摘旧通道再登记，且重置限频状态——
-        // 否则改了 server-id / 间隔后，旧的"上一次摘要"缓存会让新配置直到摘要变化才生效。
-        stopNetworkPush();
-        if (summaryPublisher != null) {
-            summaryPublisher.resetState();
-        }
-        startNetworkPush();
-        // P0-F 附带：bStats 是**唯一**一个此前被 reload 漏掉的出口（Prometheus / network /
-        // webhook / 日报都会重建）。漏掉的后果不是"没刷新"，而是 general.bstats-enabled 这个
-        // **隐私开关**失效到下次重启——改 false 后遥测照发。所以这里必须真的启停，不能只提示。
-        reloadBstats();
-        startDailySummary();
-        if (configManager.get().report_autoExport) {
-            startAutoReport();
-        }
-        try {
-            reportGenerator.cleanOldReports();
-        } catch (Exception | LinkageError e) {
-            getLogger().warning(Messages.get("core.log.report-cleanup-failed", e.getMessage()));
-        }
-        // 9A-18：保留天数可能被改过；清理已从写入路径剥离，reload 时显式跑一次
-        try {
-            historyFileStore.runRetention(configManager.get().history_persistRetentionDays);
-        } catch (Exception | LinkageError e) {
-            getLogger().warning(Messages.get("core.log.history-cleanup-failed", e.getMessage()));
-        }
-        if (loadFailed) {
-            getLogger().warning(Messages.get("reload-failed-old-config")); // 9A-24：接线死键
-        } else {
-            // 9A-24：控制台用独立键，默认值与改造前逐字一致（"PerfScope " 前缀保留，日志更好检索），
-            // 与聊天侧的 reloaded 分开——专业部署可能只想中性化聊天回复而不动控制台日志
-            getLogger().info(Messages.get("reloaded-console"));
+            // 无论 load 成败，任务必须重建：绝不允许"采集停了不重建"的半途冻结态
+            startCollectionTasks();
+            startAlertService();
+            // Wave 7D：webhook 配置随 reload 刷新（enabled/url 变化即生效；就绪状态内部重算）
+            if (webhookNotifier != null) {
+                webhookNotifier.reload();
+            }
+            // v1.4：Prometheus 端点配置随 reload 刷新。start() 内部先 stop()，
+            // 所以改端口/路径/鉴权都能生效；未启用时 start() 直接返回 false 并不监听。
+            startPrometheus();
+            // v1.5：跨服上报随 reload 刷新。必须先摘旧通道再登记，且重置限频状态——
+            // 否则改了 server-id / 间隔后，旧的"上一次摘要"缓存会让新配置直到摘要变化才生效。
+            stopNetworkPush();
+            if (summaryPublisher != null) {
+                summaryPublisher.resetState();
+            }
+            startNetworkPush();
+            // P0-F 附带：bStats 是**唯一**一个此前被 reload 漏掉的出口（Prometheus / network /
+            // webhook / 日报都会重建）。漏掉的后果不是"没刷新"，而是 general.bstats-enabled 这个
+            // **隐私开关**失效到下次重启——改 false 后遥测照发。所以这里必须真的启停，不能只提示。
+            reloadBstats();
+            startDailySummary();
+            if (configManager.get().report_autoExport) {
+                startAutoReport();
+            }
+            try {
+                reportGenerator.cleanOldReports();
+            } catch (Exception | LinkageError e) {
+                getLogger().warning(Messages.get("core.log.report-cleanup-failed", e.getMessage()));
+            }
+            // 9A-18：保留天数可能被改过；清理已从写入路径剥离，reload 时显式跑一次
+            try {
+                historyFileStore.runRetention(configManager.get().history_persistRetentionDays);
+            } catch (Exception | LinkageError e) {
+                getLogger().warning(Messages.get("core.log.history-cleanup-failed", e.getMessage()));
+            }
+            if (loadFailed) {
+                getLogger().warning(Messages.get("reload-failed-old-config")); // 9A-24：接线死键
+            } else {
+                // 9A-24：控制台用独立键，默认值与改造前逐字一致（"PerfScope " 前缀保留，日志更好检索），
+                // 与聊天侧的 reloaded 分开——专业部署可能只想中性化聊天回复而不动控制台日志
+                getLogger().info(Messages.get("reloaded-console"));
+            }
         }
     }
 

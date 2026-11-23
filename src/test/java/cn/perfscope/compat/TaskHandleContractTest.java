@@ -24,6 +24,7 @@ import java.util.logging.Logger;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -54,27 +55,31 @@ class TaskHandleContractTest {
     /**
      * 文案层必须初始化：{@code cancel()} 失败时走 {@code Messages.get(...)}。
      *
-     * <p><b>三步缺一不可</b>（少任何一步，{@code Messages.get} 都会退化成"返回键名 + 丢参数"，
-     * 实测确认过：拿到的是字面量 {@code "run.compat.task-cancel-failed"} 且
-     * {@code LogRecord.getParameters()} 为 null）：</p>
+     * <p><b>三步缺一不可</b>（少任何一步，{@code Messages.get} 都会退化成"返回键名 + 丢参数"）：</p>
      * <ol>
      *   <li>{@code AlertFixtures.initMessages()} —— 覆盖 alert / config / diagnose 三个模块
-     *       并完成 {@code Messages.load(null)}；</li>
+     *       并走一次带 plugin 的 {@code Messages.load}；</li>
      *   <li>{@code RuntimeMessages.init()} —— 触发它的 static 块，把 {@code run.*} 族键
      *       {@code registerModule} 进 {@code EXTRA_EN}/{@code EXTRA_ZH}（此时还没合并）；</li>
-     *   <li><b>{@code Messages.load(null)} 再来一次</b> —— 这一步才会 {@code touchModules()} +
-     *       {@code mergeModules()}，把上一步注册的表合并进 {@code BUILTIN} 并重建快照。</li>
+     *   <li><b>再走一次带 plugin 的 {@code Messages.load}</b> —— 这一步才会
+     *       {@code touchModules()} + {@code mergeModules()}，把上一步注册的表合并进
+     *       {@code BUILTIN} 并重建快照。</li>
      * </ol>
      * <p>漏掉第 3 步是这里最容易犯的错：注册不等于生效，{@code registerModule} 只把表存起来
      * 并把 {@code modulesLoaded} 置 false，真正的合并发生在下一次 {@code load()}。</p>
+     *
+     * <p><b>为什么第 3 步用带 plugin 的 {@code load} 而不是 {@code load(null)}</b>：
+     * {@code load(null)} 是"无插件"分支，它是否合并模块表取决于该分支的实现——
+     * 那条 P1 修复仍在评审，在修复前后两个分支上行为不同。用带 plugin 的入口（生产环境同款）
+     * 则与"修复是否已合入"无关，测试不会因为换分支就假红。</p>
      */
     @BeforeAll
     static void initMessages() throws Exception {
         cn.perfscope.support.AlertFixtures.initMessages();
         Class.forName("cn.perfscope.RuntimeMessages").getMethod("init").invoke(null);
-        Class.forName("cn.perfscope.util.Messages")
-            .getMethod("load", Class.forName("cn.perfscope.PerfScope"))
-            .invoke(null, (Object) null);
+        cn.perfscope.util.Messages.load(
+            cn.perfscope.support.AlertFixtures.barePlugin(
+                Logger.getLogger("pscope-taskhandle-messages")));
     }
 
     // ------------------------------------------------------------------------------------
@@ -234,16 +239,15 @@ class TaskHandleContractTest {
     /**
      * 吞异常不能是"悄悄吞"——必须留下正好一条 WARNING 级日志，且带上异常信息。
      *
-     * <p><b>为什么不检查渲染后的文案</b>：{@code run.*} 族键由 {@code RuntimeMessages} 注册，
-     * 而合并只发生在 {@code Messages.load(plugin)} 里带 plugin 的那条路径；测试里只能传
-     * {@code null}（没有 Bukkit 服务端），走的是"无插件"早退分支——
-     * 实测确认即使手动 {@code RuntimeMessages.init()} + {@code touchModules()} + {@code load(null)}，
-     * {@code Messages.get} 仍然返回键名本身、{@code getParameters()} 为 null。
-     * 这是消息层在无插件环境下的<b>预期降级</b>，不是 bug。</p>
+     * <p><b>文案为什么现在可以断言了</b>：{@code run.*} 族键由 {@code RuntimeMessages} 注册，
+     * 合并发生在 {@code Messages.load} 的 {@code touchModules() + mergeModules()} 里。
+     * 此前 {@code load(null)} 直接发布 85 个基础键、跳过合并，于是"测试只能传 null"等于
+     * "永远拿不到 {@code run.*} 文案"——旧版注释据此写道"{@code Messages.get} 仍然返回键名本身"，
+     * 那是<b>缺陷的描述，不是契约</b>。该分支修好后（null 与带 plugin 发布同一张合并表），
+     * 本类 {@code @BeforeAll} 的三步初始化足以让日志正文是真实文案。</p>
      *
-     * <p>所以这条测试锁的是它真正能锁的部分：<b>有没有记、记几条、什么级别</b>。
-     * 文案本身由 {@code check-i18n.mjs} 的键完整性检查与
-     * {@code RuntimeMessages} 的 {@code put(en, zh, ...)} 成对约束负责。</p>
+     * <p>所以这条现在同时锁两件事：<b>有没有记、记几条、什么级别</b>，以及
+     * <b>正文是否真的被翻译</b>——后者防的是"消息层静默降级成键名"从测试里溜过去。</p>
      */
     @Test
     void cancelFailureIsLoggedOnceAtWarning() {
@@ -285,6 +289,16 @@ class TaskHandleContractTest {
                 + "多条会在关服时刷屏（每个任务一条）");
         assertEquals(Level.WARNING, records.get(0).getLevel(),
             "取消失败是 warning 级：它意味着某个定时任务没被取消，而调用方已经继续往下走了");
+
+        // 正文必须是**翻译后的文案**，不是 {@code "run.compat.task-cancel-failed"} 这个键名。
+        // 期望值由消息层自己渲染同一模板（不硬编码语言），并先钉住"键确实解析成了文案"。
+        String expected = cn.perfscope.util.Messages.get("run.compat.task-cancel-failed",
+            "IllegalStateException: 模拟取消失败");
+        assertNotEquals("run.compat.task-cancel-failed", expected,
+            "前置条件：该键必须解析成真实文案，否则下面的比对退化成「键名 == 键名」");
+        assertEquals(expected, records.get(0).getMessage(),
+            "日志正文必须是渲染后的文案（含被吞掉的异常信息）；got: "
+                + records.get(0).getMessage());
     }
 
     /**

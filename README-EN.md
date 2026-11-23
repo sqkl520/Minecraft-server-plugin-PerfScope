@@ -276,9 +276,9 @@ alerts:
   recovery-debounce-cycles: 3  # Recovery debounce: N consecutive clean cycles before declaring recovery; 1 = one clean cycle (old behaviour)
   digest-mode: false        # Digest mode: new alerts within one check cycle are merged into a single message (upgrades/re-fires still go out individually)
   unknown-after-minutes: 5  # After a module has been unavailable for N minutes, its alerts move to unknown (no longer counted as "active")
-  flap-window-seconds: 180  # Flap window: a "recovery → re-breach" inside this window is treated as the same incident (no duplicate notifications)
-  repush-delta: 8           # Re-push delta: an active alert is not re-pushed unless its value changes by at least this much (applies to cpu:system only)
-  refire-min-interval-seconds: 60  # Re-fire interval: after a recovery, a re-breach counts as a "re-fire" only within this window (0 = disable re-fire detection; a re-breach is then treated as a normal new alert, still subject to cooldown-seconds)
+  flap-window-seconds: 180  # Flap window: a "recovery → re-breach" inside this window is treated as the same incident (0 = disable; negative reverts to the default 180)
+  repush-delta: 8           # Re-push delta: an active alert is not re-pushed unless its value changes by at least this much, applies to cpu:system only (0 = disable; decimals allowed)
+  refire-min-interval-seconds: 60  # Re-fire interval: after a recovery, a re-breach counts as a "re-fire" only within this window (0 = disable re-fire detection; a re-breach is then treated as a normal new alert, still subject to cooldown-seconds; negative reverts to the default)
   daily-summary:
     enabled: false          # Daily summary switch
     time: "08:00"           # Daily summary time (HH:mm)
@@ -368,12 +368,19 @@ network:
 - **`server-id` must be unique per backend.** It is the only field that tells them apart. When left
   empty it is derived as `port-<port>` with a console warning — in a multi-backend network **always**
   set it explicitly, or the proxy will merge several backends into one row.
-- **`server-id` has two hard limits, enforced on both ends:** at most **64 characters** (counted in
-  characters, so one CJK character is 1) and it must not be the reserved word **`unknown`**
-  (case-sensitive; `Unknown` is fine). When it breaks either, this plugin **refuses to send** and
-  names the reason (length / reserved word) with the actual character count and limit — instead of
-  sending it, having the proxy silently drop it, and leaving only "cannot parse cross-server
-  summary, check your versions" (which points you at a completely unrelated direction).
+- **`server-id` has three hard limits, enforced on both ends:** at most **64 characters** (counted in
+  characters, so one CJK character is 1), it must not be the reserved word **`unknown`**
+  (case-sensitive; `Unknown` is fine), and it must not contain **control characters** (C0 0x00–0x1F,
+  C1 0x80–0x9F, DEL 0x7F) or **`§`**. When it breaks any of them, this plugin **refuses to send** and
+  names the reason (length / reserved word / unsafe characters, with their code points) plus the
+  actual character count and limit — instead of sending it, having the proxy silently drop it, and
+  leaving only "cannot parse cross-server summary, check your versions" (which points you at a
+  completely unrelated direction).
+
+  > **Why control characters are rejected too**: the proxy **strips** them, so `survival\u0007`
+  > collapses onto the same `server-id` as the real `survival`. Whoever reports first wins the
+  > identity and the real backend is then rejected as an impostor and **loses every packet
+  > permanently**. A `§c` prefix likewise makes the panel show a name you cannot find in config.yml.
 - **`server-id` strongly should match the backend's name in `velocity.toml` verbatim (but this is not
   enforced).** The proxy panel shows the union of "names registered in `[servers]`" and "server-ids
   that have sent a packet"; when the two disagree you get **ghost rows** — `velocity.toml` says

@@ -11,6 +11,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -106,20 +107,27 @@ class NetworkSummaryTest {
             "collectedAt 必须是采集时刻——接收方靠它算快照年龄");
         assertEquals(9_000L, o.get("sentAt").getAsLong());
 
-        // 快照年龄必须用 collectedAt 算。用 sentAt 算会让每一条消息的年龄恒为 0，
-        // "数字冻住了"就永远检不出来。
-        assertEquals(3_500L, r.ageMs(4_500L));
+        // 这条测试原来调用 Report.ageMs(nowMs)，那个方法已经删除（见 Report 里的说明：
+        // 生产零调用，且它是 max(0, now-collectedAt) 这个已经分叉的旧语义）。
+        // 改钉真正要钉的性质：两个字段在线上是**分开的**，且重算年龄必须用 collectedAt
+        // 而不是 sentAt。用 sentAt 算会让每一条消息的年龄恒为 0，"数字冻住了"永远检不出来。
+        long now = 4_500L;
+        assertEquals(3_500L, now - o.get("collectedAt").getAsLong(),
+            "按 collectedAt 算出的年龄是 3.5 秒——这才是真实的数据年龄");
+        assertTrue(now - o.get("sentAt").getAsLong() < 0,
+            "按 sentAt 算会得到负数（发送晚于查询时刻），正是「年龄恒 0」的成因");
     }
 
     @Test
-    @DisplayName("时钟不同步：后端比代理快时年龄按 0 处理，不返回负数")
-    void negativeAgeClampsToZero() {
-        NetworkSummary.Report r = NetworkSummary.Report
-            .builder("survival", 5_000L, 5_000L)
-            .build();
-        // 后端的 collectedAt(5000) 比代理的 now(1000) 还晚 —— 跨机时钟没对上。
-        assertEquals(0L, r.ageMs(1_000L),
-            "负年龄会让上层算出诡异的百分比；夹到 0 是唯一安全的选择");
+    @DisplayName("时间：Report 不再提供 ageMs —— 年龄只有接收方算得出来（防第二份实现）")
+    void reportHasNoAgeMethod() {
+        // 结构性断言：这个方法是**反射**层面的契约。留着它就会出现"同名、同话题、
+        // 结论相反"的第二份年龄实现（旧版是 max(0,...)，未来时间戳会被 clamp 成 0）。
+        // 改实现而不删它，测试抓不到；只有断言它不存在才能防止有人"顺手加回来"。
+        for (java.lang.reflect.Method m : NetworkSummary.Report.class.getDeclaredMethods()) {
+            assertNotEquals("ageMs", m.getName(),
+                "Report.ageMs 已删除：年龄必须锚定在接收时刻，发送方算不出对方视角的年龄");
+        }
     }
 
     @Test
@@ -338,6 +346,108 @@ class NetworkSummaryTest {
         // 再补一条：恰好 64 字符且等于保留字前缀的，不因长度被判错。
         assertEquals(SummaryPublisher.ServerIdVerdict.OK,
             SummaryPublisher.validateServerId("a".repeat(63) + "k"));
+    }
+
+    // ==================== 控制字符：与代理侧 sanitize 对称 ====================
+
+    /**
+     * 后端必须拒绝含控制符 / {@code §} 的 server-id——与代理侧 {@code sanitize} 同口径。
+     *
+     * <p><b>为什么"代理会剔除"不够</b>：剔除意味着 {@code "survival\u0007"} 在面板上
+     * 变成 {@code "survival"}，与另一台真正叫 {@code survival} 的后端<b>塌成同一个 id</b>。
+     * 三个可滥用的后果（Agent 实测）：</p>
+     *
+     * <ol>
+     *   <li>先到的伪造包抢注受害者 id（{@code SourceBinder} 把它钉在第一条来源上），
+     *       真正的后端随后 {@code REJECT_SQUAT} <b>永久丢包</b>。</li>
+     *   <li>{@code "§csurvival"} 在面板上显示成 {@code "csurvival"}——服主配的名字不存在。</li>
+     *   <li>{@code "ab"} 与 {@code "a\u0007b"} 塌成同一个 key，后到者覆盖先到者的数据。</li>
+     * </ol>
+     *
+     * <p>这条测试与 {@code SummaryPacketTest}（代理侧）的
+     * {@code stripsControlCharactersFromServerId} 是同一判据的两端：
+     * 那边断言"剔除"，这边断言"拒发"。</p>
+     */
+    @Test
+    @DisplayName("校验：控制符（C0/C1/DEL）与 § 一律拒发（与代理侧 sanitize 同判据）")
+    void unsafeCharactersAreRejected() {
+        char[] bad = {
+            '\n', '\r', '\t', '\u0000', '\u0007', '\u001B', '\u007F', '\u0085', '\u009F', '§'
+        };
+        for (char c : bad) {
+            String raw = "survival" + c + "lobby";
+            assertEquals(SummaryPublisher.ServerIdVerdict.UNSAFE_CHARS,
+                SummaryPublisher.validateServerId(raw),
+                "U+" + String.format("%04X", (int) c) + " 必须被拒——代理会剔除它，"
+                    + "于是这个值与真正的 survivallobby 塌成同一个 server-id，"
+                    + "先到的包能抢注身份、真正的后端随后永久丢包");
+        }
+
+        // 名字**就是**保留字 + 一个控制符：剔除后等于 "unknown"。必须先报"含非法字符"，
+        // 因为那才是服主实际写错的字符（报成"是保留字"他会盯着 unknown 发愣）。
+        assertEquals(SummaryPublisher.ServerIdVerdict.UNSAFE_CHARS,
+            SummaryPublisher.validateServerId("unknown\u0007"),
+            "剔除后就成了保留字，但服主写错的是那个不可见字符——必须先报它");
+
+        // 反证：普通字符一个都不能误伤（否则合法部署会被拒发、永久隐身）。
+        assertEquals(SummaryPublisher.ServerIdVerdict.OK,
+            SummaryPublisher.validateServerId("survival-1"));
+        assertEquals(SummaryPublisher.ServerIdVerdict.OK,
+            SummaryPublisher.validateServerId("世界一区"),
+            "中文 id 必须照常放行（README 明确支持）");
+        assertEquals(SummaryPublisher.ServerIdVerdict.OK,
+            SummaryPublisher.validateServerId("srv_2.eu"));
+    }
+
+    @Test
+    @DisplayName("控制符：告警文案必须给出码点，而不是把不可见字符原样拼进日志")
+    void unsafeCharacterWarningNamesCodePoints() {
+        // BEL / ESC 在控制台里不可见（一个会响铃、一个会吞掉后续字符）。
+        // 原样拼接只会得到"配了一个看起来完全正常的名字却被拒"——最没法自查的告警。
+        String desc = SummaryPublisher.describeUnsafeChars("survival\u0007lobby");
+        assertEquals("U+0007", desc, "必须写成码点，实际：" + desc);
+
+        // 去重：同一个字符出现多次只报一次。
+        assertEquals("U+0007", SummaryPublisher.describeUnsafeChars("a\u0007b\u0007c"),
+            "同一个码点重复出现不该重复列出");
+
+        // 多个不同字符按出现顺序列出。
+        String multi = SummaryPublisher.describeUnsafeChars("a\u0007b\u001Bc§");
+        assertTrue(multi.contains("U+0007") && multi.contains("U+001B") && multi.contains("U+00A7"),
+            "所有非法字符都要列出，实际：" + multi);
+
+        // 没有非法字符时给一个明确的占位，不是空串（空串会让告警变成
+        // "含 server-id 不允许的字符（）"）。
+        assertEquals("（无）", SummaryPublisher.describeUnsafeChars("survival"));
+        assertEquals("（无）", SummaryPublisher.describeUnsafeChars(null));
+    }
+
+    @Test
+    @DisplayName("控制符：剔除判据与代理侧逐字一致（同一组字符，两端结论相同）")
+    void unsafeCharPredicateMatchesProxySide() {
+        // 代理侧 SummaryPacket.isUnsafeChar 的判据是：
+        //   Character.isISOControl(c) || c == '\u007F' || c == '§'
+        // 这里用**同一组边界字符**独立验证后端判据，不靠共享代码（两个仓库无法共享）。
+        // 若哪天有人只改了一边，这条（后端）与代理侧的
+        // stripsControlCharactersFromServerId（那边）会有一边红。
+        Object[][] cases = {
+            {'\u0000', true}, {'\u001F', true}, {'\u007F', true},
+            {'\u0080', true}, {'\u009F', true},
+            {' ', false}, {'~', false}, {' ', false},
+            {'A', false}, {'中', false}, {'-', false}, {'_', false},
+        };
+        for (Object[] c : cases) {
+            char ch = (Character) c[0];
+            boolean expectedUnsafe = (Boolean) c[1];
+            String raw = "a" + ch + "b";
+            boolean rejected = SummaryPublisher.validateServerId(raw)
+                == SummaryPublisher.ServerIdVerdict.UNSAFE_CHARS;
+            assertEquals(expectedUnsafe, rejected,
+                "U+" + String.format("%04X", (int) ch) + " 的判定与代理侧不一致");
+        }
+        // § 单列（不在 isISOControl 里）。
+        assertEquals(SummaryPublisher.ServerIdVerdict.UNSAFE_CHARS,
+            SummaryPublisher.validateServerId("a§b"));
     }
 }
 

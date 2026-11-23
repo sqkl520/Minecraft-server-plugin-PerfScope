@@ -179,6 +179,56 @@ class HistoryFileStoreWriteTest {
         assertNoHistoryFileWritten(dir);
     }
 
+    /**
+     * <b>P1-3 靶点</b>：关停之后的 append 必须计入 {@code droppedSamples()}。
+     *
+     * <p>修前这里是静默 {@code return}，于是关服窗口内（{@code onDisable} 里
+     * {@code stopCollectionTasks()} 之后仍在飞的那个采集周期）的最后一批样本
+     * <b>无声消失且统计为 0</b>。{@code droppedSamples()} 是唯一对外暴露的丢弃计数，
+     * 它答"0"会让 /status 与报告一致地声称"一条都没丢"——而这正是类注释
+     * 「失败可见」承诺失效的地方。</p>
+     *
+     * <p>mutation 靶点：把 {@code if (!running) { droppedSamples.incrementAndGet(); return; }}
+     * 改回 {@code if (!running) { return; }}，这条立刻红（期望 3，实际 0）。</p>
+     */
+    @Test
+    void appendAfterShutdownCountsAsDropped() {
+        Path dir = temp.resolve("hist");
+        HistoryFileStore store = open(persistConfig(), dir);
+        store.shutdown();
+
+        for (int i = 0; i < 3; i++) {
+            store.append(sampleAt(1_700_000_000_000L + i));
+        }
+
+        assertEquals(3L, store.droppedSamples(),
+            "关停之后被丢弃的样本必须计入 droppedSamples——否则最后一批样本无声消失且统计为 0");
+        assertEquals(0, store.pendingWrites(),
+            "计数归计数，仍然不得入队（没有消费者，入了就是永久滞留）");
+        assertNoHistoryFileWritten(dir);
+    }
+
+    /**
+     * 对照组：{@code history.persist=false} 丢弃的样本<b>不</b>计入 dropped。
+     *
+     * <p>"用户主动关掉持久化"不是"该写的样本丢了"。把它也计数会让 /status 在
+     * 持久化关闭的服务器上永远显示一个不断增长的丢弃数，而那个数一个样本都没丢。
+     * 这条与本类上面的 P1-3 靶点配对：两条一起锁住"计数只覆盖真的丢了的样本"。</p>
+     */
+    @Test
+    void persistDisabledDoesNotCountAsDropped() {
+        ConfigManager cm = HistoryFixtures.config(c -> c.history_persistEnabled = false);
+        Path dir = temp.resolve("hist");
+        HistoryFileStore store = open(cm, dir);
+
+        for (int i = 0; i < 3; i++) {
+            store.append(sampleAt(1_700_000_000_000L + i));
+        }
+
+        assertEquals(0L, store.droppedSamples(),
+            "persist=false 是用户主动关闭，不是丢弃：计数进去会让 /status 谎报丢数据");
+    }
+
     // ==================================================================================
     // 2. 落盘：最基本、也最可能完全没测的一条
     // ==================================================================================
@@ -434,9 +484,144 @@ class HistoryFileStoreWriteTest {
     }
 
     // ==================================================================================
+    // 8b. available() 的缓存：结论必须与每次即时探测一致，但系统调用只花一次
+    // ==================================================================================
+    //
+    // 三条一起才构成"优化没改行为"的证明：
+    //   1) 缓存命中路径返回的**结论**与 `Files.isDirectory && Files.isWritable` 完全一致；
+    //   2) 状态迁移（目录被删/被换成文件/被重建）之后结论跟着变——缓存不会把旧答案钉死；
+    //   3) 纯 ACL 变更（不改 mtime）由写线程的周期重探兜住。
+    //
+    // 三条都在 `shutdown()` 之后做：写线程每 5 秒也会强制重探一次，留着它会让
+    // "探测了 N 次"这类计数断言变成看运气的。关掉写线程后 available() 的语义完全不变
+    // （它只看目录，不看线程存活），断言的确定性因此是白白得到的。
+
+    @Test
+    void repeatedAvailabilityChecksReuseOneExpensiveProbe() throws IOException {
+        Path dir = temp.resolve("hist");
+        HistoryFileStore store = open(persistConfig(), dir);
+        store.shutdown(); // 去掉后台的周期重探，让探测计数可确定断言
+
+        long before = store.availabilityProbeCount();
+        // 第一次调用必然探一次（构造器不探）
+        assertTrue(store.available());
+        long afterFirst = store.availabilityProbeCount();
+        assertEquals(before + 1L, afterFirst,
+            "the first check on an untouched directory must probe exactly once");
+
+        // 目录 mtime 不变时，后续 N 次必须是零新增探测——这就是省下来的那 3 ms×N。
+        for (int i = 0; i < 50; i++) {
+            assertTrue(store.available(),
+                "a cached answer must stay true while the directory is unchanged");
+        }
+        assertEquals(afterFirst, store.availabilityProbeCount(),
+            "50 more checks on an unchanged directory must not add a single Files.isWritable call");
+
+        // 缓存的是"结论"，不是猜的：它必须与一次即时探测逐字相等。
+        assertTrue(Files.isDirectory(dir) && Files.isWritable(dir),
+            "the cached conclusion must equal a fresh probe");
+    }
+
+    @Test
+    void availabilityCacheTracksDirectoryStateTransitions() throws IOException {
+        Path dir = temp.resolve("hist");
+        HistoryFileStore store = open(persistConfig(), dir);
+        assertTrue(store.available());
+        store.shutdown(); // 同上：排除周期重探对计数的干扰
+
+        // 1) 目录消失 → 必须转 false（缓存不能把它钉在 true 上）
+        Files.delete(dir);
+        assertFalse(store.available(), "a deleted directory must invalidate the cached answer");
+
+        // 2) 同一路径换成普通文件 → 仍 false（isDirectory 那一半没被缓存吃掉）
+        Files.writeString(dir, "i am a file, not a directory");
+        assertFalse(store.available(), "a regular file is still not a writable directory");
+
+        // 3) 换回目录 → 必须恢复 true。
+        //
+        //    这里**故意不**推后 mtime（旧版本曾用 setLastModifiedTime 绕开分辨率问题）。
+        //    那种绕过恰好掩盖了真正的缺陷：缓存键若只有 mtime，两个不同形态的对象落在
+        //    同一毫秒就会命中旧结论。修复后的键含 isDirectory，所以"文件→目录"这一步
+        //    无论 mtime 是否相同都必然失效缓存——去掉补丁正是为了把这条性质钉住。
+        Files.delete(dir);
+        Files.createDirectories(dir);
+        assertTrue(store.available(), "recreating the directory must restore the true answer");
+    }
+
+    /**
+     * 回归：<b>"路径先是一个文件、后被建成目录"且两次 mtime 完全相同</b>时，缓存必须失效。
+     *
+     * <h2>这条用例存在的理由（一次真实的 CI 事故）</h2>
+     * <p>旧实现的缓存键只有目录 mtime，于是这个场景在 mtime 精度内碰撞时会命中旧结论
+     * {@code false}，把已经修好的目录永久报成不可用。实测（Linux ext4 / JDK 21，
+     * 连续 300 次"删文件→建目录"）：<b>253 次</b>两种形态的 mtime 落在同一毫秒；
+     * 同一台机的 Windows/NTFS 只有 1 次。CI 跑在 ubuntu-latest（ext4），本机是 NTFS，
+     * 这就是"CI 的 JDK 21 红、JDK 17 绿、本地怎么跑都绿"的来源——<b>不是 JDK 版本差异，
+     * 是文件系统精度 + 执行速度</b>。</p>
+     *
+     * <h2>为什么不靠"跑很多次碰运气"</h2>
+     * <p>靠运气意味着在 NTFS 上永远无法复现（1/300），而在 ext4 上是概率性红。
+     * 这里改为<b>把碰撞显式构造出来</b>：转成目录之后把 mtime 设成一个与文件态<b>逐毫秒相等</b>
+     * 的值。于是"mtime 相同"这个前提在两个平台上都确定成立，断言与平台无关喵。</p>
+     */
+    @Test
+    void cachedAnswerInvalidatesOnFileToDirectoryTransitionWithIdenticalMtime() throws IOException {
+        Path dir = temp.resolve("hist");
+        // 先做成文件（不是目录），让"可用"的结论确定是 false
+        Files.writeString(dir, "not a directory");
+        long sharedMtime = 1_700_000_000_000L;
+        Files.setLastModifiedTime(dir, FileTime.fromMillis(sharedMtime));
+
+        HistoryFileStore store = open(persistConfig(), dir);
+        store.shutdown(); // 去掉写线程的周期重探，让"缓存是否失效"只由 available() 自己决定
+        assertFalse(store.available(), "a regular file must not be reported available");
+        long probesAfterFile = store.availabilityProbeCount();
+
+        // 转成目录，并把 mtime 设回与文件态完全相同的毫秒值。
+        // 这两步合起来精确复刻了 ext4 上的真实碰撞现场。
+        Files.delete(dir);
+        Files.createDirectories(dir);
+        Files.setLastModifiedTime(dir, FileTime.fromMillis(sharedMtime));
+        assertEquals(sharedMtime, dir.toFile().lastModified(),
+            "fixture precondition: the directory's mtime equals the file's mtime to the millisecond");
+
+        // 旧实现只比较 mtime → 命中旧结论 false → 这条断言红。
+        // 新实现的键含 isDirectory（false→true），必然失效缓存并重探。
+        assertTrue(store.available(),
+            "a file→directory transition must invalidate the cache even when mtime is unchanged");
+
+        // 更强的一层：不只是"答案对"，而是"确实重新探过一次"。
+        // 没有这一条，一个"每次都不走缓存"的实现也能让上面那条通过——
+        // 而那等于把本类要保住的性能优化悄悄退回去了。
+        assertEquals(probesAfterFile + 1L, store.availabilityProbeCount(),
+            "the transition must be answered by a fresh probe, not by a cache hit");
+    }
+
+    @Test
+    void forcedRefreshPicksUpChangesThatDoNotTouchTheDirectoryMtime() throws IOException {
+        // 纯 ACL 变更不改目录 mtime（Windows 实测），所以主线程那条指纹缓存看不见它。
+        // 写线程的周期强制重探是唯一的补救点，这条把它钉住。
+        //
+        // 验证手段不依赖 ACL（那需要改真实权限、且 CI 上不可复现）：手动把缓存值写坏，
+        // 再确认 refreshAvailabilityProbe() 能把它纠正回来。mtime 全程不变，
+        // 因此这条恰好只测"强制重探绕过缓存"这一个性质。
+        Path dir = temp.resolve("hist");
+        HistoryFileStore store = open(persistConfig(), dir);
+        assertTrue(store.available());
+        store.shutdown();
+
+        TestObjects.setField(HistoryFileStore.class, store, "availabilityProbeWritable", Boolean.FALSE);
+        assertFalse(store.available(),
+            "fixture precondition: the cached value is now wrong and the directory is unchanged");
+
+        store.refreshAvailabilityProbe();
+        assertTrue(store.available(),
+            "the writer-thread refresh must overwrite a stale cached answer without a mtime change");
+    }
+
+    // ==================================================================================
     // 9. droppedSamples vs skippedLines：两个计数器的语义必须分得开
     // ==================================================================================
-
     @Test
     void droppedAndSkippedCountersMeasureDifferentFailureModes() throws IOException {
         // 写入丢弃（dropped）与读取坏行（skipped）是两条完全不同的路径。

@@ -150,8 +150,26 @@ class StatusExportsTest {
 
         assertContains(publisherSrc, "public boolean register()",
             "register() must report success; a void method forces every caller to guess");
-        assertContains(publisherSrc, "return false;",
-            "the catch branch must return false — returning normally is exactly the P0-E bug");
+
+        // 旧断言是 assertContains(publisherSrc, "return false;") —— 恒真。
+        // 这个文件里有 4 处 return false;（publish / resolveServerId / channelRegistered /
+        // register 的 catch），所以它在本文件任何一种实现状态下都成立：把 register() 的 catch
+        // 改成 return true，它照样绿。也就是说它**声称**守的 P0-E（catch 吞掉异常后"正常返回"
+        // 被调用方读成成功）它一个字都没守住。实测：改成 return true 后 925 例全绿。
+        //
+        // 改成截取 register() 方法体、再截取它内部的 catch 块，只对这个块下断言：
+        // 判定范围从"整个 795 行的文件"缩到"P0-E 真正发生的那 8 行"。
+        // catch 块里只有一处 return，因此"必须 return false"在这里是精确判定而非恒真。
+        String registerBody = methodSource(publisherSrc, "public boolean register()");
+        String catchBlock = blockAfter(registerBody, "catch (Exception | LinkageError e)");
+
+        assertContains(catchBlock, "return false;",
+            "the catch branch must return false — falling through to success is exactly the P0-E bug");
+        assertFalseContains(catchBlock, "return true;",
+            "the catch branch must not report success: register() failing while claiming success "
+                + "is the original P0-E shape (caller then prints 「已启用」 unconditionally)");
+        assertFalseContains(catchBlock, "return;",
+            "catch must return false explicitly, not fall out of the method with a bare return");
 
         assertContains(pluginSrc, "if (summaryPublisher.register())",
             "the caller must branch on the result before printing 「已启用」");
@@ -167,6 +185,58 @@ class StatusExportsTest {
 
     private static void assertFalseContains(String haystack, String needle, String message) {
         assertTrue(!haystack.contains(needle), message + "\n  must NOT contain: " + needle);
+    }
+
+    /**
+     * 从（已归一化成单行的）源码里截出某个方法体的花括号内容。
+     *
+     * <p><b>为什么需要它而不是直接对全文 contains</b>：全文 contains 的判定范围是整个文件，
+     * 于是"某处存在 X"会被文件里的<b>其它</b>方法满足。{@code SummaryPublisher} 有 4 处
+     * {@code return false;}，旧断言就是被其中三处与 {@code register()} 无关的代码养活成恒真的。
+     * 把范围缩到目标方法体，断言才真的在说"这个方法里必须这样写"。</p>
+     *
+     * <p>实现是花括号配对（不是正则）：归一化把换行压成了空格，但括号结构原样保留，
+     * 配对因此可靠。找不到签名或括号不配对时直接返回余下全文——让断言在<b>它自己</b>
+     * 那一步失败，而不是在这里抛一个看不出意图的 {@code StringIndexOutOfBoundsException}。</p>
+     */
+    private static String methodSource(String src, String signature) {
+        int at = src.indexOf(signature);
+        if (at < 0) {
+            fail("cannot find method signature in source: " + signature);
+        }
+        return blockAfter(src.substring(at), "{");
+    }
+
+    /**
+     * 截出 {@code from} 之后第一个出现的 {@code opener}（如 {@code "{"} 或
+     * {@code "catch (Exception | LinkageError e)"}）所开启的那个块，含块本身。
+     *
+     * <p>同时支持两种入口：给 {@code "{"} 时返回"从该 '{' 起配对出的整段"；
+     * 给一段代码前缀时返回"那一段 + 它后面的块"。后者让调用处能写成
+     * {@code blockAfter(body, "catch (Exception | LinkageError e)")}，语义一眼可见。</p>
+     */
+    private static String blockAfter(String src, String opener) {
+        int at = src.indexOf(opener);
+        if (at < 0) {
+            return "";
+        }
+        int open = src.indexOf('{', at);
+        if (open < 0) {
+            return "";
+        }
+        int depth = 0;
+        for (int i = open; i < src.length(); i++) {
+            char c = src.charAt(i);
+            if (c == '{') {
+                depth++;
+            } else if (c == '}') {
+                depth--;
+                if (depth == 0) {
+                    return src.substring(at, i + 1);
+                }
+            }
+        }
+        return src.substring(at);
     }
 
     private static String normalize(String s) {

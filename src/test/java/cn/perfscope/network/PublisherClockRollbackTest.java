@@ -5,6 +5,8 @@
  */
 package cn.perfscope.network;
 
+import cn.perfscope.PerfScope;
+import cn.perfscope.util.Messages;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -136,31 +138,97 @@ class PublisherClockRollbackTest {
     // ==================== 告警文案里的时长渲染 ====================
 
     /**
-     * {@link SummaryPublisher#formatDuration} 只取最大的两个单位。
+     * {@link SummaryPublisher#formatDuration} 只取最大的两个非零单位。
      *
      * <p>为什么值得测：告警里写"检测到系统时钟回拨"而不写回拨了多久，等于没说——服主没法
      * 判断这是 NTP 校正了 3 秒还是从一周前的快照恢复。而裸毫秒数（{@code 3600000}）同样读不出来。</p>
+     *
+     * <p><b>这条用例在 P2 改造后测的是英文</b>：原实现自带一份中文单位表，所以它断言的是
+     * "1 小时"。改造后单位来自 {@code DurationFormat}（按 {@code Messages.activeLocale()} 切换），
+     * 而本仓库的默认语言是 {@code en}——于是同一个毫秒数现在渲染成 {@code 1h}。
+     * 中文侧由 {@link #durationRenderingIsLocalised()} 覆盖。</p>
      */
     @Test
-    @DisplayName("时长渲染：只给最大的两个单位，秒只在没有更大单位时出现")
+    @DisplayName("时长渲染（英文）：只给最大的两个非零单位")
     void durationRenderingKeepsTwoMagnitudes() {
-        assertEquals("1 小时", SummaryPublisher.formatDuration(3_600_000L),
-            "exactly 1 hour must not render as '1 小时 0 分'");
-        assertEquals("1 天 2 小时", SummaryPublisher.formatDuration(86_400_000L + 7_200_000L + 60_000L),
+        assertEquals("1h", SummaryPublisher.formatDuration(3_600_000L),
+            "exactly 1 hour must not render as '1h 0m'");
+        assertEquals("1d 2h", SummaryPublisher.formatDuration(86_400_000L + 7_200_000L + 60_000L),
             "a day plus hours must drop minutes/seconds -- they carry no action value");
-        assertEquals("23 分", SummaryPublisher.formatDuration(23L * 60_000L),
+        assertEquals("23m", SummaryPublisher.formatDuration(23L * 60_000L),
             "minutes are the largest unit here, so seconds must not tag along");
-        assertEquals("3 秒", SummaryPublisher.formatDuration(3_000L),
+        assertEquals("3s", SummaryPublisher.formatDuration(3_000L),
             "only sub-minute values show seconds");
-        assertEquals("0 秒", SummaryPublisher.formatDuration(0L));
+        assertEquals("0s", SummaryPublisher.formatDuration(0L));
     }
 
     /** 负值与超过 1 天但不足 2 小时的边界都不得渲染成负数或空串。 */
     @Test
-    @DisplayName("时长渲染：负值钳成 0 秒，1 天整不渲染成 '1 天 0 小时'")
+    @DisplayName("时长渲染（英文）：负值钳成 0s，1 天整不渲染成 '1d 0h'")
     void durationRenderingEdgesAreSafe() {
-        assertEquals("0 秒", SummaryPublisher.formatDuration(-5_000L),
-            "a negative duration is nonsense; clamp instead of printing '-5 秒'");
-        assertEquals("1 天", SummaryPublisher.formatDuration(86_400_000L));
+        assertEquals("0s", SummaryPublisher.formatDuration(-5_000L),
+            "a negative duration is nonsense; clamp instead of printing '-5s'");
+        assertEquals("1d", SummaryPublisher.formatDuration(86_400_000L));
+    }
+
+    /**
+     * 同一毫秒数在中文界面下必须输出中文单位。
+     *
+     * <p><b>这条是 P2 修复的核心判据</b>：原实现硬编码 {@code {" 天"," 小时"," 分"," 秒"}}，
+     * 无论语言是什么都输出中文。而它产出的片段会被拼进 {@code network.log.clock-rollback}
+     * 这条<b>已经本地化</b>的句子——英文服主的日志里会整句英文夹着"1 小时"，
+     * 正是 9D 要消灭的混排。</p>
+     *
+     * <p>单位表在 {@code DurationFormat} 里已有中英两份（{@code ZH_UNITS}/{@code EN_UNITS}），
+     * 本类只负责给出毫秒数与窗口。这条用例通过真实入口 {@code Messages.load(plugin)}
+     * 切语言，所以"语言 → 单位"这条链是真跑过的，不是反射改字段。</p>
+     */
+    @Test
+    @DisplayName("时长渲染（中文）：单位与数字间有空格，1 小时整不写 '1 小时 0 分'")
+    void durationRenderingIsLocalised() {
+        try {
+            switchLocale(Messages.LOCALE_ZH);
+            assertEquals("1 时", SummaryPublisher.formatDuration(3_600_000L),
+                "duration 的最高单位是「时」，不是「天」——与 DurationFormat 的既有口径一致");
+            assertEquals("1 天 2 时", SummaryPublisher.formatDuration(86_400_000L + 7_200_000L + 60_000L));
+            assertEquals("23 分", SummaryPublisher.formatDuration(23L * 60_000L));
+            assertEquals("3 秒", SummaryPublisher.formatDuration(3_000L));
+            assertEquals("0 秒", SummaryPublisher.formatDuration(0L));
+            assertEquals("1 天", SummaryPublisher.formatDuration(86_400_000L));
+        } finally {
+            switchLocale(Messages.LOCALE_EN);
+        }
+    }
+
+    /**
+     * 把界面语言切到 {@code locale}，走真实的 {@link Messages#load(PerfScope)}。
+     *
+     * <p>与 {@code DurationFormatTest} / {@code ThresholdTextMatchesOperatorTest} 里的同名方法同口径：
+     * {@code Messages.load} 只有在拿到<b>非 null</b> 的 plugin、且该 plugin 的
+     * {@code configManager.get()} 非 null 时才会读到 {@code general.language}；
+     * 传 {@code load(null)} 只会把快照重置成默认语言。</p>
+     */
+    private static void switchLocale(String locale) {
+        cn.perfscope.config.ConfigManager cm =
+            new cn.perfscope.config.ConfigManager(null);
+        cn.perfscope.config.ConfigManager.ConfigData cfg =
+            new cn.perfscope.config.ConfigManager.ConfigData();
+        cfg.general_language = locale;
+        cn.perfscope.support.TestObjects.setField(
+            cn.perfscope.config.ConfigManager.class, cm, "config", cfg);
+
+        PerfScope plugin = cn.perfscope.support.TestObjects.allocate(PerfScope.class);
+        java.util.logging.Logger log =
+            java.util.logging.Logger.getLogger("pscope-clock-rollback-" + locale);
+        log.setUseParentHandlers(false);
+        log.setLevel(java.util.logging.Level.OFF);
+        cn.perfscope.support.TestObjects.setField(
+            PerfScope.class, plugin, "logger", log);
+        cn.perfscope.support.TestObjects.setField(
+            PerfScope.class, plugin, "configManager", cm);
+
+        Messages.load(plugin);
+        assertEquals(locale, Messages.activeLocale(),
+            "语言切换失败（Messages.load 没有读到 general.language=" + locale + "）");
     }
 }
