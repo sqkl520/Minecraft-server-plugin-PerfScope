@@ -15,6 +15,90 @@
 ---
 
 
+## [Unreleased] — 2026-11-24 — Purpur / Leaf 上三个 TPS 窗口全错，且 15 分钟数据彻底消失
+
+> 由平台兼容调研发现，一手补丁原文已核实（Purpur 1.20.1 / 1.20.2 / 1.20.4 / 1.21.4 / 1.21.11
+> 五个分支的 patch 逐字读过）。这是「看起来正常但是错的」的又一例——不报错、不崩溃、
+> 不进 `unavailable`。
+
+### Fixed — 硬读 `tps[0]/[1]/[2]` 在 Purpur / Leaf 上全部错位
+
+Purpur 与 Leaf 会在 `Bukkit.getServer().getTPS()` 返回的数组**最前面插一个 5 秒平均值**，
+数组从长度 3 变成 4：
+
+```diff
+     public double[] getTPS() {
+         return new double[] {
++            net.minecraft.server.MinecraftServer.getServer().tps5s.getAverage(), // Purpur
+             net.minecraft.server.MinecraftServer.getServer().tps1.getAverage(),
+             net.minecraft.server.MinecraftServer.getServer().tps5.getAverage(),
+             net.minecraft.server.MinecraftServer.getServer().tps15.getAverage()
+```
+
+于是 `tps[0]/[1]/[2]` 在那些平台上读到的是：
+
+| 我们以为读到 | 实际读到 |
+|---|---|
+| 1 分钟 | **5 秒** |
+| 5 分钟 | 1 分钟 |
+| 15 分钟 | 5 分钟 |
+
+三件事同时发生：告警判据从 1 分钟变成 5 秒（一次 200ms 的 GC 停顿就能把 5 秒 TPS 拉到 15
+以下，在本健康的服上刷 critical）；趋势图与日报的「最低 TPS」全部是 5 秒口径；
+**15 分钟数据彻底消失**（不是不准，是根本没有）。
+
+### 修法：按长度取末尾三个，不按平台名
+
+```java
+int off = tps.length - 3;
+return new TpsTriple(tps[off], tps[off + 1], tps[off + 2]);
+```
+
+**为什么不是按平台名分支**：Leaf 的这个行为可由配置开关
+（`misc.including-5s-in-get-tps`），同一个平台既可能返回 3 也可能返回 4。
+按长度分支能同时覆盖两种情况。
+
+**为什么取末尾三个而不是固定 `[1][2][3]`**：若将来某个分支又前插一个窗口（比如 1 秒平均），
+固定下标会再次读错；`length - 3` 对 3/4/5 个窗口都正确。
+
+### 三处必须纠正的细节（核实报告推翻了我原本的假设）
+
+1. **Purpur 没有开关。** 该行为硬编码在补丁里，`purpur.yml` 无对应配置键。只有 **Leaf** 可关。
+2. **`getTPSIncluding5SecondAverage()` 不是 Purpur 的方法**，它是 Gale / Leaf 的。
+   用「反射检测这个方法是否存在」当判据，**在 Purpur 上必然漏判**。所以本实现完全不用反射。
+3. **Purpur 1.21.10+ 改了实现位置**（从 `CraftServer#getTPS()` 改为 `MinecraftServer#computeTPS()`），
+   数组长度与索引不变，所以按长度判定不受影响。
+
+### 加了诊断行，但只在非标准布局时出现
+
+`/perfscope status` 现在会在 TPS 窗口数不等于 3 时多显示一行：
+
+```
+TPS 窗口: 本服务端返回 4 个 TPS 窗口而不是标准的 3 个——最前面多了一个 5 秒短窗口，
+          因此取后三个作为 1m/5m/15m。本平台的读数可能与 /tps 对不上。
+```
+
+标准布局**不显示**——正常情况多一行噪音没有价值。服主发现面板与 `/tps` 对不上时，
+这一行直接说明原因，而不是让他怀疑插件坏了。
+
+### 顺带：Folia 的 `UnsupportedOperationException` 不再拖垮整个采集周期
+
+Folia 在**非 region 线程**上调 `getTPS()` 会直接抛异常，而不是返回空数组。
+本方法目前跑在 `GlobalRegionScheduler` 线程上，理论上不会触发；但采集链路将来被挪到异步线程时，
+一个未捕获的异常会让整个采集周期失败，而那看起来像「采集器坏了」，排查方向会完全错。
+现在包一层，降级成「TPS 未采集」。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| 全量测试 | **1008 例 / 0 失败 / 8 跳过**（新增 8 例）|
+| `TpsWindowLayoutTest` 8 例 | 三值互不相同，取错窗口一定看得出来 |
+| 变异：退回硬读 `[0][1][2]` | **3 例红**，报 `1m must be the SECOND element on a 4-window server` |
+| 五窗口（假想的再次前插） | 仍取末尾三个 |
+| `null` / 过短数组 | 三个值都置 -1 哨兵，不抛异常 |
+
+
 ## [Unreleased] — 2026-11-24 — Prometheus 的 `server_id` 只在一条序列上，多服抓取会静默串服
 
 > 由生态/冲突调研发现。这是本项目唯一一类「**静默产生错误数据**」的缺陷——

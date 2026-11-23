@@ -1736,12 +1736,102 @@ public class MetricsCollector {
     // ==================== TPS ====================
 
     private void collectTPS(MetricsSnapshot snap, ConfigManager.ConfigData cfg) {
-        double[] tps = Bukkit.getTPS();
-        snap.tps1m = round2(tps[0]);
-        snap.tps5m = round2(tps[1]);
-        snap.tps15m = round2(tps[2]);
+        double[] tps;
+        try {
+            tps = Bukkit.getTPS();
+        } catch (UnsupportedOperationException e) {
+            // Folia 在**非 region 线程**上直接抛这个异常（不是返回空数组）。
+            // 本方法目前跑在 GlobalRegionScheduler 线程上，理论上不会走到这里；
+            // 但"理论上不会"不该是唯一防线——采集链路将来被挪到异步线程时，
+            // 这里抛出的异常会让整个采集周期失败，而那看起来像"采集器坏了"，
+            // 排查方向会完全错。降级成"TPS 未采集" + 一条可诊断的日志才是对的。
+            snap.tpsWindowCount = 0;
+            snap.tps1m = -1.0;
+            snap.tps5m = -1.0;
+            snap.tps15m = -1.0;
+            return;
+        }
+        // 判据抽成纯函数：本方法第一行就是 Bukkit.getTPS()，测试 JVM 进不去，
+        // 内联的偏移计算会变成零覆盖（P1-S3 就是这么漏掉的）。
+        TpsTriple t = pickTpsWindows(tps);
+        snap.tpsWindowCount = tps == null ? 0 : tps.length;
+        snap.tps1m = round2(t.oneMinute());
+        snap.tps5m = round2(t.fiveMinutes());
+        snap.tps15m = round2(t.fifteenMinutes());
         applyTpsLevel(snap, cfg);
     }
+
+    /**
+     * 从 {@code Bukkit.getTPS()} 的返回值里挑出 1m / 5m / 15m 三个窗口。
+     *
+     * <p><b>为什么需要这一步</b>：标准 Paper/Spigot 返回长度 3 的数组
+     * {@code [1m, 5m, 15m]}，但 **Purpur 与 Leaf 会在最前面插一个「5 秒平均」
+     * 把数组变成长度 4 的 {@code [5s, 1m, 5m, 15m]}**。硬读 {@code [0][1][2]}
+     * 在那些平台上会得到：</p>
+     *
+     * <table border="1">
+     *   <caption>硬读下标在 4 元素数组上的后果</caption>
+     *   <tr><th>我们以为读到</th><th>实际读到</th></tr>
+     *   <tr><td>1 分钟</td><td>5 秒</td></tr>
+     *   <tr><td>5 分钟</td><td>1 分钟</td></tr>
+     *   <tr><td>15 分钟</td><td>5 分钟</td></tr>
+     * </table>
+     *
+     * <p>后果不是"数字略偏"，是三件事同时发生：告警判据变成 5 秒窗口（一次 200ms 的 GC
+     * 停顿就能把 5 秒 TPS 拉到 15 以下，在本来健康的服上刷 critical）；趋势图与日报的
+     * "最低 TPS"全部是 5 秒口径；**15 分钟数据彻底消失**。而这一条不报错、不崩溃、
+     * 不进 {@code unavailable}——正是本项目最怕的"看起来正常但是错的"。</p>
+     *
+     * <p><b>判据是长度而不是平台名</b>：Leaf 的这个行为可以由配置开关
+     * （`including-5s-in-get-tps`），所以同一个平台既可能返回 3 也可能返回 4。
+     * 按长度分支能同时覆盖两种情况，按平台名则会漏掉一半。</p>
+     *
+     * <p><b>长度 4 时取后三个</b>，而不是"取前三个"或"取中间三个"：前插是唯一已知的
+     * 改动方式，后三个恰好就是标准的 1m/5m/15m。若将来出现"后插"的服务端，
+     * 长度仍是 4，这条会取错——所以 {@link #tpsShiftReason(double[])} 会把实际长度
+     * 记进诊断，真出问题时能看到长度为 4 这个事实。</p>
+     *
+     * @param tps {@code Bukkit.getTPS()} 的返回值；{@code null} 或过短时返回哨兵三元组
+     */
+    static TpsTriple pickTpsWindows(double[] tps) {
+        if (tps == null || tps.length < 3) {
+            // 返回不了三个窗口就是采集失败，三个值都置 -1 哨兵（TPS 正常没有哨兵，
+            // 但"没读到"与"读到 0"必须分开——0 是服务器冻结这个真实读数）。
+            return new TpsTriple(-1.0, -1.0, -1.0);
+        }
+        if (tps.length == 3) {
+            return new TpsTriple(tps[0], tps[1], tps[2]);
+        }
+        // length >= 4：前插了短窗口（Purpur / Leaf 的 5 秒平均）。取后三个。
+        int off = tps.length - 3;
+        return new TpsTriple(tps[off], tps[off + 1], tps[off + 2]);
+    }
+
+    /**
+     * 这个数组的窗口布局是否**不是**标准的 {@code [1m, 5m, 15m]}。
+     *
+     * <p>供 `/perfscope status` 与报告导出显示——服主看到自己的 Purpur 服上 TPS 与
+     * `/tps` 对不上时，这一行能直接告诉他"你这个服务端返回 4 个窗口，我们取的是后三个"，
+     * 而不是让他去猜插件是不是坏了。</p>
+     *
+     * @return 非 null 时是一句可直接展示的说明；标准布局返回 {@code null}
+     */
+    static String tpsShiftReason(double[] tps) {
+        if (tps == null) {
+            return null;
+        }
+        if (tps.length > 3) {
+            return "server returns " + tps.length + " TPS windows (short-term average prepended);"
+                + " using the last three as 1m/5m/15m";
+        }
+        if (tps.length < 3) {
+            return "server returned only " + tps.length + " TPS windows; TPS is unavailable";
+        }
+        return null;
+    }
+
+    /** 三个 TPS 窗口的读数；{@code -1} 表示"没读到"。 */
+    record TpsTriple(double oneMinute, double fiveMinutes, double fifteenMinutes) { }
 
     /**
      * TPS 的判定与告警生成（{@code collectTPS} 的判定半段，与 Bukkit 读数解耦）。
