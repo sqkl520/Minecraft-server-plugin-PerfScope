@@ -15,6 +15,61 @@
 ---
 
 
+## [Unreleased] — 2026-11-23 — 修 `available()` 缓存的正确性 bug：mtime 精度碰撞把"已修好的目录"永久报成不可用
+
+> 分支 `fix/audit-round2-batch`。这是上一段"`available()` 改 mtime 缓存"引入的**真 bug**，
+> 不是测试问题：缓存键只有目录 mtime 一位，而 mtime 在 `FileTime.toMillis()` 口径下只有毫秒精度。
+
+### Fixed — `HistoryFileStore.available()` 在"文件→删除→建成目录"时可能命中过期缓存
+
+- **症状（CI 实测）**：`HistoryFileStoreWriteTest.writeFailureIsRecordedAndRecoversAfterTheDirectoryBecomesUsable:481`
+  在 **JDK 21 红、JDK 17 绿**，本地 Windows 连跑三次全过。失败行是
+  `dir fixed + no failures → healthy again ==> expected: <true> but was: <false>`。
+- **根因（已复现，非推测）**：缓存键 = `dir.toFile().lastModified()`。测试里 `blocked` 先是一个**文件**、
+  被 `Files.delete` 后由 `openWriter` 建成**目录**——两种形态的 mtime 完全可能落在**同一毫秒**，
+  于是键相等 → 命中上一次的结论 `false` → 目录明明已经修好，`available()` 仍说不可用。
+  - **实测碰撞率**（连续 300 次"删文件→建目录"，JDK 21 / Linux **ext4**）：**253/300**；
+    "删目录→重建目录"同样 **253/300**；同一台机的 **Windows/NTFS**：**1/300**。
+  - 这就是"只在本机 Windows 上绿、只在 CI 的 ubuntu-latest 上红"的来源——
+    **不是 JDK 版本差异，是文件系统时间戳精度 + 执行速度**。
+  - 用真实 `HistoryFileStore` 复刻测试体的循环探针（Linux）：**9/300** 次命中过期缓存，
+    失败样本一律是 `fileMtime == dirMtime` 且 `availabilityProbeMtimeMs` 与之逐位相等。
+  - 把旧实现放回同一套测试跑（Linux，10 轮）：**10/10 轮红**，并逐字复现 CI 那条断言失败；
+    其中原用例 4/10 轮红（概率性），新增的确定性用例 **10/10 轮红**。
+- **这不是测试问题，是生产问题**：服主"把配错的文件删掉、换成目录"正是这条缓存要支持的真实场景
+  （`PerfScopeCommand` 的 `/pscope trend`、reload 的 `runRetention`、`/pscope status` 的
+  `isHealthy()` 三处主线程调用都会读到这个结论）。
+- **改法**：缓存键从"mtime 一位"换成**目录身份指纹**
+  `AvailabilityKey(exists, isDirectory, mtimeMs, fileKey)`，由**一次** `Files.readAttributes` 同时取回：
+  - `isDirectory` 这一位让"文件→目录"迁移**确定性**失效缓存（与毫秒精度无关）；
+  - `fileKey`（Linux = dev+inode）再把"目录→删→同类型重建"也变成确定性失效；
+    Windows 上它恒为 `null`，那一侧靠 mtime + isDirectory 兜住（NTFS 同毫秒碰撞实测 1/300）；
+  - 路径不存在时 `readAttributes` 抛 `NoSuchFileException`，直接转成 `MISSING` 指纹——
+    比"先 `exists()` 再读"少一次系统调用，也不在两个调用之间留竞态窗口；
+  - 指纹**先于结论采集**（`readAvailabilityKey()` 在 `isWritable` 之前）。反过来会把"旧对象的结论"
+    配到"新对象的指纹"上，正是本次事故的形状；当前顺序最坏只多一次探测，不会给出错误答案。
+- **性能没有退回去（同机同 JVM 同 fixture 实测，7 天 × 1440 行）**：
+  | 路径 | 无缓存基线 | 旧（mtime 键） | 新（身份指纹） |
+  |---|---|---|---|
+  | `available()` 单次 | 7.04 ms | 0.11 ms | 0.10 ms |
+  | `loadRecentDays(7, 7d)` 稳态 | **11.57 ms** | 2.77 ms | 2.72 ms |
+  | `Files.isWritable` 冷探测 | 6.37 ms | — | 6.73 ms |
+  | 缓存键成本（`readAttributes`） | — | 0.12 ms（`lastModified`） | 0.09–0.10 ms |
+  - 新键比旧键**还略便宜**：一次 `readAttributes` 比 `File.lastModified()` 更廉价，却多拿三个信号；
+    `availabilityProbeCount()` 在 2230 次调用下仍为 **1**，缓存命中率未变。
+  - A/B 各跑 3 轮，`loadRecentDays` 新旧差 <0.2 ms（在噪声内），两者都远优于 11.57 ms 的无缓存基线。
+- **测试**：
+  - 新增 `cachedAnswerInvalidatesOnFileToDirectoryTransitionWithIdenticalMtime`——
+    **确定性**复刻 ext4 的碰撞现场：转成目录后把 mtime 设回与文件态**逐毫秒相等**，
+    于是"mtime 相同"这个前提在两平台都成立，断言与平台无关；并额外断言
+    `availabilityProbeCount` 恰好 +1，确保是**重探**而非"碰巧每次都绕过缓存"。
+  - `availabilityCacheTracksDirectoryStateTransitions` 去掉原先的 `setLastModifiedTime(+2s)` 补丁——
+    那个补丁恰好掩盖了本 bug；去掉后这一步成为真正的回归断言。
+- **验证**：`mvn -B -ntp test` 994 用例全绿（Windows / JDK 21）；`HistoryFileStoreWriteTest`
+  在 JDK 17 与 JDK 21 均 27/27；修复前的实现放回同一套测试在 Linux ext4 上 10/10 轮红。
+
+---
+
 ## [Unreleased] — 2026-11-23 — i18n 收口：`load(null)` 丢 730 键（P1 真 bug）+ 硬编码日志迁移 + 翻译质量
 
 > 分支 `fix/i18n-load-null-and-gaps`。五个任务，其中任务 1 是**真 bug**：

@@ -538,19 +538,68 @@ class HistoryFileStoreWriteTest {
         assertFalse(store.available(), "a regular file is still not a writable directory");
 
         // 3) 换回目录 → 必须恢复 true。
-        //    注意：第 1、2 步的 mtime 可能落在同一毫秒刻度上（Windows 文件时间分辨率），
-        //    那样缓存会"合法地"命中——但那时的结论恰好也是 false，所以断言不受影响。
-        //    第 3 步同理：即使 mtime 碰撞导致命中，上次的结论是 false，这里会失败并说明问题。
-        //    为了让这条断言不依赖分辨率，重建目录后显式把 mtime 推后一点。
+        //
+        //    这里**故意不**推后 mtime（旧版本曾用 setLastModifiedTime 绕开分辨率问题）。
+        //    那种绕过恰好掩盖了真正的缺陷：缓存键若只有 mtime，两个不同形态的对象落在
+        //    同一毫秒就会命中旧结论。修复后的键含 isDirectory，所以"文件→目录"这一步
+        //    无论 mtime 是否相同都必然失效缓存——去掉补丁正是为了把这条性质钉住。
         Files.delete(dir);
         Files.createDirectories(dir);
-        Files.setLastModifiedTime(dir, FileTime.fromMillis(System.currentTimeMillis() + 2_000L));
         assertTrue(store.available(), "recreating the directory must restore the true answer");
+    }
+
+    /**
+     * 回归：<b>"路径先是一个文件、后被建成目录"且两次 mtime 完全相同</b>时，缓存必须失效。
+     *
+     * <h2>这条用例存在的理由（一次真实的 CI 事故）</h2>
+     * <p>旧实现的缓存键只有目录 mtime，于是这个场景在 mtime 精度内碰撞时会命中旧结论
+     * {@code false}，把已经修好的目录永久报成不可用。实测（Linux ext4 / JDK 21，
+     * 连续 300 次"删文件→建目录"）：<b>253 次</b>两种形态的 mtime 落在同一毫秒；
+     * 同一台机的 Windows/NTFS 只有 1 次。CI 跑在 ubuntu-latest（ext4），本机是 NTFS，
+     * 这就是"CI 的 JDK 21 红、JDK 17 绿、本地怎么跑都绿"的来源——<b>不是 JDK 版本差异，
+     * 是文件系统精度 + 执行速度</b>。</p>
+     *
+     * <h2>为什么不靠"跑很多次碰运气"</h2>
+     * <p>靠运气意味着在 NTFS 上永远无法复现（1/300），而在 ext4 上是概率性红。
+     * 这里改为<b>把碰撞显式构造出来</b>：转成目录之后把 mtime 设成一个与文件态<b>逐毫秒相等</b>
+     * 的值。于是"mtime 相同"这个前提在两个平台上都确定成立，断言与平台无关喵。</p>
+     */
+    @Test
+    void cachedAnswerInvalidatesOnFileToDirectoryTransitionWithIdenticalMtime() throws IOException {
+        Path dir = temp.resolve("hist");
+        // 先做成文件（不是目录），让"可用"的结论确定是 false
+        Files.writeString(dir, "not a directory");
+        long sharedMtime = 1_700_000_000_000L;
+        Files.setLastModifiedTime(dir, FileTime.fromMillis(sharedMtime));
+
+        HistoryFileStore store = open(persistConfig(), dir);
+        store.shutdown(); // 去掉写线程的周期重探，让"缓存是否失效"只由 available() 自己决定
+        assertFalse(store.available(), "a regular file must not be reported available");
+        long probesAfterFile = store.availabilityProbeCount();
+
+        // 转成目录，并把 mtime 设回与文件态完全相同的毫秒值。
+        // 这两步合起来精确复刻了 ext4 上的真实碰撞现场。
+        Files.delete(dir);
+        Files.createDirectories(dir);
+        Files.setLastModifiedTime(dir, FileTime.fromMillis(sharedMtime));
+        assertEquals(sharedMtime, dir.toFile().lastModified(),
+            "fixture precondition: the directory's mtime equals the file's mtime to the millisecond");
+
+        // 旧实现只比较 mtime → 命中旧结论 false → 这条断言红。
+        // 新实现的键含 isDirectory（false→true），必然失效缓存并重探。
+        assertTrue(store.available(),
+            "a file→directory transition must invalidate the cache even when mtime is unchanged");
+
+        // 更强的一层：不只是"答案对"，而是"确实重新探过一次"。
+        // 没有这一条，一个"每次都不走缓存"的实现也能让上面那条通过——
+        // 而那等于把本类要保住的性能优化悄悄退回去了。
+        assertEquals(probesAfterFile + 1L, store.availabilityProbeCount(),
+            "the transition must be answered by a fresh probe, not by a cache hit");
     }
 
     @Test
     void forcedRefreshPicksUpChangesThatDoNotTouchTheDirectoryMtime() throws IOException {
-        // 纯 ACL 变更不改目录 mtime（Windows 实测），所以主线程那条 mtime 缓存看不见它。
+        // 纯 ACL 变更不改目录 mtime（Windows 实测），所以主线程那条指纹缓存看不见它。
         // 写线程的周期强制重探是唯一的补救点，这条把它钉住。
         //
         // 验证手段不依赖 ACL（那需要改真实权限、且 CI 上不可复现）：手动把缓存值写坏，
@@ -563,7 +612,7 @@ class HistoryFileStoreWriteTest {
 
         TestObjects.setField(HistoryFileStore.class, store, "availabilityProbeWritable", Boolean.FALSE);
         assertFalse(store.available(),
-            "fixture precondition: the cached value is now wrong and mtime is unchanged");
+            "fixture precondition: the cached value is now wrong and the directory is unchanged");
 
         store.refreshAvailabilityProbe();
         assertTrue(store.available(),
