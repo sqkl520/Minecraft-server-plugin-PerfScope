@@ -35,6 +35,18 @@ public class MetricsSnapshot {
     public double tps5m;
     public double tps15m;
 
+    /**
+     * 本周期 {@code Bukkit.getTPS()} 返回的**窗口个数**。
+     *
+     * <p>标准 Paper/Spigot 是 3（{@code [1m, 5m, 15m]}）；**Purpur 与 Leaf 会前插一个
+     * 5 秒平均值变成 4**。采集层按长度选窗口（见 {@code MetricsCollector.pickTpsWindows}），
+     * 这里把实测长度记下来，供 {@code /perfscope status} 显示——服主发现面板 TPS 与
+     * {@code /tps} 对不上时，能直接看到"这个服返回 4 个窗口"而不是怀疑插件坏了。</p>
+     *
+     * <p>{@code 0} = 本周期没读到（采集失败或未采集）。</p>
+     */
+    public int tpsWindowCount;
+
     // === MSPT ===
     public double msptAvg;
     public double msptMin;

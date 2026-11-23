@@ -1917,6 +1917,21 @@ public class PerfScopeCommand implements CommandExecutor, TabCompleter, Listener
             .append(Component.text(Messages.get("cmd.status.version-line",
                 plugin.getDescription().getVersion(), ServerCompat.getServerName()), WHITE)));
 
+        // TPS 窗口布局：只在**非标准**时出现。
+        //
+        // Purpur 与 Leaf 会在 Bukkit.getTPS() 的数组最前面插一个 5 秒平均值，
+        // 采集层按长度取后三个（见 MetricsCollector.pickTpsWindows）。取对了是应该的，
+        // 但服主看到面板的 1m/5m/15m 与 /tps 的显示对不上时，需要一行直接说明
+        // "这个服务端返回 4 个窗口"——否则他只会怀疑插件坏了。
+        //
+        // 标准布局（3 个窗口）**不出现这一行**：正常情况多一行噪音没有价值。
+        cn.perfscope.metrics.MetricsSnapshot last = collector.getLatest();
+        if (last != null && last.tpsWindowCount > 0 && last.tpsWindowCount != 3) {
+            sender.sendMessage(goldLabel(Messages.get("cmd.status.tps-windows-label"))
+                .append(Component.text(Messages.get("cmd.status.tps-windows-shifted",
+                    last.tpsWindowCount), YELLOW)));
+        }
+
         // ---------- 采集存活（9A-20 #1） ----------
         long lastAt = collector.lastCollectAtMs();
         int cycleFailures = collector.consecutiveCollectFailures();

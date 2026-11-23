@@ -374,6 +374,16 @@ public final class CommandMessages {
         // ==================== 插件状态 ====================
         put(en, zh, "cmd.status.version-label", "Version: ", "版本: ");
         put(en, zh, "cmd.status.version-line", "{0} | Server: {1}", "{0} | 服务端: {1}");
+        // 只在非标准 TPS 窗口布局时显示。Purpur / Leaf 会在 getTPS() 数组最前面插一个
+        // 5 秒平均值，我们按长度取后三个（MetricsCollector.pickTpsWindows）。
+        // 服主发现面板 TPS 与 /tps 对不上时，这一行直接说明原因。
+        put(en, zh, "cmd.status.tps-windows-label", "TPS windows: ", "TPS 窗口: ");
+        put(en, zh, "cmd.status.tps-windows-shifted",
+            "this server returns {0} TPS windows instead of the standard 3 -- a short-term (5s) "
+                + "average is prepended, so the last three are used as 1m/5m/15m. "
+                + "Reported TPS may not match /tps on this platform.",
+            "本服务端返回 {0} 个 TPS 窗口而不是标准的 3 个——最前面多了一个 5 秒短窗口，"
+                + "因此取后三个作为 1m/5m/15m。本平台的读数可能与 /tps 对不上。");
         put(en, zh, "cmd.status.collect-label", "Collection: ", "采集: ");
         put(en, zh, "cmd.status.collect-pending",
             "First collection round not finished yet (ready within about a second of start/reload; "
