@@ -200,7 +200,9 @@ if ($null -ne $node) {
     # "50000+" label). That class of bug is silent: no exception, no log, only a
     # misleading graph on the bStats dashboard. So it gets a source-level gate.
     Invoke-Step 'L1 bStats bucket selection' {
-        & $node (Join-Path $PSScriptRoot 'check-bstats-buckets.mjs')
+        # --repo 必须传：两个门禁原先写死 HERE/..，于是 -RepoRoot 指向别处时它们仍查本仓库，
+        # 而 CI/换机器下路径解析失败会被读成"通过"。同一脚本里其余门禁都传了，只有这两处漏了。
+        & $node (Join-Path $PSScriptRoot 'check-bstats-buckets.mjs') '--repo' $RepoRoot
     }
     # reload() must rebuild its tasks even when config loading failed. The javadoc says so
     # ("无论 load 成败，任务必须重建：绝不允许「采集停了不重建」的半途冻结态") but nothing
@@ -211,7 +213,7 @@ if ($null -ne $node) {
     # dataFolder, cleanOldReports() writes to disk, startPrometheus() binds a port), so the
     # constraint goes to the source layer instead.
     Invoke-Step 'L1 reload rebuilds even when load fails' {
-        & $node (Join-Path $PSScriptRoot 'check-reload-rebuild.mjs')
+        & $node (Join-Path $PSScriptRoot 'check-reload-rebuild.mjs') '--repo' $RepoRoot
     }
     # Cross-repo threshold consistency with the Velocity proxy. The two panels cannot share code
     # (Paper plugin vs Velocity plugin, two repos, two JVMs), so "same operator" can only be kept
@@ -289,6 +291,18 @@ if ($Artifact -ne '') {
 # L3
 # ======================================================================================
 if ($tier -ge 3) {
+    # Mutation subset. Full run is 70 variants / ~32 min, so this runs only the ones whose
+    # source file this branch touched (--changed). That step needs a clean tree; if there are
+    # uncommitted changes it exits and explains why instead of discarding them.
+    Invoke-Step 'L3 mutation subset (tools/mutate.mjs --changed)' {
+        Push-Location -LiteralPath $RepoRoot
+        try {
+            & node 'tools/mutate.mjs' '--changed' 'origin/main'
+            # A non-zero exit means at least one mutant SURVIVED -- that is the failure.
+            if ($LASTEXITCODE -ne 0) { throw "mutate.mjs 退出码 $LASTEXITCODE" }
+        } finally { Pop-Location }
+    } -Advisory
+
     Write-Step ''
     Write-Step 'L3 extra requirements (not automated here; each is a manual gate):' 'HEAD'
     Write-Host '  [ ] full scenario regression: all 16 perfscope-* scenarios, both languages'
