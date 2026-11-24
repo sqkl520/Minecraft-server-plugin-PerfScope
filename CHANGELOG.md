@@ -12,6 +12,63 @@
 > 版本号只在用户明确说"更新版本号"时 bump（Patch = Bug 修复，Minor = 新功能）。
 > **本文件是开发流水账** —— 记"改了什么、为什么改、验证到哪一步、还欠什么"，不是给用户看的发布说明。
 
+## [Unreleased] — 2026-11-24 — `server-id` 的加载期校验补上护栏（那两行此前零覆盖）
+
+> 这是 16 条 P1 核对里剩下的最后一条「已修但没被守住」。
+
+### Fixed — 删掉 `ConfigManager` 里那两行，`config.*Test` 全绿
+
+`server-id` 有两条校验时机：
+
+| 时机 | 在哪 | 此前有测试吗 |
+|---|---|---|
+| 发送期 | `SummaryPublisher.publish`（不合格就一条不发） | **有**，钉得很牢 |
+| 加载期 | `ConfigManager.validateThresholds` 里两次 `checkCrossServerId` | **一行都没有** |
+
+丢掉的不是「能不能上报」（发送期仍然挡住了），而是**发现时机**：服主改错 `server-id` 之后
+要等到第一个采集周期（默认 20 tick）才在日志里看到，而那时他大概已经切到别的窗口去了。
+加载期告警是「启动那一屏就告诉他配错了」。
+
+新增 `CrossServerIdLoadTimeValidationTest` 6 例，直接调 `validateThresholds`
+（`load()` 里负责校验的那一段，两个 `checkCrossServerId` 就在它内部——测它等于测真实调用路径，
+只是跳过读盘的 Bukkit YAML 部分）。
+
+### 三条最要紧的断言
+
+1. **点名的是哪一个键。** `network.server-id` 优先、`prometheus.server-id` 其次。
+   只说「server-id 无效」时，服主会去改 `network.server-id`，而他真正写错的可能正是
+   `prometheus.server-id`。所以 `prometheusServerIdIsNamedSeparately` 同时断言
+   「点名了 prometheus」**和**「没点名 network」。
+2. **控制符要给出码点。** 控制符在日志里不可见，直接拼进去会让告警看起来像少了一段。
+   `unsafeCharsAreReportedWithCodePoints` 断言出现 `U+0007` 这种形式。
+3. **留空不告警。** 留空是合法的回退（→ prometheus.server-id → 端口派生），
+   把留空当错误会让每个默认配置的服在启动时看到一条假故障。
+
+### 反向控制踩到的一个坑
+
+第一版反向控制断言「完整日志为空」，结果红了两条——因为夹具的 baseline 配置本身会触发
+几条无关告警（`push-interval-seconds=0` 之类）。改成**只筛 server-id 相关的行**再断言为空。
+
+这不是把判据放宽：那几条无关告警属于别的校验，本类要钉的是「合法 server-id 不产生 server-id 告警」。
+
+### 变异验证（规划里指定的两个靶点）
+
+| 变异 | 结果 |
+|---|---|
+| 删掉 `checkCrossServerId("prometheus.server-id", ...)` 那一行 | **1 例红** — `prometheusServerIdIsNamedSeparately` |
+| 把 `checkCrossServerId` 的 `switch` 改成什么也不做 | **4 例红** |
+| 不改 | 6 例全绿 |
+
+第二个靶点很重要：只钉「方法被调用了」不够，还要钉「它真的会告警」。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| 全量测试 | **1014 例 / 0 失败 / 8 跳过**（新增 6 例）|
+| 两个靶点变异 | 各自 KILLED |
+
+
 ## [Unreleased] — 2026-11-24 — 三个门禁的恒真断言与静默放行
 
 > 由门禁有效性审计（`.GATE-AUDIT.md`）发现，每一条都做了「改坏 → 该红 → 修好后能红」的双向验证。
