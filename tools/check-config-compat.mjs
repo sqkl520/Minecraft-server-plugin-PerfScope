@@ -384,45 +384,90 @@ if (hyst == null) {
 {
   const code = stripJavaComments(cm);
 
-  // 版本迁移：光有常量名不够，必须看到「读旧文件判断 + 写回」这一对动作。
+  // 版本迁移：光有常量名不够，必须看到「真的写到磁盘」。
   //
-  // 判据要**排除方法定义**：`private boolean writeBackConfigVersion() {` 里也有那个名字。
-  // 只按 `writeBackConfigVersion\s*\(` 匹配的话，把唯一的**调用**删掉、留下定义，
-  // 门禁仍然通过（实测确认过这个形态）。
-  // 所以先把定义行抹成占位符，再找剩下的调用。
+  // 这条判据也改过两版：
+  //   第一版 `/CONFIG_VERSION_KEY|config-version/` —— 注释里命中就算过。
+  //   第二版 `writeBackConfigVersion\s*\(` 或 `yaml.set(CONFIG_VERSION_KEY` —— 有两个洞：
+  //     · 只删调用、留下定义时仍 PASS（`private boolean writeBackConfigVersion() {` 里就有那个名字）
+  //     · `yaml.set(CONFIG_VERSION_KEY, 1)` 只改内存对象、从不落盘，语义上是错的，
+  //       但第二个或分支会因此永远变绿 —— 相当于给这条判据开后门
+  //
+  // 现在认三件事同时成立：
+  //   1. 有 `handleConfigVersion`（迁移逻辑所在的入口）
+  //   2. 调用了 `writeBackConfigVersion(`（先抹掉方法定义，避免定义当调用）
+  //   3. `writeBackConfigVersion` 方法体里真的有 `Files.write` 或 `Files.move`（真的落盘）
+  //
+  // 已知局限：`if (false) writeBackConfigVersion();` 这类死分支它看不出来。
+  // 源码级判据的通病，写在这里而不是等下次踩——真判据要跑一遍加载逻辑，超出本门禁"零依赖只读源码"的定位。
   const codeNoDefs = code.replace(
     /\b(?:private|protected|public)\b[^;{}()]{0,80}?\bwriteBackConfigVersion\s*\(/g,
     'METHOD_DEF(');
   const hasVersionKey = /\bCONFIG_VERSION_KEY\b/.test(code);
-  const hasMigrationCall = /writeBackConfigVersion\s*\(/.test(codeNoDefs)
-    || /\bset\s*\(\s*CONFIG_VERSION_KEY/.test(code);
-  const hasVersionMigration = hasVersionKey && hasMigrationCall;
+  // 入口必须**被调用**，不只是被定义。方法定义里也有 `handleConfigVersion(`，
+  // 先抹掉定义再找调用——攻击验证过：删掉 `load()` 里那句调用、留下方法定义时，
+  // 只按「存在」判断会让门禁照绿。
+  const codeNoEntries = code.replace(
+    /\b(?:private|protected|public)\b[^;{}()]{0,80}?\bhandleConfigVersion\s*\([^)]*\)\s*\{/g,
+    'ENTRY_DEF{');
+  const hasMigrationEntry = /\bhandleConfigVersion\s*\(/.test(codeNoEntries);
+  const callsWriteBack = /writeBackConfigVersion\s*\(/.test(codeNoDefs);
+  // writeBackConfigVersion 的方法体：从它的签名到下一个同级方法（用"缩进 4 的 private/public"近似）
+  const wbBody = (() => {
+    const i = code.search(/\bwriteBackConfigVersion\s*\(\s*\)\s*\{/);
+    if (i < 0) return '';
+    return code.slice(i, i + 4000);
+  })();
+  const actuallyPersists = /Files\.(?:write|move|copy)\s*\(/.test(wbBody);
+  const hasVersionMigration = hasVersionKey && hasMigrationEntry && callsWriteBack && actuallyPersists;
   rec('LOADER supports older config versions', hasVersionMigration,
-    hasVersionMigration
-      ? 'config-version migration present (constant + write-back call, comments excluded)'
-      : !hasVersionKey
-        ? 'CONFIG_VERSION_KEY is not referenced in ConfigManager code at all'
-        : 'CONFIG_VERSION_KEY exists but nothing writes it back -- an old file will not be '
-          + 'upgraded in place');
+    (hasVersionMigration
+      ? 'config-version migration present (entry + call + real disk write, comments excluded)'
+      : !hasVersionKey ? 'CONFIG_VERSION_KEY is not referenced in ConfigManager code at all'
+        : !hasMigrationEntry ? 'no handleConfigVersion entry point (it exists but is never called)'
+          : !callsWriteBack ? 'CONFIG_VERSION_KEY exists but nothing writes it back -- an old file will not be upgraded in place'
+            : 'writeBackConfigVersion is called but never touches the disk (no Files.write/move) -- '
+              + 'editing the in-memory config does not upgrade the file on disk')
+    + ' | source-level: a dead branch like `if (false) writeBackConfigVersion();` still passes,'
+    + ' and renaming the method is a false red. The real check would load a legacy YAML and'
+    + ' observe the write; that needs a server, which this gate deliberately does not require.');
 
-  // 未知键告警：同样先剥注释，再要求**真实的告警形状**而不是"提到过 unknown"。
+  // 未知键告警：同样先剥注释，再要求**这条特定的告警**，不是"某个名字里带 unknown 的字符串"。
   //
-  // 判据必须足够具体。第一版写成 `/(warning|severe|info)\s*\([^;]{0,400}?unknown/i`，
-  // 结果把 `config.check.alerts-unknown-after` 这种**无关的消息键**也算进去了——
-  // 把真正的 unknown-key 告警删掉，门禁照样 PASS（实测确认）。
+  // 这条判据改了两版，前两版都不成立，记录在这里防止再退回：
   //
-  // 真实形状是这样三段：
-  //     unknown.add(key);
-  //     plugin.getLogger().warning("[PerfScope] " + Messages.get("config.unknown.key", key));
+  //   第一版 `/[unknown-key|unknownKey|not a known|未知]/` —— 注释里命中就算过。
   //
-  // 所以认「一个 warning 调用 + 一条名字里带 unknown 的消息键」，且两者在同一行。
-  const unknownWarnLines = code.split('\n').filter((l) =>
-    /\b(?:warning|severe)\s*\(/.test(l) && /Messages\.get\s*\(\s*"[^"]*unknown[^"]*"/i.test(l));
-  const unknownWarn = unknownWarnLines.length > 0;
+  //   第二版 `/(warning|severe)\([^;]{0,400}?unknown/i` —— 命中 config.check.alerts-unknown-after
+  //   这种**无关**的消息键。
+  //
+  //   第三版「同一行有 warning( 且 Messages.get("...unknown...")」—— 只是把范围收窄了一点。
+  //   真实源码里命中 3 行，其中只有 1 行是 unknown-key 告警：
+  //     ConfigManager.java:841  Messages.get("config.unknown.key", key)          <- 真的
+  //     ConfigManager.java:968  Messages.get("config.worlds.unknown", ...)       <- 世界名非法
+  //     ConfigManager.java:1157 Messages.get("config.check.alerts-unknown-after") <- 阈值越界
+  //   后两行永远不会被删除，于是**删掉真正的告警后门禁仍然 PASS，还打印 "3 call site(s)"**
+  //   —— 比原来更危险：裸文本搜索一眼能看出是空的，这版伪装成了结构化判据。
+  //
+  // 现在认两件事同时成立：
+  //   1. 存在 `detectUnknownKeys` 这个方法（检测逻辑本身在）
+  //   2. 存在**精确键名** `config.unknown.key` 的告警调用（玩家真的会看到那条消息）
+  //
+  // 已知局限（写在这里而不是等下次踩）：这仍是源码级判据，`if (false)` 包住调用时它照样绿。
+  // 真正的判据应当是「喂一份含错键的 YAML，看加载器有没有产出 unknownKeys 并打 WARNING」——
+  // 那需要跑 YamlConfiguration，超出了本门禁"零依赖、只读源码"的定位。局限已知，不是遗漏。
+  const hasDetector = /\bdetectUnknownKeys\s*\(/.test(code);
+  const hasUnknownKeyMsg = /"config\.unknown\.key"/.test(code);
+  const unknownWarn = hasDetector && hasUnknownKeyMsg;
   rec('LOADER warns on unknown keys (does not throw)', unknownWarn,
-    unknownWarn
-      ? `unknown-key warning path present (comments excluded, ${unknownWarnLines.length} call site(s))`
-      : 'no code path logs an unknown-key warning -- a mistyped key is silently ignored');
+    (unknownWarn
+      ? 'unknown-key detection method + the exact config.unknown.key message are both present'
+      : !hasDetector
+        ? 'no detectUnknownKeys method -- a mistyped key would be silently ignored'
+        : 'detectUnknownKeys exists but never logs config.unknown.key -- the operator is not told')
+    + ' | source-level: a dead branch around the warning still passes. The real check would feed a'
+    + ' YAML with a bogus key and observe the WARNING; that needs a server, which this gate deliberately'
+    + ' does not require.');
 }
 
 /**

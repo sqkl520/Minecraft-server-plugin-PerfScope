@@ -32,16 +32,27 @@
    - 版本迁移：`CONFIG_VERSION_KEY` 存在 **且** 有 `writeBackConfigVersion(` 调用
    - 未知键告警：同一个 `warning`/`severe` 调用里出现 `Messages.get("...unknown...")`
 
-第二条踩过一个坑：第一版正则 `/(warning|severe)\s*\([^;]{0,400}?unknown/i` 把
-`config.check.alerts-unknown-after` 这种**无关的消息键**也算成了告警，于是删掉真正的
-unknown-key 告警后门禁照样 PASS（实测）。改成认「warning 调用 + 名字含 unknown 的消息键同现」才准。
+**修法经过三版，前两版都被独立验收推翻，一并记在这里防止退回：**
 
-还要排除**方法定义**：`private boolean writeBackConfigVersion() {` 里也有那个名字，
-只删调用留下定义时第一版判据仍通过（实测）。现在先把定义行抹成占位符再找调用。
+| 版本 | 判据 | 被推翻的理由 |
+|---|---|---|
+| v1 | `/CONFIG_VERSION_KEY\|config-version/` | 注释里命中就过 |
+| v2 | 剥注释 + `writeBackConfigVersion\s*\(` 调用 | 方法定义里也有那个名字；且或分支 `yaml.set(CONFIG_VERSION_KEY` 只改内存不落盘也算过 |
+| v2 | 同一行 `warning(` + `Messages.get("...unknown...")` | 真实源码里命中 **3 行**，只有 1 行是 unknown-key 告警。另外两行（`config.worlds.unknown`、`config.check.alerts-unknown-after`）永远不会被删，**于是删掉真正的告警后仍然 PASS，还打印「3 call site(s)」——比原来更危险，因为裸文本搜索一眼能看出是空的，这版伪装成了结构化判据** |
+| **v3（现版）** | 版本迁移：`CONFIG_VERSION_KEY` + `handleConfigVersion` **被调用**（排除定义）+ `writeBackConfigVersion(` 被调用 + 方法体里真的有 `Files.write/move`<br>未知键：`detectUnknownKeys` 方法存在 + **精确键名** `"config.unknown.key"` 存在 | —— |
 
-**双向验证**：
-- C5（删迁移代码留注释）→ 修复前 PASS，修复后 **FAIL**：`CONFIG_VERSION_KEY exists but nothing writes it back`
-- C6（删 unknown 告警）→ 修复前 PASS，修复后 **FAIL**：`no code path logs an unknown-key warning`
+**v3 的攻击验证（全部实测）**：
+
+| 攻击 | 结果 |
+|---|---|
+| 删掉真正的 unknown-key 告警循环（留另外两处无关的） | **FAIL** —— `detectUnknownKeys exists but never logs config.unknown.key` |
+| `yaml.set(CONFIG_VERSION_KEY, ...)` 只改内存不落盘 | **FAIL** —— `nothing writes it back` |
+| 删掉 `load()` 里对 `handleConfigVersion` 的调用、留方法定义 | **FAIL** —— `no handleConfigVersion entry point (it exists but is never called)` |
+
+**已知局限，写在输出里而不是等着下次踩**：这仍是源码级判据。`if (false) writeBackConfigVersion();`
+这类死分支它看不出来，重命名方法会造成假红。真判据应当「喂一份旧 YAML、观察它有没有真的写回磁盘」，
+那需要跑 `YamlConfiguration`，超出本门禁「零依赖、只读源码」的定位。**每次跑门禁，这两句局限都打印在
+PASS 行后面**，不会只在注释里。`
 
 ### Fixed — `check-readme-version` 缺 badge 时硬编码 PASS
 
