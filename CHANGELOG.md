@@ -12,6 +12,65 @@
 > 版本号只在用户明确说"更新版本号"时 bump（Patch = Bug 修复，Minor = 新功能）。
 > **本文件是开发流水账** —— 记"改了什么、为什么改、验证到哪一步、还欠什么"，不是给用户看的发布说明。
 
+## [Unreleased] — 2026-11-24 — 三个门禁的恒真断言与静默放行
+
+> 由门禁有效性审计（`.GATE-AUDIT.md`）发现，每一条都做了「改坏 → 该红 → 修好后能红」的双向验证。
+
+### Fixed — `check-config-compat` 两条判据是纯文本搜索，注释里的词也算数
+
+| 检查 | 旧判据 | 问题 |
+|---|---|---|
+| `LOADER supports older config versions` | `/CONFIG_VERSION_KEY\|config-version/` | 注释里出现这个词就通过 |
+| `LOADER warns on unknown keys` | `/unknown-key\|unknownKey\|not a known\|未知/` | 「未知」在源码中出现 17 次，绝大多数是注释 |
+
+**实测**：把 `handleConfigVersion` 的迁移代码整段删掉、只留注释里的 `config-version` → **PASS**。
+
+修法两步：
+
+1. **先剥注释**再匹配（保持长度，行号不漂）。
+2. **要求真实调用形状**，不是一个词：
+   - 版本迁移：`CONFIG_VERSION_KEY` 存在 **且** 有 `writeBackConfigVersion(` 调用
+   - 未知键告警：同一个 `warning`/`severe` 调用里出现 `Messages.get("...unknown...")`
+
+第二条踩过一个坑：第一版正则 `/(warning|severe)\s*\([^;]{0,400}?unknown/i` 把
+`config.check.alerts-unknown-after` 这种**无关的消息键**也算成了告警，于是删掉真正的
+unknown-key 告警后门禁照样 PASS（实测）。改成认「warning 调用 + 名字含 unknown 的消息键同现」才准。
+
+还要排除**方法定义**：`private boolean writeBackConfigVersion() {` 里也有那个名字，
+只删调用留下定义时第一版判据仍通过（实测）。现在先把定义行抹成占位符再找调用。
+
+**双向验证**：
+- C5（删迁移代码留注释）→ 修复前 PASS，修复后 **FAIL**：`CONFIG_VERSION_KEY exists but nothing writes it back`
+- C6（删 unknown 告警）→ 修复前 PASS，修复后 **FAIL**：`no code path logs an unknown-key warning`
+
+### Fixed — `check-readme-version` 缺 badge 时硬编码 PASS
+
+`results.push({ file: rel, mode: 'no-badge', ok: true })` —— 把整个版本 badge 删掉，门禁照绿。
+
+badge 是用户一眼确认「我下的是哪一版」的唯一入口，而挂着过期版本的 README 比没有 badge
+更容易误导，所以「没有」也不该放行。现在缺 badge 判 **FAIL** 并计入 `problems`。
+
+若将来某个 README 确实不该有版本（纯内部文档），在 `NO_BADGE_ALLOWED` 里**显式登记并写明理由**，
+而不是靠「忘了加就不检查」。目前该集合为空。
+
+**双向验证**：删掉两个 README 的 badge → 修复前 PASS，修复后 **FAIL**（两个文件都点名）。
+
+### Fixed — `check-bstats-buckets` 与 `check-reload-rebuild` 忽略 `--repo`
+
+两者都写死 `const REPO = path.resolve(HERE, '..')`，于是 `--repo /nonexistent` **exit 0**
+——与其他门禁「缺输入 exit 2」的约定不一致。在 CI 或换机器跑时，路径解析失败会被读成「通过」。
+
+现在都支持 `--repo <path>`，缺省仍回退脚本所在仓库。**实测**：`--repo /nonexistent` 现在两者都是 **exit 2**。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| 九门门禁 | 全 PASS |
+| 全量测试 | 1008 例 / 0 失败 |
+| C5 / C6 / R2 三个变异 | 修复前 PASS、修复后 **FAIL** |
+| R3 `--repo /nonexistent` | 修复前 exit 0、修复后 **exit 2** |
+
 ---
 
 

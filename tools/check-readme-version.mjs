@@ -42,6 +42,19 @@ const AS_JSON = argv.includes('--json');
 
 const README_FILES = ['README.md', 'README-EN.md'];
 
+/**
+ * 明确允许不挂版本 badge 的文件。
+ *
+ * <p>默认**不允许**：缺 badge 判 FAIL。理由是把「忘了加」和「有意不挂」分开——
+ * 前者会让 README 与 pom 脱钩而无人察觉，后者是一个需要写下来的决定。</p>
+ *
+ * <p>目前为空。若将来某个 README 确实不该有版本（比如纯内部文档），
+ * 在这里加文件名**并写明理由**，而不是让门禁悄悄跳过。</p>
+ */
+const NO_BADGE_ALLOWED = new Set([
+  // 例：'docs/INTERNAL.md',
+]);
+
 function read(p) {
   return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null;
 }
@@ -91,7 +104,29 @@ for (const rel of README_FILES) {
   }
 
   if (found.length === 0) {
-    results.push({ file: rel, mode: 'no-badge', ok: true });
+    // 缺 badge **不能**判 PASS。
+    //
+    // 这条曾经是 `{ mode: 'no-badge', ok: true }`——硬编码通过。后果很具体：
+    // 把整个版本 badge 删掉，门禁照绿，而 badge 是用户一眼确认"我下的是哪一版"的唯一入口。
+    // 一个挂着过期版本的 README 比没有 badge 更容易误导，所以"没有"也不该放行。
+    //
+    // 如果将来确实要允许某个 README 不挂 badge（比如纯内部文档），
+    // 应当在下面的 NO_BADGE_ALLOWED 里显式登记并写明理由，而不是靠"忘了加就不检查"。
+    if (NO_BADGE_ALLOWED.has(rel)) {
+      results.push({ file: rel, mode: 'no-badge-allowed', ok: true });
+      continue;
+    }
+    results.push({
+      file: rel,
+      mode: 'no-badge',
+      ok: false,
+      detail: `no version badge found in ${rel}; a README that names no version cannot be `
+        + `checked against pom.xml -- add ![Version](https://img.shields.io/badge/version-<ver>-<color>)`,
+    });
+    problems.push({
+      file: rel,
+      detail: 'no version badge at all -- nothing ties this README to pom.xml',
+    });
     continue;
   }
   const bad = found.filter((f) => f.plain !== ownVersion);
@@ -120,8 +155,10 @@ if (AS_JSON) {
   console.log(`  pom  : ${ownVersion}`);
   console.log('');
   for (const r of results) {
-    if (r.mode === 'no-badge') {
-      console.log(`  skip        ${r.file} (no version badge)`);
+    if (r.mode === 'no-badge-allowed') {
+      console.log(`  skip        ${r.file} (no badge, explicitly allow-listed)`);
+    } else if (r.mode === 'no-badge') {
+      console.log(`  FAIL        ${r.file} (no version badge at all)`);
     } else {
       const mark = r.ok ? 'ok   ' : 'FAIL ';
       console.log(`  ${mark}      ${r.file} badge=${r.found.join(', ')}`);

@@ -370,17 +370,93 @@ if (hyst == null) {
 // --------------------------------------------------------------------------------------
 // 同样不能 `if (cm)`：源文件读不到时这两条断言也必须被评估（并因此判 FAIL），
 // 否则删掉 ConfigManager.java 反而让门禁更绿。
+//
+// 而且这两条**都曾经是纯文本搜索**，于是恒真：
+//   - `/CONFIG_VERSION_KEY|config-version/` 在注释里命中就算通过
+//   - `/unknown-key|unknownKey|not a known|未知/` 里的「未知」在源码中出现 17 次，
+//     绝大多数是注释
+//
+// 实测：把 `handleConfigVersion` 的迁移代码整段删掉、只留注释里的 `config-version`，
+// 门禁报 PASS；把 `unknown-key` / `unknownKey` / `not a known` 全替换成随机串、
+// 留 17 处中文「未知」，也报 PASS。
+//
+// 修法：**先剥注释**，再要求「不只是一个词，而是有真实调用形状」。
 {
-  const hasVersionMigration = /CONFIG_VERSION_KEY|config-version/.test(cm);
+  const code = stripJavaComments(cm);
+
+  // 版本迁移：光有常量名不够，必须看到「读旧文件判断 + 写回」这一对动作。
+  //
+  // 判据要**排除方法定义**：`private boolean writeBackConfigVersion() {` 里也有那个名字。
+  // 只按 `writeBackConfigVersion\s*\(` 匹配的话，把唯一的**调用**删掉、留下定义，
+  // 门禁仍然通过（实测确认过这个形态）。
+  // 所以先把定义行抹成占位符，再找剩下的调用。
+  const codeNoDefs = code.replace(
+    /\b(?:private|protected|public)\b[^;{}()]{0,80}?\bwriteBackConfigVersion\s*\(/g,
+    'METHOD_DEF(');
+  const hasVersionKey = /\bCONFIG_VERSION_KEY\b/.test(code);
+  const hasMigrationCall = /writeBackConfigVersion\s*\(/.test(codeNoDefs)
+    || /\bset\s*\(\s*CONFIG_VERSION_KEY/.test(code);
+  const hasVersionMigration = hasVersionKey && hasMigrationCall;
   rec('LOADER supports older config versions', hasVersionMigration,
     hasVersionMigration
-      ? 'config-version migration present'
-      : 'no config-version handling found in ConfigManager -- an old file will not be upgraded in place');
+      ? 'config-version migration present (constant + write-back call, comments excluded)'
+      : !hasVersionKey
+        ? 'CONFIG_VERSION_KEY is not referenced in ConfigManager code at all'
+        : 'CONFIG_VERSION_KEY exists but nothing writes it back -- an old file will not be '
+          + 'upgraded in place');
 
-  // unknown keys must warn rather than throw
-  const warnsUnknown = /unknown-key|unknownKey|not a known|未知/.test(cm);
-  rec('LOADER warns on unknown keys (does not throw)', warnsUnknown,
-    warnsUnknown ? 'unknown-key warning path present' : 'no unknown-key warning path found');
+  // 未知键告警：同样先剥注释，再要求**真实的告警形状**而不是"提到过 unknown"。
+  //
+  // 判据必须足够具体。第一版写成 `/(warning|severe|info)\s*\([^;]{0,400}?unknown/i`，
+  // 结果把 `config.check.alerts-unknown-after` 这种**无关的消息键**也算进去了——
+  // 把真正的 unknown-key 告警删掉，门禁照样 PASS（实测确认）。
+  //
+  // 真实形状是这样三段：
+  //     unknown.add(key);
+  //     plugin.getLogger().warning("[PerfScope] " + Messages.get("config.unknown.key", key));
+  //
+  // 所以认「一个 warning 调用 + 一条名字里带 unknown 的消息键」，且两者在同一行。
+  const unknownWarnLines = code.split('\n').filter((l) =>
+    /\b(?:warning|severe)\s*\(/.test(l) && /Messages\.get\s*\(\s*"[^"]*unknown[^"]*"/i.test(l));
+  const unknownWarn = unknownWarnLines.length > 0;
+  rec('LOADER warns on unknown keys (does not throw)', unknownWarn,
+    unknownWarn
+      ? `unknown-key warning path present (comments excluded, ${unknownWarnLines.length} call site(s))`
+      : 'no code path logs an unknown-key warning -- a mistyped key is silently ignored');
+}
+
+/**
+ * 剥掉 Java 的 `//` 与 `/* *\/` 注释（保持长度不变，行号因此不漂）。
+ *
+ * <p>为什么不用 `tools/lib/java-strings.mjs` 里的 {@code stripComments}：那个函数
+ * 同时处理字符串与字符字面量，输出长度会变。本门禁只需要「注释里的词不算数」，
+ * 用一份保持长度的最小实现就够，也不会因为字符串处理差异产生意外。</p>
+ */
+function stripJavaComments(src) {
+  let out = '';
+  let i = 0;
+  const n = src.length;
+  while (i < n) {
+    const c = src[i];
+    const d = src[i + 1];
+    if (c === '/' && d === '/') {
+      while (i < n && src[i] !== '\n') { out += ' '; i++; }
+      continue;
+    }
+    if (c === '/' && d === '*') {
+      out += '  ';
+      i += 2;
+      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) {
+        out += src[i] === '\n' ? '\n' : ' ';
+        i++;
+      }
+      if (i < n) { out += '  '; i += 2; }
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
 }
 
 // --------------------------------------------------------------------------------------
