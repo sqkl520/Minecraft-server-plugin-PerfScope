@@ -260,6 +260,15 @@ class CrossServerIdLoadTimeValidationTest {
         assertFalse(idWarnings.stream().anyMatch(w -> w.contains("\"network.server-id\"")),
             "network.server-id 本身合法（留空），不该被点名——那会把服主引向错误的配置项。"
                 + "实际：" + idWarnings);
+        // 条数也要钉：只有 prometheus 一个键不合格，就该只有一条告警。
+        // 只写 anyMatch 的话，把同一行调用复制两份、或让它对同一键打两条，测试仍然绿——
+        // 而那在日志里就是重复刷屏（每次 reload 刷两遍）。
+        assertEquals(1, idWarnings.size(),
+            "只有一个键不合格时应当恰好一条告警，实际：" + idWarnings);
+        // 原值要回显：没有它，服主不知道"我到底写了什么才被判超长"。
+        // 实测过把模板里的 {1} 抹掉，只留键名+长度+上限时这条会红。
+        assertTrue(idWarnings.get(0).contains(over),
+            "告警必须回显用户写的原值，否则服主无法定位是哪一份配置，实际：" + idWarnings.get(0));
     }
 
     /**
@@ -316,5 +325,35 @@ class CrossServerIdLoadTimeValidationTest {
         List<String> idWarnings = serverIdWarnings(r.warnings());
         assertTrue(idWarnings.isEmpty(),
             "只有全小写 unknown 是保留字，Unknown 合法，实际：" + idWarnings);
+    }
+
+    /**
+     * 配置里**完全没有** {@code server-id} 这个键（而不是写成空串）时，同样不该告警。
+     *
+     * <p>两条路径在代码里走的是同一个判据（{@code raw == null || raw.isBlank()}），
+     * 但空串那条已被上一条用例覆盖，{@code null} 这条此前没人测。
+     * YAML 里不写这个键，加载后 {@code ConfigData} 的字段就是 {@code null}——
+     * 一个只判 {@code isBlank()} 不判 {@code null} 的实现会在这里 NPE，
+     * 而 NPE 发生在加载期会让整个配置加载失败，那比"少一条告警"严重得多。</p>
+     */
+    @Test
+    @DisplayName("加载期：完全没有 server-id 这个键时也不告警（且不崩）")
+    void missingKeysAreTreatedAsBlank(@TempDir Path dir) throws Exception {
+        // 刻意不写 server-id 这两行（baseYaml 里是写死的，这里手工构造）
+        String yaml = String.join("\n",
+            "config-version: 3",
+            "general:",
+            "  language: en",
+            "  update-interval: 20",
+            "network:",
+            "  enabled: false",
+            "  push-interval-seconds: 10",
+            "prometheus:",
+            "  enabled: false",
+            "");
+        Loaded r = load(dir, "pscope-csid-missing", yaml);
+
+        assertTrue(serverIdWarnings(r.warnings()).isEmpty(),
+            "缺键等同留空，是合法的回退，不该告警，实际：" + serverIdWarnings(r.warnings()));
     }
 }
