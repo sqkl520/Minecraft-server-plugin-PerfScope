@@ -794,6 +794,29 @@ const MUTATIONS = [
 const args = process.argv.slice(2);
 const only = args.includes('--only') ? args[args.indexOf('--only') + 1] : null;
 const listOnly = args.includes('--list');
+// --changed [<ref>]：只跑「这些源码文件被改过」的那些变异。
+// 不带值默认与 origin/main 比（CI 里就是本 PR 的改动面）。
+// 用途：全量 70 条要跑半个多小时，放进每个 PR 的 CI 会拖垮流水线；
+// 而「本 PR 改到的文件」对应的变异通常只有个位数，几分钟内能跑完。
+const changedIdx = args.indexOf('--changed');
+const changedRef = changedIdx >= 0 ? (args[changedIdx + 1] && !args[changedIdx + 1].startsWith('--')
+    ? args[changedIdx + 1] : 'origin/main') : null;
+
+/**
+ * 本 PR 改动过的源码文件（相对仓库根，`/` 分隔）。
+ *
+ * <p>用 `--diff-filter=d` 排除纯删除的文件：删掉的文件没有东西可变异。
+ * 失败时返回 {@code null} 并让调用方报错——「拿不到改动面」不能静默退化成「跑全量」
+ * （那会突然变成半小时），也不能退化成「跑 0 条」（那是假绿）。</p>
+ */
+function changedFiles() {
+    try {
+        const out = run(`git diff --name-only --diff-filter=d ${changedRef}...HEAD`);
+        return out.split('\n').map(s => s.trim()).filter(Boolean);
+    } catch (e) {
+        return null;
+    }
+}
 
 function run(cmd, opts = {}) {
     return execSync(cmd, { cwd: ROOT, encoding: 'utf8', stdio: 'pipe', ...opts });
@@ -827,17 +850,41 @@ function runTests(classes) {
 }
 
 function main() {
-    if (!gitClean()) {
+    // `--list` 只打印清单、不碰任何文件，因此不该被"工作树必须干净"拦住。
+    // 否则想先看看有哪些变异、再决定跑哪一条，还得先去 stash——那正好是它最该好用的时刻。
+    if (!listOnly && !gitClean()) {
         console.error('工作树不干净，拒绝运行。');
         console.error('变异验证会 git checkout 还原文件——未提交的改动会被一起抹掉。');
         console.error('请先提交或 stash。');
         process.exit(2);
     }
 
-    const targets = only ? MUTATIONS.filter(m => m.id === only) : MUTATIONS;
+    let targets = only ? MUTATIONS.filter(m => m.id === only) : MUTATIONS;
     if (targets.length === 0) {
         console.error(`没有编号为 ${only} 的变异`);
         process.exit(2);
+    }
+    // `--changed` 先过滤，`--list` 后展示：这样 `--changed --list` 能预览「本 PR 会跑哪几条」，
+    // 而单独的 `--list` 仍然列出全部（changedRef 为 null 时跳过过滤）。
+    if (changedRef) {
+        const files = changedFiles();
+        if (files === null) {
+            // 拿不到改动面时**必须报错退出**，不能静默跑全量（半小时）也不能跑 0 条（假绿）。
+            console.error(`无法算出改动面（git diff --name-only --diff-filter=d ${changedRef}...HEAD 失败）。`);
+            console.error('检查 ref 是否存在：git rev-parse --verify ' + changedRef);
+            process.exit(2);
+        }
+        const touched = new Set(files);
+        const before = targets.length;
+        targets = targets.filter(m => touched.has(m.file));
+        console.log(`--changed ${changedRef}: 改动 ${touched.size} 个文件，`
+            + `命中 ${targets.length} / ${before} 条变异`);
+        if (targets.length === 0) {
+            // 这不是失败：本 PR 可能确实没碰任何"有变异覆盖"的文件。
+            // 但要把话说清楚，否则读日志的人分不清"没有"和"没跑"。
+            console.log('本 PR 没有改到任何被变异覆盖的文件——这一项无事可做（不是通过，也不是失败）。');
+            return;
+        }
     }
     if (listOnly) {
         for (const m of targets) {
