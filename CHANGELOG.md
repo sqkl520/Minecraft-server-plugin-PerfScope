@@ -12,6 +12,76 @@
 > 版本号只在用户明确说"更新版本号"时 bump（Patch = Bug 修复，Minor = 新功能）。
 > **本文件是开发流水账** —— 记"改了什么、为什么改、验证到哪一步、还欠什么"，不是给用户看的发布说明。
 
+## [Unreleased] — 2026-11-24 — 三个门禁的恒真断言与静默放行
+
+> 由门禁有效性审计（`.GATE-AUDIT.md`）发现，每一条都做了「改坏 → 该红 → 修好后能红」的双向验证。
+
+### Fixed — `check-config-compat` 两条判据是纯文本搜索，注释里的词也算数
+
+| 检查 | 旧判据 | 问题 |
+|---|---|---|
+| `LOADER supports older config versions` | `/CONFIG_VERSION_KEY\|config-version/` | 注释里出现这个词就通过 |
+| `LOADER warns on unknown keys` | `/unknown-key\|unknownKey\|not a known\|未知/` | 「未知」在源码中出现 17 次，绝大多数是注释 |
+
+**实测**：把 `handleConfigVersion` 的迁移代码整段删掉、只留注释里的 `config-version` → **PASS**。
+
+修法两步：
+
+1. **先剥注释**再匹配（保持长度，行号不漂）。
+2. **要求真实调用形状**，不是一个词：
+   - 版本迁移：`CONFIG_VERSION_KEY` 存在 **且** 有 `writeBackConfigVersion(` 调用
+   - 未知键告警：同一个 `warning`/`severe` 调用里出现 `Messages.get("...unknown...")`
+
+**修法经过三版，前两版都被独立验收推翻，一并记在这里防止退回：**
+
+| 版本 | 判据 | 被推翻的理由 |
+|---|---|---|
+| v1 | `/CONFIG_VERSION_KEY\|config-version/` | 注释里命中就过 |
+| v2 | 剥注释 + `writeBackConfigVersion\s*\(` 调用 | 方法定义里也有那个名字；且或分支 `yaml.set(CONFIG_VERSION_KEY` 只改内存不落盘也算过 |
+| v2 | 同一行 `warning(` + `Messages.get("...unknown...")` | 真实源码里命中 **3 行**，只有 1 行是 unknown-key 告警。另外两行（`config.worlds.unknown`、`config.check.alerts-unknown-after`）永远不会被删，**于是删掉真正的告警后仍然 PASS，还打印「3 call site(s)」——比原来更危险，因为裸文本搜索一眼能看出是空的，这版伪装成了结构化判据** |
+| **v3（现版）** | 版本迁移：`CONFIG_VERSION_KEY` + `handleConfigVersion` **被调用**（排除定义）+ `writeBackConfigVersion(` 被调用 + 方法体里真的有 `Files.write/move`<br>未知键：`detectUnknownKeys` 方法存在 + **精确键名** `"config.unknown.key"` 存在 | —— |
+
+**v3 的攻击验证（全部实测）**：
+
+| 攻击 | 结果 |
+|---|---|
+| 删掉真正的 unknown-key 告警循环（留另外两处无关的） | **FAIL** —— `detectUnknownKeys exists but never logs config.unknown.key` |
+| `yaml.set(CONFIG_VERSION_KEY, ...)` 只改内存不落盘 | **FAIL** —— `nothing writes it back` |
+| 删掉 `load()` 里对 `handleConfigVersion` 的调用、留方法定义 | **FAIL** —— `no handleConfigVersion entry point (it exists but is never called)` |
+
+**已知局限，写在输出里而不是等着下次踩**：这仍是源码级判据。`if (false) writeBackConfigVersion();`
+这类死分支它看不出来，重命名方法会造成假红。真判据应当「喂一份旧 YAML、观察它有没有真的写回磁盘」，
+那需要跑 `YamlConfiguration`，超出本门禁「零依赖、只读源码」的定位。**每次跑门禁，这两句局限都打印在
+PASS 行后面**，不会只在注释里。`
+
+### Fixed — `check-readme-version` 缺 badge 时硬编码 PASS
+
+`results.push({ file: rel, mode: 'no-badge', ok: true })` —— 把整个版本 badge 删掉，门禁照绿。
+
+badge 是用户一眼确认「我下的是哪一版」的唯一入口，而挂着过期版本的 README 比没有 badge
+更容易误导，所以「没有」也不该放行。现在缺 badge 判 **FAIL** 并计入 `problems`。
+
+若将来某个 README 确实不该有版本（纯内部文档），在 `NO_BADGE_ALLOWED` 里**显式登记并写明理由**，
+而不是靠「忘了加就不检查」。目前该集合为空。
+
+**双向验证**：删掉两个 README 的 badge → 修复前 PASS，修复后 **FAIL**（两个文件都点名）。
+
+### Fixed — `check-bstats-buckets` 与 `check-reload-rebuild` 忽略 `--repo`
+
+两者都写死 `const REPO = path.resolve(HERE, '..')`，于是 `--repo /nonexistent` **exit 0**
+——与其他门禁「缺输入 exit 2」的约定不一致。在 CI 或换机器跑时，路径解析失败会被读成「通过」。
+
+现在都支持 `--repo <path>`，缺省仍回退脚本所在仓库。**实测**：`--repo /nonexistent` 现在两者都是 **exit 2**。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| 九门门禁 | 全 PASS |
+| 全量测试 | 1008 例 / 0 失败 |
+| C5 / C6 / R2 三个变异 | 修复前 PASS、修复后 **FAIL** |
+| R3 `--repo /nonexistent` | 修复前 exit 0、修复后 **exit 2** |
+
 ---
 
 

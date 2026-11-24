@@ -67,7 +67,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const REPO = path.resolve(HERE, '..');
+const argv = process.argv.slice(2);
+/** 读 --repo <path>。缺省回退到本仓库根（脚本所在的上一级）。 */
+const argOf = (name, dflt) => {
+  const i = argv.indexOf(name);
+  return i >= 0 && i + 1 < argv.length ? argv[i + 1] : dflt;
+};
+const REPO = path.resolve(argOf('--repo', path.join(HERE, '..')));
 const TARGET = path.join(REPO, 'src', 'main', 'java', 'cn', 'perfscope', 'PerfScope.java');
 
 /**

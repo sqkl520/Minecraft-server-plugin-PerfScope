@@ -370,17 +370,138 @@ if (hyst == null) {
 // --------------------------------------------------------------------------------------
 // 同样不能 `if (cm)`：源文件读不到时这两条断言也必须被评估（并因此判 FAIL），
 // 否则删掉 ConfigManager.java 反而让门禁更绿。
+//
+// 而且这两条**都曾经是纯文本搜索**，于是恒真：
+//   - `/CONFIG_VERSION_KEY|config-version/` 在注释里命中就算通过
+//   - `/unknown-key|unknownKey|not a known|未知/` 里的「未知」在源码中出现 17 次，
+//     绝大多数是注释
+//
+// 实测：把 `handleConfigVersion` 的迁移代码整段删掉、只留注释里的 `config-version`，
+// 门禁报 PASS；把 `unknown-key` / `unknownKey` / `not a known` 全替换成随机串、
+// 留 17 处中文「未知」，也报 PASS。
+//
+// 修法：**先剥注释**，再要求「不只是一个词，而是有真实调用形状」。
 {
-  const hasVersionMigration = /CONFIG_VERSION_KEY|config-version/.test(cm);
-  rec('LOADER supports older config versions', hasVersionMigration,
-    hasVersionMigration
-      ? 'config-version migration present'
-      : 'no config-version handling found in ConfigManager -- an old file will not be upgraded in place');
+  const code = stripJavaComments(cm);
 
-  // unknown keys must warn rather than throw
-  const warnsUnknown = /unknown-key|unknownKey|not a known|未知/.test(cm);
-  rec('LOADER warns on unknown keys (does not throw)', warnsUnknown,
-    warnsUnknown ? 'unknown-key warning path present' : 'no unknown-key warning path found');
+  // 版本迁移：光有常量名不够，必须看到「真的写到磁盘」。
+  //
+  // 这条判据也改过两版：
+  //   第一版 `/CONFIG_VERSION_KEY|config-version/` —— 注释里命中就算过。
+  //   第二版 `writeBackConfigVersion\s*\(` 或 `yaml.set(CONFIG_VERSION_KEY` —— 有两个洞：
+  //     · 只删调用、留下定义时仍 PASS（`private boolean writeBackConfigVersion() {` 里就有那个名字）
+  //     · `yaml.set(CONFIG_VERSION_KEY, 1)` 只改内存对象、从不落盘，语义上是错的，
+  //       但第二个或分支会因此永远变绿 —— 相当于给这条判据开后门
+  //
+  // 现在认三件事同时成立：
+  //   1. 有 `handleConfigVersion`（迁移逻辑所在的入口）
+  //   2. 调用了 `writeBackConfigVersion(`（先抹掉方法定义，避免定义当调用）
+  //   3. `writeBackConfigVersion` 方法体里真的有 `Files.write` 或 `Files.move`（真的落盘）
+  //
+  // 已知局限：`if (false) writeBackConfigVersion();` 这类死分支它看不出来。
+  // 源码级判据的通病，写在这里而不是等下次踩——真判据要跑一遍加载逻辑，超出本门禁"零依赖只读源码"的定位。
+  const codeNoDefs = code.replace(
+    /\b(?:private|protected|public)\b[^;{}()]{0,80}?\bwriteBackConfigVersion\s*\(/g,
+    'METHOD_DEF(');
+  const hasVersionKey = /\bCONFIG_VERSION_KEY\b/.test(code);
+  // 入口必须**被调用**，不只是被定义。方法定义里也有 `handleConfigVersion(`，
+  // 先抹掉定义再找调用——攻击验证过：删掉 `load()` 里那句调用、留下方法定义时，
+  // 只按「存在」判断会让门禁照绿。
+  const codeNoEntries = code.replace(
+    /\b(?:private|protected|public)\b[^;{}()]{0,80}?\bhandleConfigVersion\s*\([^)]*\)\s*\{/g,
+    'ENTRY_DEF{');
+  const hasMigrationEntry = /\bhandleConfigVersion\s*\(/.test(codeNoEntries);
+  const callsWriteBack = /writeBackConfigVersion\s*\(/.test(codeNoDefs);
+  // writeBackConfigVersion 的方法体：从它的签名到下一个同级方法（用"缩进 4 的 private/public"近似）
+  const wbBody = (() => {
+    const i = code.search(/\bwriteBackConfigVersion\s*\(\s*\)\s*\{/);
+    if (i < 0) return '';
+    return code.slice(i, i + 4000);
+  })();
+  const actuallyPersists = /Files\.(?:write|move|copy)\s*\(/.test(wbBody);
+  const hasVersionMigration = hasVersionKey && hasMigrationEntry && callsWriteBack && actuallyPersists;
+  rec('LOADER supports older config versions', hasVersionMigration,
+    (hasVersionMigration
+      ? 'config-version migration present (entry + call + real disk write, comments excluded)'
+      : !hasVersionKey ? 'CONFIG_VERSION_KEY is not referenced in ConfigManager code at all'
+        : !hasMigrationEntry ? 'no handleConfigVersion entry point (it exists but is never called)'
+          : !callsWriteBack ? 'CONFIG_VERSION_KEY exists but nothing writes it back -- an old file will not be upgraded in place'
+            : 'writeBackConfigVersion is called but never touches the disk (no Files.write/move) -- '
+              + 'editing the in-memory config does not upgrade the file on disk')
+    + ' | source-level: a dead branch like `if (false) writeBackConfigVersion();` still passes,'
+    + ' and renaming the method is a false red. The real check would load a legacy YAML and'
+    + ' observe the write; that needs a server, which this gate deliberately does not require.');
+
+  // 未知键告警：同样先剥注释，再要求**这条特定的告警**，不是"某个名字里带 unknown 的字符串"。
+  //
+  // 这条判据改了两版，前两版都不成立，记录在这里防止再退回：
+  //
+  //   第一版 `/[unknown-key|unknownKey|not a known|未知]/` —— 注释里命中就算过。
+  //
+  //   第二版 `/(warning|severe)\([^;]{0,400}?unknown/i` —— 命中 config.check.alerts-unknown-after
+  //   这种**无关**的消息键。
+  //
+  //   第三版「同一行有 warning( 且 Messages.get("...unknown...")」—— 只是把范围收窄了一点。
+  //   真实源码里命中 3 行，其中只有 1 行是 unknown-key 告警：
+  //     ConfigManager.java:841  Messages.get("config.unknown.key", key)          <- 真的
+  //     ConfigManager.java:968  Messages.get("config.worlds.unknown", ...)       <- 世界名非法
+  //     ConfigManager.java:1157 Messages.get("config.check.alerts-unknown-after") <- 阈值越界
+  //   后两行永远不会被删除，于是**删掉真正的告警后门禁仍然 PASS，还打印 "3 call site(s)"**
+  //   —— 比原来更危险：裸文本搜索一眼能看出是空的，这版伪装成了结构化判据。
+  //
+  // 现在认两件事同时成立：
+  //   1. 存在 `detectUnknownKeys` 这个方法（检测逻辑本身在）
+  //   2. 存在**精确键名** `config.unknown.key` 的告警调用（玩家真的会看到那条消息）
+  //
+  // 已知局限（写在这里而不是等下次踩）：这仍是源码级判据，`if (false)` 包住调用时它照样绿。
+  // 真正的判据应当是「喂一份含错键的 YAML，看加载器有没有产出 unknownKeys 并打 WARNING」——
+  // 那需要跑 YamlConfiguration，超出了本门禁"零依赖、只读源码"的定位。局限已知，不是遗漏。
+  const hasDetector = /\bdetectUnknownKeys\s*\(/.test(code);
+  const hasUnknownKeyMsg = /"config\.unknown\.key"/.test(code);
+  const unknownWarn = hasDetector && hasUnknownKeyMsg;
+  rec('LOADER warns on unknown keys (does not throw)', unknownWarn,
+    (unknownWarn
+      ? 'unknown-key detection method + the exact config.unknown.key message are both present'
+      : !hasDetector
+        ? 'no detectUnknownKeys method -- a mistyped key would be silently ignored'
+        : 'detectUnknownKeys exists but never logs config.unknown.key -- the operator is not told')
+    + ' | source-level: a dead branch around the warning still passes. The real check would feed a'
+    + ' YAML with a bogus key and observe the WARNING; that needs a server, which this gate deliberately'
+    + ' does not require.');
+}
+
+/**
+ * 剥掉 Java 的 `//` 与 `/* *\/` 注释（保持长度不变，行号因此不漂）。
+ *
+ * <p>为什么不用 `tools/lib/java-strings.mjs` 里的 {@code stripComments}：那个函数
+ * 同时处理字符串与字符字面量，输出长度会变。本门禁只需要「注释里的词不算数」，
+ * 用一份保持长度的最小实现就够，也不会因为字符串处理差异产生意外。</p>
+ */
+function stripJavaComments(src) {
+  let out = '';
+  let i = 0;
+  const n = src.length;
+  while (i < n) {
+    const c = src[i];
+    const d = src[i + 1];
+    if (c === '/' && d === '/') {
+      while (i < n && src[i] !== '\n') { out += ' '; i++; }
+      continue;
+    }
+    if (c === '/' && d === '*') {
+      out += '  ';
+      i += 2;
+      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) {
+        out += src[i] === '\n' ? '\n' : ' ';
+        i++;
+      }
+      if (i < n) { out += '  '; i += 2; }
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
 }
 
 // --------------------------------------------------------------------------------------
